@@ -9,6 +9,7 @@
 #include "openmc/endf.h"
 #include "openmc/error.h"
 #include "openmc/ifp.h"
+#include "openmc/clutch.h"
 #include "openmc/material.h"
 #include "openmc/math_functions.h"
 #include "openmc/message_passing.h"
@@ -237,6 +238,10 @@ void create_fission_sites(Particle& p, int i_nuclide, const Reaction& rx)
       // Iterated Fission Probability (IFP) method
       if (settings::ifp_on) {
         ifp(p, site, idx);
+      }
+      //CLUTCH TEST
+      if (settings::clutch_on) {
+        void CLUTCH_TEST();
       }
     } else {
       p.secondary_bank().push_back(site);

@@ -320,7 +320,8 @@ enum TallyScore {
   SCORE_PULSE_HEIGHT = -17,       // pulse-height
   SCORE_IFP_TIME_NUM = -18,       // IFP lifetime numerator
   SCORE_IFP_BETA_NUM = -19,       // IFP delayed fraction numerator
-  SCORE_IFP_DENOM = -20           // IFP common denominator
+  SCORE_IFP_DENOM = -20,          // IFP common denominator
+  SCORE_CLUTCH_TEST = -21         // CLUTCH TEST 
 };
 
 // Global tally parameters
