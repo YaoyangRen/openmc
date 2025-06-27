@@ -14,6 +14,6 @@ namespace openmc {
 
 void CLUTCH_TEST()
 {
-  std::cout << "CLUTCH_TEST";
+  //
 }
 }

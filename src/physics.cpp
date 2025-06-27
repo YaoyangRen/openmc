@@ -241,7 +241,7 @@ void create_fission_sites(Particle& p, int i_nuclide, const Reaction& rx)
       }
       //CLUTCH TEST
       if (settings::clutch_on) {
-        void CLUTCH_TEST();
+        CLUTCH_TEST();
       }
     } else {
       p.secondary_bank().push_back(site);

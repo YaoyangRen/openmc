@@ -990,6 +990,11 @@ void score_general_ce_nonanalog(Particle& p, int i_tally, int start_index,
         }
       }
       break;
+    case SCORE_CLUTCH_TEST:
+      if (settings::clutch_on) {
+        score = p.wgt_last();
+      }
+      break;
 
     case N_2N:
     case N_3N:

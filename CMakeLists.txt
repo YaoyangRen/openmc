@@ -440,7 +440,9 @@ list(APPEND libopenmc_SOURCES
   src/weight_windows.cpp
   src/wmp.cpp
   src/xml_interface.cpp
-  src/xsdata.cpp)
+  src/xsdata.cpp
+  # ryy add
+  src/clutch.cpp)
 
 # Add bundled external dependencies
 list(APPEND libopenmc_SOURCES
