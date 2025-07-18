@@ -321,7 +321,8 @@ enum TallyScore {
   SCORE_IFP_TIME_NUM = -18,       // IFP lifetime numerator
   SCORE_IFP_BETA_NUM = -19,       // IFP delayed fraction numerator
   SCORE_IFP_DENOM = -20,          // IFP common denominator
-  SCORE_CLUTCH_TEST = -21         // CLUTCH TEST 
+  SCORE_CLUTCH_TEST = -21,        // CLUTCH TEST 
+  SCORE_GREENFUNTION = -22        // Greenfunction G(r)
 };
 
 // Global tally parameters

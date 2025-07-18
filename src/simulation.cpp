@@ -27,6 +27,8 @@
 #include "openmc/track_output.h"
 #include "openmc/weight_windows.h"
 
+#include "GreenFunctionMesh.h"
+
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -321,6 +323,8 @@ const RegularMesh* ufs_mesh {nullptr};
 vector<double> k_generation;
 vector<int64_t> work_index;
 
+std::unique_ptr<GreenFunctionMesh> green_function_mesh;
+
 } // namespace simulation
 
 //==============================================================================
@@ -561,6 +565,9 @@ void finalize_generation()
 
 void initialize_history(Particle& p, int64_t index_source)
 {
+  if (!simulation::green_function_mesh) {
+    simulation::green_function_mesh = std::make_unique<GreenFunctionMesh>(1.0); // 1cm分辨率
+  }
   // set defaults
   if (settings::run_mode == RunMode::EIGENVALUE) {
     // set defaults for eigenvalue simulations from primary bank

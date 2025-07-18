@@ -206,6 +206,7 @@ std::unordered_map<int, std::string> REACTION_NAME_MAP {
   {SCORE_IFP_BETA_NUM, "ifp-beta-numerator"},
   {SCORE_IFP_DENOM, "ifp-denominator"},
   {SCORE_CLUTCH_TEST,"clutch-test"},
+  {SCORE_GREENFUNTION,"greenfunction"}
   // Normal ENDF-based reactions
   {TOTAL_XS, "(n,total)"},
   {ELASTIC, "(n,elastic)"},

@@ -8,7 +8,10 @@
 #include "openmc/particle.h"
 #include "openmc/vector.h"
 
+#include "greenfuction_mesh.h"
+
 #include <cstdint>
+#include <memory>
 
 namespace openmc {
 
@@ -47,6 +50,8 @@ extern const RegularMesh* ufs_mesh;
 
 extern vector<double> k_generation;
 extern vector<int64_t> work_index;
+
+extern std::unique_ptr<GreenFunctionMesh> green_function_mesh;  // Greenfunction mesh
 
 } // namespace simulation
 

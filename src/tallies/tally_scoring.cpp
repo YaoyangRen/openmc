@@ -990,9 +990,26 @@ void score_general_ce_nonanalog(Particle& p, int i_tally, int start_index,
         }
       }
       break;
+
     case SCORE_CLUTCH_TEST:
       if (settings::clutch_on) {
         score = p.wgt_last();
+      }
+      break;
+
+    case SCORE_GREENFUNTION:
+      if (settings::clutch_on) {
+        if (p.type == Type::neutron && (p.fission())){
+          double contrubution = 0.0;
+          if (p.neutron_xs(p.event_nuclide()).total > 0) {
+            contribution = p.wgt_last() * p.neutron_xs(p.event_nuclide()).nu_fission *
+                           p.neutron_xs(p.event_nuclide()).fission/ 
+                           p.neutron_xs(p.event_nuclide()).total;
+          }
+          if (simulation::green_function_mesh) {
+            simulation::green_function_mesh->accumulate(p.r,contrubution);
+          }
+        }
       }
       break;
 

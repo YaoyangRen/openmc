@@ -184,7 +184,7 @@ Tally::Tally(pugi::xml_node node)
   if (!settings::clutch_on) {
     bool has_clutch_score = false;
     for (int score : scores_) {
-      if (score == SCORE_CLUTCH_TEST) {
+      if (score == SCORE_CLUTCH_TEST || score == SCORE_GREENFUNTION) {
         has_clutch_score =true;
         break;
       }
@@ -669,6 +669,10 @@ void Tally::set_scores(const vector<std::string>& scores)
     case SCORE_IFP_TIME_NUM:
     case SCORE_IFP_BETA_NUM:
     case SCORE_IFP_DENOM:
+      estimator_ = TallyEstimator::COLLISION;
+      break;
+    case SCORE_CLUTCH_TEST:
+    case SCORE_GREENFUNTION:
       estimator_ = TallyEstimator::COLLISION;
       break;
     }
