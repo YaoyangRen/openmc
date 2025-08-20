@@ -999,15 +999,16 @@ void score_general_ce_nonanalog(Particle& p, int i_tally, int start_index,
 
     case SCORE_GREENFUNTION:
       if (settings::clutch_on) {
-        if (p.type == Type::neutron && (p.fission())){
-          double contrubution = 0.0;
+        if (p.type() == Type::neutron && (p.fission())) {
+          double contribution = 0.0;
           if (p.neutron_xs(p.event_nuclide()).total > 0) {
-            contribution = p.wgt_last() * p.neutron_xs(p.event_nuclide()).nu_fission *
-                           p.neutron_xs(p.event_nuclide()).fission/ 
-                           p.neutron_xs(p.event_nuclide()).total;
+            contribution =
+              p.wgt_last() * p.neutron_xs(p.event_nuclide()).nu_fission *
+              p.neutron_xs(p.event_nuclide()).fission /
+              p.neutron_xs(p.event_nuclide()).total; // TODO 是否需要除sigma_t
           }
           if (simulation::green_function_mesh) {
-            simulation::green_function_mesh->accumulate(p.r,contrubution);
+            simulation::green_function_mesh->accumulate(p.r(), contribution);
           }
         }
       }
@@ -2606,7 +2607,7 @@ void score_surface_tally(Particle& p, const vector<int>& tallies)
       // for a further scoring function.
       double score = current * filter_weight;
       for (auto score_index = 0; score_index < tally.scores_.size();
-           ++score_index) {
+        ++score_index) {
 #pragma omp atomic
         tally.results_(filter_index, score_index, TallyResult::VALUE) += score;
       }
@@ -2681,7 +2682,7 @@ void score_pulse_height_tally(Particle& p, const vector<int>& tallies)
 
             // Loop over scores.
             for (auto score_index = 0; score_index < tally.scores_.size();
-                 ++score_index) {
+              ++score_index) {
 #pragma omp atomic
               tally.results_(filter_index, score_index, TallyResult::VALUE) +=
                 filter_weight;

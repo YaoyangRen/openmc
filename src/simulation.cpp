@@ -27,7 +27,7 @@
 #include "openmc/track_output.h"
 #include "openmc/weight_windows.h"
 
-#include "GreenFunctionMesh.h"
+#include "openmc/greenfunction_mesh.h"
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -392,6 +392,12 @@ void initialize_batch()
     }
   }
 
+  // intialize greenfunction mesh
+  if (!simulation::green_function_mesh) {
+    simulation::green_function_mesh =
+      std::make_unique<GreenFunctionMesh>(1.0); // 1cm分辨率
+  }
+
   // Add user tallies to active tallies list
   setup_active_tallies();
 }
@@ -494,6 +500,13 @@ void finalize_batch()
       ++simulation::ssw_current_file;
     }
   }
+
+  // finalize greenfunction
+  if (settings::clutch_on && simulation::green_function_mesh) {
+    std::string filename =
+      fmt::format("greenfunction_batch_{}.h5", simulation::current_batch);
+    simulation::green_function_mesh->finalize_greenfunction_mesh(filename);
+  }
 }
 
 void initialize_generation()
@@ -565,9 +578,6 @@ void finalize_generation()
 
 void initialize_history(Particle& p, int64_t index_source)
 {
-  if (!simulation::green_function_mesh) {
-    simulation::green_function_mesh = std::make_unique<GreenFunctionMesh>(1.0); // 1cm分辨率
-  }
   // set defaults
   if (settings::run_mode == RunMode::EIGENVALUE) {
     // set defaults for eigenvalue simulations from primary bank
