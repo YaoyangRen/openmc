@@ -1006,7 +1006,6 @@ void score_general_ce_nonanalog(Particle& p, int i_tally, int start_index,
           contribution = p.wgt_last() *
                          p.neutron_xs(p.event_nuclide()).nu_fission *
                          p.neutron_xs(p.event_nuclide()).fission;
-          // p.neutron_xs(p.event_nuclide()).total; // TODO 是否需要除sigma_t
         }
         if (simulation::green_function_mesh) {
           simulation::green_function_mesh->accumulate(p.r(), contribution);
