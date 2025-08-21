@@ -1,7 +1,9 @@
 #include "openmc/greenfunction_mesh.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint> // for int64_t
+#include <iostream>
 #include <string>
 
 #include "openmc/capi.h"
@@ -15,18 +17,17 @@
 
 namespace openmc {
 
-GreenFunctionMesh::GreenFunctionMesh(double resolution)
-  : pitch_(resolution), inv_pitch_(1.0 / resolution)
+GreenFunctionMesh::GreenFunctionMesh(double resolution, int max_batches)
+  : pitch_(resolution), inv_pitch_(1.0 / resolution), current_batch_id_(-1),
+    max_batches_(max_batches)
 {
-  // 调用 C API 获取全局边界
-  double llc[3]; // lower left corner
-  double urc[3]; // upper right corner
-  int err = openmc_global_bounding_box(llc, urc);
-  if (err != 0) {
-    throw std::runtime_error("Failed to get global bounding box.");
-  }
+  // std::cout << "=== GreenFunctionMesh constructor called with resolution: "
+  //           << resolution << ", max_batches: " << max_batches
+  //           << " ===" << std::endl;
 
-  // 设置原点
+  // 手动设定边界
+  double llc[3] = {-34.86, -34.86, -54.76};
+  double urc[3] = {34.86, 34.86, 35.16};
   origin_ = {llc[0], llc[1], llc[2]};
 
   // 计算网格尺寸
@@ -34,20 +35,26 @@ GreenFunctionMesh::GreenFunctionMesh(double resolution)
   double dy = urc[1] - llc[1];
   double dz = urc[2] - llc[2];
 
-  // 确保每个维度至少有一个网格单元
-  shape_[0] = std::max(1, static_cast<int>(std::ceil(dx / pitch_)) + 1);
-  shape_[1] = std::max(1, static_cast<int>(std::ceil(dy / pitch_)) + 1);
-  shape_[2] = std::max(1, static_cast<int>(std::ceil(dz / pitch_)) + 1);
+  shape_[0] = std::max(1, static_cast<int>(std::ceil(dx / pitch_)));
+  shape_[1] = std::max(1, static_cast<int>(std::ceil(dy / pitch_)));
+  shape_[2] = std::max(1, static_cast<int>(std::ceil(dz / pitch_)));
 
-  // 初始化数据数组
-  data_.resize(shape_[0] * shape_[1] * shape_[2], 0.0);
+  size_t spatial_size = static_cast<size_t>(shape_[0]) * shape_[1] * shape_[2];
+
+  // 初始化batch数据存储
+  batch_data_.reserve(max_batches_);
+  current_batch_data_.resize(spatial_size, 0.0);
+
+  // std::cout << "Grid shape: [" << shape_[0] << ", " << shape_[1] << ", "
+  //           << shape_[2] << "]" << std::endl;
+  // std::cout << "Spatial size: " << spatial_size
+  //           << ", Max batches: " << max_batches_ << std::endl;
 }
 
 void GreenFunctionMesh::accumulate(const Position& r, double contribution)
 {
-  constexpr double eps = 1.0e-10; // 添加容差值
+  constexpr double eps = 1.0e-10;
 
-  // 计算网格索引，使用预计算的inv_pitch_提高性能
   int ix = static_cast<int>(std::floor((r.x - origin_[0] + eps) * inv_pitch_));
   int iy = static_cast<int>(std::floor((r.y - origin_[1] + eps) * inv_pitch_));
   int iz = static_cast<int>(std::floor((r.z - origin_[2] + eps) * inv_pitch_));
@@ -55,43 +62,112 @@ void GreenFunctionMesh::accumulate(const Position& r, double contribution)
   // 边界检查
   if (ix >= 0 && ix < shape_[0] && iy >= 0 && iy < shape_[1] && iz >= 0 &&
       iz < shape_[2]) {
-    // 累积贡献值（线程安全）
-    int index = ix + shape_[0] * (iy + shape_[1] * iz);
-#pragma omp atomic
-    data_[index] += contribution;
+    size_t index = static_cast<size_t>(ix) +
+                   static_cast<size_t>(shape_[0]) *
+                     (static_cast<size_t>(iy) + static_cast<size_t>(shape_[1]) *
+                                                  static_cast<size_t>(iz));
 
-    // 记录总贡献数
+    // 向当前batch数据累积
+#pragma omp atomic
+    current_batch_data_[index] += contribution;
+
     total_contributions_++;
   } else {
-    // 记录被丢弃的贡献数
     dropped_contributions_++;
   }
 }
 
-void GreenFunctionMesh::finalize_greenfunction_mesh(const std::string& filename)
+void GreenFunctionMesh::finalize_greenfunction_mesh(const int batch_id)
 {
+  // std::cout << "=== FINALIZING GreenFunctionMesh ===" << std::endl;
+
+  // 保存最后一个batch的数据
+  if (!current_batch_data_.empty()) {
+    double batch_total = 0.0;
+    for (const auto& val : current_batch_data_) {
+      batch_total += val;
+    }
+
+    if (batch_total > 0.0) {
+      batch_data_.push_back(current_batch_data_);
+      // std::cout << "Saved final batch " << current_batch_id_
+      //           << " with total value: " << batch_total << std::endl;
+    }
+  }
+
+  // std::cout << "Total batches collected: " << batch_data_.size() <<
+  // std::endl; std::cout << "Total contributions: " <<
+  // total_contributions_.load()
+  //           << std::endl;
+  // std::cout << "Dropped contributions: " << dropped_contributions_.load()
+  //           << std::endl;
+
+  if (batch_data_.empty()) {
+    // std::cout << "No data to write!" << std::endl;
+    return;
+  }
+
   // 创建HDF5文件
-  hid_t green_function_file_id = file_open(filename, 'w');
+  hid_t file_id = file_open("green_function_data.h5", 'w');
 
   // 写入文件头部信息
-  write_attribute(green_function_file_id, "filetype", "green_function_mesh");
-  write_attribute(green_function_file_id, "version", "1.0");
-  // write_attribute(green_function_file_id, "date_and_time", time_stamp());
+  write_attribute(file_id, "filetype", "green_function_mesh");
+  write_attribute(file_id, "version", "1.0");
+  write_attribute(file_id, "pitch", pitch_);
+  write_dataset(file_id, "origin", origin_);
+  write_dataset(file_id, "shape", shape_);
+  write_attribute(file_id, "n_batches", static_cast<int>(batch_data_.size()));
 
-  // 写入网格参数
-  write_attribute(green_function_file_id, "pitch", pitch_);
-  write_dataset(green_function_file_id, "origin", origin_);
-  write_dataset(green_function_file_id, "shape", shape_);
+  // 写入每个batch的数据
+  for (size_t i = 0; i < batch_data_.size(); ++i) {
+    std::string dataset_name = "batch_" + std::to_string(i);
+    write_dataset(file_id, dataset_name.c_str(), batch_data_[i]);
+  }
 
-  // 写入数据
-  write_dataset(green_function_file_id, "green_function_data", data_);
+  // 计算并写入累积数据
+  if (!batch_data_.empty()) {
+    vector<double> cumulative_data = batch_data_[0]; // 复制第一个batch
 
-  // 关闭文件
-  file_close(green_function_file_id);
+    for (size_t i = 1; i < batch_data_.size(); ++i) {
+      for (size_t j = 0; j < cumulative_data.size(); ++j) {
+        cumulative_data[j] += batch_data_[i][j];
+      }
+    }
 
-  // 清除data_以释放内存
-  data_.clear();
-  data_.shrink_to_fit();
+    write_dataset(file_id, "cumulative_data", cumulative_data);
+  }
+
+  file_close(file_id);
+  // std::cout << "Green function data written to green_function_data.h5"
+  //           << std::endl;
+
+  // 清理数据
+  batch_data_.clear();
+  current_batch_data_.clear();
+}
+
+void GreenFunctionMesh::start_new_batch(int batch_id)
+{
+  // 如果有之前的batch数据，保存它
+  if (current_batch_id_ >= 0 && !current_batch_data_.empty()) {
+    // 检查是否有非零数据
+    double batch_total = 0.0;
+    for (const auto& val : current_batch_data_) {
+      batch_total += val;
+    }
+
+    if (batch_total > 0.0) {
+      batch_data_.push_back(current_batch_data_);
+      // std::cout << "Saved batch " << current_batch_id_
+      //           << " with total value: " << batch_total << std::endl;
+    }
+  }
+
+  // 开始新batch
+  current_batch_id_ = batch_id;
+  std::fill(current_batch_data_.begin(), current_batch_data_.end(), 0.0);
+
+  // std::cout << "Started new batch: " << batch_id << std::endl;
 }
 
 } // namespace openmc

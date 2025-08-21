@@ -392,14 +392,19 @@ void initialize_batch()
     }
   }
 
-  // intialize greenfunction mesh
+  // Intialize greenfunction mesh
   if (!simulation::green_function_mesh) {
-    simulation::green_function_mesh =
-      std::make_unique<GreenFunctionMesh>(1.0); // 1cm分辨率
+    simulation::green_function_mesh = std::make_unique<GreenFunctionMesh>(
+      1.0, settings::n_batches); // 1cm分辨率
   }
 
   // Add user tallies to active tallies list
   setup_active_tallies();
+
+  // Green function 计数
+  if (settings::clutch_on && simulation::green_function_mesh) {
+    simulation::green_function_mesh->start_new_batch(simulation::current_batch);
+  }
 }
 
 void finalize_batch()
@@ -501,11 +506,12 @@ void finalize_batch()
     }
   }
 
-  // finalize greenfunction
+  // 只在最后一个batch结束时调用finalize
   if (settings::clutch_on && simulation::green_function_mesh) {
-    std::string filename =
-      fmt::format("greenfunction_batch_{}.h5", simulation::current_batch);
-    simulation::green_function_mesh->finalize_greenfunction_mesh(filename);
+    if (simulation::current_batch == settings::n_batches) {
+      simulation::green_function_mesh->finalize_greenfunction_mesh(
+        simulation::current_batch);
+    }
   }
 }
 

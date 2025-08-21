@@ -184,8 +184,8 @@ Tally::Tally(pugi::xml_node node)
   if (!settings::clutch_on) {
     bool has_clutch_score = false;
     for (int score : scores_) {
-      if (score == SCORE_CLUTCH_TEST || score == SCORE_GREENFUNTION) {
-        has_clutch_score =true;
+      if (score == SCORE_CLUTCH_TEST || score == SCORE_GREENFUNCTION) {
+        has_clutch_score = true;
         break;
       }
     }
@@ -198,8 +198,6 @@ Tally::Tally(pugi::xml_node node)
       }
     }
   }
-
-
 
   // Set IFP if needed
   if (!settings::ifp_on) {
@@ -672,7 +670,7 @@ void Tally::set_scores(const vector<std::string>& scores)
       estimator_ = TallyEstimator::COLLISION;
       break;
     case SCORE_CLUTCH_TEST:
-    case SCORE_GREENFUNTION:
+    case SCORE_GREENFUNCTION:
       estimator_ = TallyEstimator::COLLISION;
       break;
     }

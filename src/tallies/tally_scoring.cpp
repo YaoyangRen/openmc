@@ -1,5 +1,7 @@
 #include "openmc/tallies/tally_scoring.h"
 
+#include <iostream>
+
 #include "openmc/bank.h"
 #include "openmc/capi.h"
 #include "openmc/constants.h"
@@ -997,128 +999,125 @@ void score_general_ce_nonanalog(Particle& p, int i_tally, int start_index,
       }
       break;
 
-    case SCORE_GREENFUNTION:
-      if (settings::clutch_on) {
-        if (p.type() == Type::neutron && (p.fission())) {
-          double contribution = 0.0;
-          if (p.neutron_xs(p.event_nuclide()).total > 0) {
-            contribution =
-              p.wgt_last() * p.neutron_xs(p.event_nuclide()).nu_fission *
-              p.neutron_xs(p.event_nuclide()).fission /
-              p.neutron_xs(p.event_nuclide()).total; // TODO 是否需要除sigma_t
-          }
-          if (simulation::green_function_mesh) {
-            simulation::green_function_mesh->accumulate(p.r(), contribution);
-          }
+    case SCORE_GREENFUNCTION:
+      if (p.type() == Type::neutron && (p.fission())) {
+        double contribution = 0.0;
+        if (p.neutron_xs(p.event_nuclide()).total > 0) {
+          contribution = p.wgt_last() *
+                         p.neutron_xs(p.event_nuclide()).nu_fission *
+                         p.neutron_xs(p.event_nuclide()).fission;
+          // p.neutron_xs(p.event_nuclide()).total; // TODO 是否需要除sigma_t
+        }
+        if (simulation::green_function_mesh) {
+          simulation::green_function_mesh->accumulate(p.r(), contribution);
         }
       }
-      break;
+    }
+    break;
 
-    case N_2N:
-    case N_3N:
-    case N_4N:
-    case N_GAMMA:
-    case N_P:
-    case N_A:
-      // This case block only works if cross sections for these reactions have
-      // been precalculated. When they are not, we revert to the default case,
-      // which looks up cross sections
-      if (!simulation::need_depletion_rx)
-        goto default_case;
+  case N_2N:
+  case N_3N:
+  case N_4N:
+  case N_GAMMA:
+  case N_P:
+  case N_A:
+    // This case block only works if cross sections for these reactions have
+    // been precalculated. When they are not, we revert to the default case,
+    // which looks up cross sections
+    if (!simulation::need_depletion_rx)
+      goto default_case;
 
-      if (p.type() != Type::neutron)
-        continue;
+    if (p.type() != Type::neutron)
+      continue;
 
-      int m;
-      switch (score_bin) {
-        // clang-format off
+    int m;
+    switch (score_bin) {
+      // clang-format off
       case N_GAMMA: m = 0; break;
       case N_P:     m = 1; break;
       case N_A:     m = 2; break;
       case N_2N:    m = 3; break;
       case N_3N:    m = 4; break;
       case N_4N:    m = 5; break;
-        // clang-format on
-      }
-      if (i_nuclide >= 0) {
-        score = p.neutron_xs(i_nuclide).reaction[m] * atom_density * flux;
-      } else {
-        score = 0.;
-        if (p.material() != MATERIAL_VOID) {
-          const Material& material {*model::materials[p.material()]};
-          for (auto i = 0; i < material.nuclide_.size(); ++i) {
-            auto j_nuclide = material.nuclide_[i];
-            auto atom_density = material.atom_density_(i);
-            score += p.neutron_xs(j_nuclide).reaction[m] * atom_density * flux;
-          }
-        }
-      }
-      break;
-
-    case COHERENT:
-    case INCOHERENT:
-    case PHOTOELECTRIC:
-    case PAIR_PROD:
-      if (p.type() != Type::photon)
-        continue;
-
-      if (i_nuclide >= 0) {
-        const auto& micro = p.photon_xs(i_nuclide);
-        double xs = (score_bin == COHERENT)        ? micro.coherent
-                    : (score_bin == INCOHERENT)    ? micro.incoherent
-                    : (score_bin == PHOTOELECTRIC) ? micro.photoelectric
-                                                   : micro.pair_production;
-        score = xs * atom_density * flux;
-      } else {
-        double xs = (score_bin == COHERENT)     ? p.macro_xs().coherent
-                    : (score_bin == INCOHERENT) ? p.macro_xs().incoherent
-                    : (score_bin == PHOTOELECTRIC)
-                      ? p.macro_xs().photoelectric
-                      : p.macro_xs().pair_production;
-        score = xs * flux;
-      }
-      break;
-
-    case HEATING:
-      score = score_particle_heating(
-        p, tally, flux, HEATING, i_nuclide, atom_density);
-      break;
-
-    default:
-    default_case:
-
-      // The default block is really only meant for redundant neutron reactions
-      // (e.g. 444, 901)
-      if (p.type() != Type::neutron)
-        continue;
-
-      // Any other cross section has to be calculated on-the-fly
-      if (score_bin < 2)
-        fatal_error("Invalid score type on tally " + std::to_string(tally.id_));
+      // clang-format on
+    }
+    if (i_nuclide >= 0) {
+      score = p.neutron_xs(i_nuclide).reaction[m] * atom_density * flux;
+    } else {
       score = 0.;
-      if (i_nuclide >= 0) {
-        score = get_nuclide_xs(p, i_nuclide, score_bin) * atom_density * flux;
-      } else if (p.material() != MATERIAL_VOID) {
+      if (p.material() != MATERIAL_VOID) {
         const Material& material {*model::materials[p.material()]};
         for (auto i = 0; i < material.nuclide_.size(); ++i) {
           auto j_nuclide = material.nuclide_[i];
           auto atom_density = material.atom_density_(i);
-          score +=
-            get_nuclide_xs(p, j_nuclide, score_bin) * atom_density * flux;
+          score += p.neutron_xs(j_nuclide).reaction[m] * atom_density * flux;
         }
       }
     }
+    break;
 
-    // Add derivative information on score for differential tallies.
-    if (tally.deriv_ != C_NONE)
-      apply_derivative_to_score(
-        p, i_tally, i_nuclide, atom_density, score_bin, score);
+  case COHERENT:
+  case INCOHERENT:
+  case PHOTOELECTRIC:
+  case PAIR_PROD:
+    if (p.type() != Type::photon)
+      continue;
+
+    if (i_nuclide >= 0) {
+      const auto& micro = p.photon_xs(i_nuclide);
+      double xs = (score_bin == COHERENT)        ? micro.coherent
+                  : (score_bin == INCOHERENT)    ? micro.incoherent
+                  : (score_bin == PHOTOELECTRIC) ? micro.photoelectric
+                                                 : micro.pair_production;
+      score = xs * atom_density * flux;
+    } else {
+      double xs = (score_bin == COHERENT)        ? p.macro_xs().coherent
+                  : (score_bin == INCOHERENT)    ? p.macro_xs().incoherent
+                  : (score_bin == PHOTOELECTRIC) ? p.macro_xs().photoelectric
+                                                 : p.macro_xs().pair_production;
+      score = xs * flux;
+    }
+    break;
+
+  case HEATING:
+    score =
+      score_particle_heating(p, tally, flux, HEATING, i_nuclide, atom_density);
+    break;
+
+  default:
+  default_case:
+
+    // The default block is really only meant for redundant neutron reactions
+    // (e.g. 444, 901)
+    if (p.type() != Type::neutron)
+      continue;
+
+    // Any other cross section has to be calculated on-the-fly
+    if (score_bin < 2)
+      fatal_error("Invalid score type on tally " + std::to_string(tally.id_));
+    score = 0.;
+    if (i_nuclide >= 0) {
+      score = get_nuclide_xs(p, i_nuclide, score_bin) * atom_density * flux;
+    } else if (p.material() != MATERIAL_VOID) {
+      const Material& material {*model::materials[p.material()]};
+      for (auto i = 0; i < material.nuclide_.size(); ++i) {
+        auto j_nuclide = material.nuclide_[i];
+        auto atom_density = material.atom_density_(i);
+        score += get_nuclide_xs(p, j_nuclide, score_bin) * atom_density * flux;
+      }
+    }
+  }
+
+  // Add derivative information on score for differential tallies.
+  if (tally.deriv_ != C_NONE)
+    apply_derivative_to_score(
+      p, i_tally, i_nuclide, atom_density, score_bin, score);
 
 // Update tally results
 #pragma omp atomic
-    tally.results_(filter_index, score_index, TallyResult::VALUE) +=
-      score * filter_weight;
-  }
+  tally.results_(filter_index, score_index, TallyResult::VALUE) +=
+    score * filter_weight;
+}
 }
 
 //! Update tally results for continuous-energy tallies with an analog estimator.

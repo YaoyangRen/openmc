@@ -575,29 +575,23 @@ void print_results()
 
 //==============================================================================
 
-const std::unordered_map<int, const char*> score_names = {
-  {SCORE_FLUX, "Flux"},
-  {SCORE_TOTAL, "Total Reaction Rate"},
-  {SCORE_SCATTER, "Scattering Rate"},
+const std::unordered_map<int, const char*> score_names = {{SCORE_FLUX, "Flux"},
+  {SCORE_TOTAL, "Total Reaction Rate"}, {SCORE_SCATTER, "Scattering Rate"},
   {SCORE_NU_SCATTER, "Scattering Production Rate"},
-  {SCORE_ABSORPTION, "Absorption Rate"},
-  {SCORE_FISSION, "Fission Rate"},
+  {SCORE_ABSORPTION, "Absorption Rate"}, {SCORE_FISSION, "Fission Rate"},
   {SCORE_NU_FISSION, "Nu-Fission Rate"},
-  {SCORE_KAPPA_FISSION, "Kappa-Fission Rate"},
-  {SCORE_EVENTS, "Events"},
+  {SCORE_KAPPA_FISSION, "Kappa-Fission Rate"}, {SCORE_EVENTS, "Events"},
   {SCORE_DECAY_RATE, "Decay Rate"},
   {SCORE_DELAYED_NU_FISSION, "Delayed-Nu-Fission Rate"},
   {SCORE_PROMPT_NU_FISSION, "Prompt-Nu-Fission Rate"},
   {SCORE_INVERSE_VELOCITY, "Flux-Weighted Inverse Velocity"},
   {SCORE_FISS_Q_PROMPT, "Prompt fission power"},
-  {SCORE_FISS_Q_RECOV, "Recoverable fission power"},
-  {SCORE_CURRENT, "Current"},
+  {SCORE_FISS_Q_RECOV, "Recoverable fission power"}, {SCORE_CURRENT, "Current"},
   {SCORE_PULSE_HEIGHT, "pulse-height"},
   {SCORE_IFP_TIME_NUM, "IFP lifetime numerator"},
   {SCORE_IFP_BETA_NUM, "IFP delayed fraction numerator"},
   {SCORE_IFP_DENOM, "IFP common denominator"},
-  {SCORE_CLUTCH_TEST, "CLUTCH TEST"},
-};
+  {SCORE_CLUTCH_TEST, "CLUTCH TEST"}, {SCORE_GREENFUNCTION, "greenfunction"}};
 
 //! Create an ASCII output file showing all tally results.
 
