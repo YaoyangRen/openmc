@@ -21,13 +21,10 @@ GreenFunctionMesh::GreenFunctionMesh(double resolution, int max_batches)
   : pitch_(resolution), inv_pitch_(1.0 / resolution), current_batch_id_(-1),
     max_batches_(max_batches)
 {
-  // std::cout << "=== GreenFunctionMesh constructor called with resolution: "
-  //           << resolution << ", max_batches: " << max_batches
-  //           << " ===" << std::endl;
 
   // 手动设定边界
-  double llc[3] = {-34.86, -34.86, -54.76};
-  double urc[3] = {34.86, 34.86, 35.16};
+  double llc[3] = {0, 0, 0};
+  double urc[3] = {10, 10, 10};
   origin_ = {llc[0], llc[1], llc[2]};
 
   // 计算网格尺寸
@@ -35,20 +32,16 @@ GreenFunctionMesh::GreenFunctionMesh(double resolution, int max_batches)
   double dy = urc[1] - llc[1];
   double dz = urc[2] - llc[2];
 
-  shape_[0] = std::max(1, static_cast<int>(std::ceil(dx / pitch_)));
-  shape_[1] = std::max(1, static_cast<int>(std::ceil(dy / pitch_)));
-  shape_[2] = std::max(1, static_cast<int>(std::ceil(dz / pitch_)));
+  // 修正：确保完全覆盖边界
+  shape_[0] = std::max(1, static_cast<int>(std::ceil(dx / pitch_)) + 1);
+  shape_[1] = std::max(1, static_cast<int>(std::ceil(dy / pitch_)) + 1);
+  shape_[2] = std::max(1, static_cast<int>(std::ceil(dz / pitch_)) + 1);
 
   size_t spatial_size = static_cast<size_t>(shape_[0]) * shape_[1] * shape_[2];
 
   // 初始化batch数据存储
   batch_data_.reserve(max_batches_);
   current_batch_data_.resize(spatial_size, 0.0);
-
-  // std::cout << "Grid shape: [" << shape_[0] << ", " << shape_[1] << ", "
-  //           << shape_[2] << "]" << std::endl;
-  // std::cout << "Spatial size: " << spatial_size
-  //           << ", Max batches: " << max_batches_ << std::endl;
 }
 
 void GreenFunctionMesh::accumulate(const Position& r, double contribution)
@@ -90,20 +83,10 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(const int batch_id)
 
     if (batch_total > 0.0) {
       batch_data_.push_back(current_batch_data_);
-      // std::cout << "Saved final batch " << current_batch_id_
-      //           << " with total value: " << batch_total << std::endl;
     }
   }
 
-  // std::cout << "Total batches collected: " << batch_data_.size() <<
-  // std::endl; std::cout << "Total contributions: " <<
-  // total_contributions_.load()
-  //           << std::endl;
-  // std::cout << "Dropped contributions: " << dropped_contributions_.load()
-  //           << std::endl;
-
   if (batch_data_.empty()) {
-    // std::cout << "No data to write!" << std::endl;
     return;
   }
 
@@ -166,8 +149,6 @@ void GreenFunctionMesh::start_new_batch(int batch_id)
   // 开始新batch
   current_batch_id_ = batch_id;
   std::fill(current_batch_data_.begin(), current_batch_data_.end(), 0.0);
-
-  // std::cout << "Started new batch: " << batch_id << std::endl;
 }
 
 } // namespace openmc
