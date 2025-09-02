@@ -415,8 +415,11 @@ void finalize_batch()
   simulation::time_tallies.stop();
 
   // update weight windows if needed
-  for (const auto& wwg : variance_reduction::weight_windows_generators) {
-    wwg->update();
+  if (settings::solver_type != SolverType::RANDOM_RAY ||
+      simulation::current_batch == settings::n_batches) {
+    for (const auto& wwg : variance_reduction::weight_windows_generators) {
+      wwg->update();
+    }
   }
 
   // Reset global tally results
@@ -810,7 +813,7 @@ void transport_history_based_single_particle(Particle& p)
       p.event_advance();
     }
     if (p.alive()) {
-      if (p.collision_distance() > p.boundary().distance) {
+      if (p.collision_distance() > p.boundary().distance()) {
         p.event_cross_surface();
       } else if (p.alive()) {
         p.event_collide();
