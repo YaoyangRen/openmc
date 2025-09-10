@@ -516,6 +516,12 @@ void finalize_batch()
         simulation::current_batch);
     }
   }
+
+  // RYY ADD: 在最后一个batch输出随机粒子的源追踪信息
+  if (simulation::current_batch == settings::n_batches &&
+      settings::run_mode == RunMode::EIGENVALUE) {
+    output_random_particle_source_info();
+  }
 }
 
 void initialize_generation()
@@ -661,6 +667,22 @@ void initialize_history(Particle& p, int64_t index_source)
   // Prepare to write out particle track.
   if (p.write_track())
     add_particle_track(p);
+
+  // Set source particle tracking labels (only for active generations)
+  if (settings::run_mode == RunMode::EIGENVALUE &&
+      simulation::current_batch > settings::n_inactive) {
+    // Create unique source label: batch_id * 1000000 + particle_id
+    p.source_label() =
+      static_cast<int64_t>(simulation::current_batch) * 1000000 + p.id();
+    p.source_position() = p.r(); // Record initial position
+    p.source_batch() = simulation::current_batch;
+  } else if (settings::run_mode == RunMode::FIXED_SOURCE) {
+    // For fixed source mode
+    p.source_label() =
+      static_cast<int64_t>(simulation::total_gen) * 1000000 + p.id();
+    p.source_position() = p.r();
+    p.source_batch() = simulation::total_gen;
+  }
 }
 
 int overall_generation()
@@ -884,6 +906,61 @@ void transport_event_based()
     remaining_work -= n_particles;
     source_offset += n_particles;
   }
+}
+
+void output_random_particle_source_info()
+{
+  if (!mpi::master)
+    return;
+
+  // 从当前源库中随机选择一个粒子
+  if (simulation::source_bank.empty()) {
+    fmt::print("No particles in source bank for output.\n");
+    return;
+  }
+
+  // 使用固定种子确保结果可重现
+  uint64_t seed = 12345;
+  size_t random_idx =
+    static_cast<size_t>(prn(&seed) * simulation::source_bank.size());
+  if (random_idx >= simulation::source_bank.size()) {
+    random_idx = simulation::source_bank.size() - 1;
+  }
+
+  const auto& particle = simulation::source_bank[random_idx];
+
+  fmt::print("\n" + std::string(60, '=') + "\n");
+  fmt::print("SOURCE PARTICLE TRACKING OUTPUT (Final Batch {})\n",
+    simulation::current_batch);
+  fmt::print(std::string(60, '=') + "\n");
+
+  if (particle.source_label != 0) {
+    fmt::print("Particle Index: {}\n", random_idx);
+    fmt::print("Source Label: {}\n", particle.source_label);
+    fmt::print("Source Batch: {}\n", particle.source_batch);
+    fmt::print("Source Position: ({:.6f}, {:.6f}, {:.6f})\n",
+      particle.source_position.x, particle.source_position.y,
+      particle.source_position.z);
+    fmt::print("Current Position: ({:.6f}, {:.6f}, {:.6f})\n", particle.r.x,
+      particle.r.y, particle.r.z);
+
+    // 计算位移距离
+    Position displacement = particle.r - particle.source_position;
+    double distance = displacement.norm();
+    fmt::print("Displacement Distance: {:.6f} cm\n", distance);
+
+    fmt::print("Current Energy: {:.6e} eV\n", particle.E);
+    fmt::print("Current Weight: {:.6f}\n", particle.wgt);
+  } else {
+    // 如果没有源追踪信息，只显示当前信息
+    fmt::print("Particle Index: {} (No source tracking info)\n", random_idx);
+    fmt::print("Current Position: ({:.6f}, {:.6f}, {:.6f})\n", particle.r.x,
+      particle.r.y, particle.r.z);
+    fmt::print("Current Energy: {:.6e} eV\n", particle.E);
+    fmt::print("Current Weight: {:.6f}\n", particle.wgt);
+  }
+
+  fmt::print(std::string(60, '=') + "\n\n");
 }
 
 } // namespace openmc

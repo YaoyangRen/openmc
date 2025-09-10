@@ -447,8 +447,8 @@ list(APPEND libopenmc_SOURCES
   src/xsdata.cpp
   # ryy add
   src/clutch.cpp
-  src/greenfuction_mesh.cpp
-  src/source_tracking.cpp)
+  src/greenfunction_mesh.cpp
+)
 
 # Add bundled external dependencies
 list(APPEND libopenmc_SOURCES

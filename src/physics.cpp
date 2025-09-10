@@ -3,13 +3,13 @@
 #include "openmc/bank.h"
 #include "openmc/bremsstrahlung.h"
 #include "openmc/chain.h"
+#include "openmc/clutch.h"
 #include "openmc/constants.h"
 #include "openmc/distribution_multi.h"
 #include "openmc/eigenvalue.h"
 #include "openmc/endf.h"
 #include "openmc/error.h"
 #include "openmc/ifp.h"
-#include "openmc/clutch.h"
 #include "openmc/material.h"
 #include "openmc/math_functions.h"
 #include "openmc/message_passing.h"
@@ -215,6 +215,12 @@ void create_fission_sites(Particle& p, int i_nuclide, const Reaction& rx)
     site.progeny_id = p.n_progeny()++;
     site.surf_id = 0;
 
+    // RYY add
+    // Pass source tracking information to fission site
+    site.source_label = p.source_label();
+    site.source_position = p.source_position();
+    site.source_batch = p.source_batch();
+
     // Sample delayed group and angle/energy for fission reaction
     sample_fission_neutron(i_nuclide, rx, &site, p);
 
@@ -239,7 +245,7 @@ void create_fission_sites(Particle& p, int i_nuclide, const Reaction& rx)
       if (settings::ifp_on) {
         ifp(p, site, idx);
       }
-      //CLUTCH TEST
+      // CLUTCH TEST
       if (settings::clutch_on) {
         CLUTCH_TEST();
       }

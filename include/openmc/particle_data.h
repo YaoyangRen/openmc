@@ -55,6 +55,7 @@ struct SourceSite {
   int64_t parent_id;
   int64_t progeny_id;
 
+  // RYY ADD
   // Custom labeling system for source particle tracking
   int64_t source_label {0}; //!< Custom label for source particle
   Position source_position; //!< Initial source position
@@ -636,6 +637,7 @@ public:
   const int& parent_nuclide() const { return parent_nuclide_; }
   int& parent_nuclide() { return parent_nuclide_; } // Parent nuclide
 
+  // RYY ADD
   // Source particle tracking accessors
   int64_t& source_label() { return source_label_; }
   const int64_t& source_label() const { return source_label_; }

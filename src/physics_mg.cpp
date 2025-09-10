@@ -142,6 +142,12 @@ void create_fission_sites(Particle& p)
     site.parent_id = p.id();
     site.progeny_id = p.n_progeny()++;
 
+    // RYY add
+    // Pass source tracking information to fission site
+    site.source_label = p.source_label();
+    site.source_position = p.source_position();
+    site.source_batch = p.source_batch();
+
     // Sample the cosine of the angle, assuming fission neutrons are emitted
     // isotropically
     double mu = 2. * prn(p.current_seed()) - 1.;

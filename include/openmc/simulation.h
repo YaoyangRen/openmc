@@ -94,6 +94,10 @@ extern "C" int overall_generation();
 void broadcast_results();
 #endif
 
+//! Output random particle source tracking information
+void output_random_particle_source_info();
+
+//! Free memory allocated for simulation
 void free_memory_simulation();
 
 //! Simulate a single particle history (and all generated secondary particles,

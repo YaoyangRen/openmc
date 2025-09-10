@@ -88,6 +88,7 @@ bool Particle::create_secondary(
   bank.E = settings::run_CE ? E : g();
   bank.time = time();
 
+  // RYY add
   // Pass source tracking information to secondary particle
   bank.source_label = source_label();
   bank.source_position = source_position();
@@ -107,6 +108,7 @@ void Particle::split(double wgt)
   bank.E = settings::run_CE ? E() : g();
   bank.time = time();
 
+  // RYY add
   // Pass source tracking information to split particle
   bank.source_label = source_label();
   bank.source_position = source_position();
@@ -144,6 +146,7 @@ void Particle::from_source(const SourceSite* src)
   r_last() = src->r;
   u_last() = src->u;
 
+  // RYY add
   // Copy source tracking information
   source_label() = src->source_label;
   source_position() = src->source_position;
