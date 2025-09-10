@@ -87,6 +87,12 @@ bool Particle::create_secondary(
   bank.u = u;
   bank.E = settings::run_CE ? E : g();
   bank.time = time();
+
+  // Pass source tracking information to secondary particle
+  bank.source_label = source_label();
+  bank.source_position = source_position();
+  bank.source_batch = source_batch();
+
   bank_second_E() += bank.E;
   return true;
 }
@@ -100,6 +106,11 @@ void Particle::split(double wgt)
   bank.u = u();
   bank.E = settings::run_CE ? E() : g();
   bank.time = time();
+
+  // Pass source tracking information to split particle
+  bank.source_label = source_label();
+  bank.source_position = source_position();
+  bank.source_batch = source_batch();
 
   // Convert signed index to a signed surface ID
   if (surface() == SURFACE_NONE) {
@@ -132,6 +143,12 @@ void Particle::from_source(const SourceSite* src)
   r_last_current() = src->r;
   r_last() = src->r;
   u_last() = src->u;
+
+  // Copy source tracking information
+  source_label() = src->source_label;
+  source_position() = src->source_position;
+  source_batch() = src->source_batch;
+
   if (settings::run_CE) {
     E() = src->E;
     g() = 0;

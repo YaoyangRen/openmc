@@ -153,6 +153,12 @@ void process_collision_events()
   for (int64_t i = 0; i < simulation::collision_queue.size(); i++) {
     int64_t buffer_idx = simulation::collision_queue[i].idx;
     Particle& p = simulation::particles[buffer_idx];
+
+    // // Record source tracking info before collision
+    // if (source_tracking_enabled()) {
+    //   record_source_tracking(p);
+    // }
+
     p.event_collide();
     p.event_revive_from_secondary();
     if (p.alive())

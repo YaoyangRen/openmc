@@ -4,10 +4,10 @@
 #ifndef OPENMC_SIMULATION_H
 #define OPENMC_SIMULATION_H
 
+#include "openmc/greenfunction_mesh.h"
 #include "openmc/mesh.h"
 #include "openmc/particle.h"
 #include "openmc/vector.h"
-#include "openmc/greenfunction_mesh.h"
 
 #include <cstdint>
 #include <memory>

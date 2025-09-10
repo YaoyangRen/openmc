@@ -54,6 +54,11 @@ struct SourceSite {
   int parent_nuclide {-1};
   int64_t parent_id;
   int64_t progeny_id;
+
+  // Custom labeling system for source particle tracking
+  int64_t source_label {0}; //!< Custom label for source particle
+  Position source_position; //!< Initial source position
+  int source_batch {-1};    //!< Batch number when source was created
 };
 
 //! State of a particle used for particle track files
@@ -490,6 +495,11 @@ private:
   int delayed_group_ {0};
   int parent_nuclide_ {-1};
 
+  // Source particle tracking variables
+  int64_t source_label_ {0}; //!< Custom label for source particle tracking
+  Position source_position_; //!< Initial source position
+  int source_batch_ {-1};    //!< Batch number when source was created
+
   int n_bank_ {0};
   double bank_second_E_ {0.0};
   double wgt_bank_ {0.0};
@@ -625,6 +635,14 @@ public:
   int& delayed_group() { return delayed_group_; } // delayed group
   const int& parent_nuclide() const { return parent_nuclide_; }
   int& parent_nuclide() { return parent_nuclide_; } // Parent nuclide
+
+  // Source particle tracking accessors
+  int64_t& source_label() { return source_label_; }
+  const int64_t& source_label() const { return source_label_; }
+  Position& source_position() { return source_position_; }
+  const Position& source_position() const { return source_position_; }
+  int& source_batch() { return source_batch_; }
+  const int& source_batch() const { return source_batch_; }
 
   // Post-collision data
   double& bank_second_E()
