@@ -55,11 +55,10 @@ struct SourceSite {
   int64_t parent_id;
   int64_t progeny_id;
 
-  // RYY ADD
-  // Custom labeling system for source particle tracking
-  int64_t source_label {0}; //!< Custom label for source particle
-  Position source_position; //!< Initial source position
-  int source_batch {-1};    //!< Batch number when source was created
+  // Added for source tracking by ryy
+  int64_t source_label {0}; //!< 唯一的源标签，源与子代粒子共用
+  Position source_position; //!< 源粒子的位置
+  int source_batch {-1};    //!< 源粒子所属的批次号
 };
 
 //! State of a particle used for particle track files
@@ -496,11 +495,6 @@ private:
   int delayed_group_ {0};
   int parent_nuclide_ {-1};
 
-  // Source particle tracking variables
-  int64_t source_label_ {0}; //!< Custom label for source particle tracking
-  Position source_position_; //!< Initial source position
-  int source_batch_ {-1};    //!< Batch number when source was created
-
   int n_bank_ {0};
   double bank_second_E_ {0.0};
   double wgt_bank_ {0.0};
@@ -548,7 +542,22 @@ private:
 
   int64_t n_progeny_ {0};
 
+  // --- Added for source tracking (runtime on Particle) ---
+  int64_t source_label_ {0};
+  Position source_position_ {};
+  int source_batch_ {-1};
+
 public:
+  // --- Accessors for source tracking ---
+  int64_t& source_label() { return source_label_; }
+  const int64_t& source_label() const { return source_label_; }
+
+  Position& source_position() { return source_position_; }
+  const Position& source_position() const { return source_position_; }
+
+  int& source_batch() { return source_batch_; }
+  const int& source_batch() const { return source_batch_; }
+
   //----------------------------------------------------------------------------
   // Constructors
   ParticleData();
@@ -636,15 +645,6 @@ public:
   int& delayed_group() { return delayed_group_; } // delayed group
   const int& parent_nuclide() const { return parent_nuclide_; }
   int& parent_nuclide() { return parent_nuclide_; } // Parent nuclide
-
-  // RYY ADD
-  // Source particle tracking accessors
-  int64_t& source_label() { return source_label_; }
-  const int64_t& source_label() const { return source_label_; }
-  Position& source_position() { return source_position_; }
-  const Position& source_position() const { return source_position_; }
-  int& source_batch() { return source_batch_; }
-  const int& source_batch() const { return source_batch_; }
 
   // Post-collision data
   double& bank_second_E()

@@ -29,7 +29,12 @@ class _SourceSite(Structure):
                 ('particle', c_int),
                 ('parent_nuclide', c_int),
                 ('parent_id', c_int64),
-                ('progeny_id', c_int64)]
+                ('progeny_id', c_int64),
+                # Added for source tracking by ryy
+                ('source_label', c_int64),  # 唯一的源标签，源
+                ('source_position', c_double*3),  # 源粒子的位置
+                ('source_batch', c_int)  # 源粒子所属的批次号
+               ]
 
 
 # Define input type for numpy arrays that will be passed into C++ functions

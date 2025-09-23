@@ -667,22 +667,6 @@ void initialize_history(Particle& p, int64_t index_source)
   // Prepare to write out particle track.
   if (p.write_track())
     add_particle_track(p);
-
-  // Set source particle tracking labels (only for active generations)
-  if (settings::run_mode == RunMode::EIGENVALUE &&
-      simulation::current_batch > settings::n_inactive) {
-    // Create unique source label: batch_id * 1000000 + particle_id
-    p.source_label() =
-      static_cast<int64_t>(simulation::current_batch) * 1000000 + p.id();
-    p.source_position() = p.r(); // Record initial position
-    p.source_batch() = simulation::current_batch;
-  } else if (settings::run_mode == RunMode::FIXED_SOURCE) {
-    // For fixed source mode
-    p.source_label() =
-      static_cast<int64_t>(simulation::total_gen) * 1000000 + p.id();
-    p.source_position() = p.r();
-    p.source_batch() = simulation::total_gen;
-  }
 }
 
 int overall_generation()

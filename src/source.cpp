@@ -606,6 +606,13 @@ void initialize_source()
 
     // sample external source distribution
     simulation::source_bank[i] = sample_external_source(&seed);
+
+    // RYY add Assign label and record initial position/batch
+    simulation::source_bank[i].source_label =
+      static_cast<int64_t>(simulation::current_batch) * 1000000 +
+      id; // 唯一的源标签
+    simulation::source_bank[i].source_position = simulation::source_bank[i].r;
+    simulation::source_bank[i].source_batch = simulation::current_batch;
   }
 
   // Write out initial source

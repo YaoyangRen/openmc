@@ -157,7 +157,7 @@ void initialize_mpi(MPI_Comm intracomm)
 
   // Create bank datatype
   SourceSite b;
-  MPI_Aint disp[11];
+  MPI_Aint disp[14];
   MPI_Get_address(&b.r, &disp[0]);
   MPI_Get_address(&b.u, &disp[1]);
   MPI_Get_address(&b.E, &disp[2]);
@@ -169,14 +169,47 @@ void initialize_mpi(MPI_Comm intracomm)
   MPI_Get_address(&b.parent_nuclide, &disp[8]);
   MPI_Get_address(&b.parent_id, &disp[9]);
   MPI_Get_address(&b.progeny_id, &disp[10]);
-  for (int i = 10; i >= 0; --i) {
+  // RYY add for source tracking
+  MPI_Get_address(&b.source_label, &disp[11]);
+  MPI_Get_address(&b.source_position, &disp[12]);
+  MPI_Get_address(&b.source_batch, &disp[13]);
+  for (int i = 13; i >= 0; --i) {
     disp[i] -= disp[0];
   }
 
-  int blocks[] {3, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1};
-  MPI_Datatype types[] {MPI_DOUBLE, MPI_DOUBLE, MPI_DOUBLE, MPI_DOUBLE,
-    MPI_DOUBLE, MPI_INT, MPI_INT, MPI_INT, MPI_INT, MPI_LONG, MPI_LONG};
-  MPI_Type_create_struct(11, blocks, disp, types, &mpi::source_site);
+  int blocks[] {
+    3, // r
+    3, // u
+    1, // E
+    1, // time
+    1, // wgt
+    1, // delayed_group
+    1, // surf_id
+    1, // particle
+    1, // parent_nuclide
+    1, // parent_id
+    1, // progeny_id
+    1, // source_label
+    3, // source_position
+    1  // source_batch
+  };
+  MPI_Datatype types[] {
+    MPI_DOUBLE, // r
+    MPI_DOUBLE, // u
+    MPI_DOUBLE, // E
+    MPI_DOUBLE, // time
+    MPI_DOUBLE, // wgt
+    MPI_INT,    // delayed_group
+    MPI_INT,    // surf_id
+    MPI_INT,    // particle
+    MPI_INT,    // parent_nuclide
+    MPI_LONG,   // parent_id (int64_t)
+    MPI_LONG,   // progeny_id (int64_t)
+    MPI_LONG,   // source_label (int64_t)
+    MPI_DOUBLE, // source_position
+    MPI_INT     // source_batch
+  };
+  MPI_Type_create_struct(14, blocks, disp, types, &mpi::source_site);
   MPI_Type_commit(&mpi::source_site);
 }
 #endif // OPENMC_MPI

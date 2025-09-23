@@ -79,7 +79,7 @@ bool Particle::create_secondary(
   if (E < settings::energy_cutoff[static_cast<int>(type)]) {
     return false;
   }
-
+  // Create one secondary site and populate both physics and source-tracking fields
   auto& bank = secondary_bank().emplace_back();
   bank.particle = type;
   bank.wgt = wgt;
@@ -88,11 +88,18 @@ bool Particle::create_secondary(
   bank.E = settings::run_CE ? E : g();
   bank.time = time();
 
-  // RYY add
-  // Pass source tracking information to secondary particle
-  bank.source_label = source_label();
-  bank.source_position = source_position();
-  bank.source_batch = source_batch();
+  // Carry source tracking info to secondary
+  bank.source_label = this->source_label();
+  bank.source_position = this->source_position();
+  bank.source_batch = this->source_batch();
+
+  // Preserve signed surface ID similar to split()
+  if (surface() == SURFACE_NONE) {
+    bank.surf_id = SURFACE_NONE;
+  } else {
+    int surf_id = model::surfaces[surface_index()]->id_;
+    bank.surf_id = (surface() > 0) ? surf_id : -surf_id;
+  }
 
   bank_second_E() += bank.E;
   return true;
@@ -107,12 +114,6 @@ void Particle::split(double wgt)
   bank.u = u();
   bank.E = settings::run_CE ? E() : g();
   bank.time = time();
-
-  // RYY add
-  // Pass source tracking information to split particle
-  bank.source_label = source_label();
-  bank.source_position = source_position();
-  bank.source_batch = source_batch();
 
   // Convert signed index to a signed surface ID
   if (surface() == SURFACE_NONE) {
@@ -146,8 +147,7 @@ void Particle::from_source(const SourceSite* src)
   r_last() = src->r;
   u_last() = src->u;
 
-  // RYY add
-  // Copy source tracking information
+  // RYY add for source tracking
   source_label() = src->source_label;
   source_position() = src->source_position;
   source_batch() = src->source_batch;
@@ -423,8 +423,19 @@ void Particle::event_revive_from_secondary()
   // If particle has too many events, display warning and kill it
   ++n_event();
   if (n_event() == settings::max_particle_events) {
-    warning("Particle " + std::to_string(id()) +
-            " underwent maximum number of events.");
+    // Enrich warning with source tracking information for diagnostics
+    std::string msg;
+    if (source_label() != 0) {
+      msg = fmt::format(
+        "Particle {} underwent maximum number of events. [source_label={}, batch={}, source_pos=({:.6f},{:.6f},{:.6f}), current_pos=({:.6f},{:.6f},{:.6f})]",
+        id(), source_label(), source_batch(), source_position().x,
+        source_position().y, source_position().z, r().x, r().y, r().z);
+    } else {
+      msg = fmt::format(
+        "Particle {} underwent maximum number of events. [current_pos=({:.6f},{:.6f},{:.6f})]",
+        id(), r().x, r().y, r().z);
+    }
+    warning(msg);
     wgt() = 0.0;
   }
 
