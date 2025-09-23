@@ -12,6 +12,7 @@
 #include "openmc/dagmc.h"
 #include "openmc/error.h"
 #include "openmc/geometry.h"
+#include "openmc/greenfunction_mesh.h"
 #include "openmc/hdf5_interface.h"
 #include "openmc/material.h"
 #include "openmc/message_passing.h"
@@ -79,7 +80,8 @@ bool Particle::create_secondary(
   if (E < settings::energy_cutoff[static_cast<int>(type)]) {
     return false;
   }
-  // Create one secondary site and populate both physics and source-tracking fields
+  // Create one secondary site and populate both physics and source-tracking
+  // fields
   auto& bank = secondary_bank().emplace_back();
   bank.particle = type;
   bank.wgt = wgt;
@@ -92,6 +94,7 @@ bool Particle::create_secondary(
   bank.source_label = this->source_label();
   bank.source_position = this->source_position();
   bank.source_batch = this->source_batch();
+  bank.source_particle_id = this->source_particle_id(); // 传递源粒子ID
 
   // Preserve signed surface ID similar to split()
   if (surface() == SURFACE_NONE) {
@@ -114,6 +117,12 @@ void Particle::split(double wgt)
   bank.u = u();
   bank.E = settings::run_CE ? E() : g();
   bank.time = time();
+
+  // 添加源追踪信息 - 分裂的粒子应该保持相同的源信息
+  bank.source_label = this->source_label();
+  bank.source_position = this->source_position();
+  bank.source_batch = this->source_batch();
+  bank.source_particle_id = this->source_particle_id();
 
   // Convert signed index to a signed surface ID
   if (surface() == SURFACE_NONE) {
@@ -151,6 +160,13 @@ void Particle::from_source(const SourceSite* src)
   source_label() = src->source_label;
   source_position() = src->source_position;
   source_batch() = src->source_batch;
+
+  // 设置源粒子ID
+  if (src->source_particle_id != -1) {
+    // 如果source site中有源粒子ID，使用它（次级粒子情况）
+    source_particle_id() = src->source_particle_id;
+  }
+  // 对于新的源粒子，源粒子ID在initialize_history中设置
 
   if (settings::run_CE) {
     E() = src->E;
@@ -286,6 +302,19 @@ void Particle::event_advance()
   // Score flux derivative accumulators for differential tallies.
   if (!model::active_tallies.empty()) {
     score_track_derivative(*this, distance);
+  }
+
+  // 累积格林函数贡献
+  if (simulation::green_function_mesh && material() != MATERIAL_VOID) {
+    // 计算格林函数贡献 - 使用通量贡献（权重 × 距离 / 总截面）
+    double contribution = 0.0;
+    if (macro_xs().total > 0.0) {
+      contribution = wgt() * distance / macro_xs().total;
+    } else {
+      contribution = wgt() * distance; // 如果总截面为0，直接使用权重×距离
+    }
+    simulation::green_function_mesh->accumulate(
+      r(), contribution, source_particle_id());
   }
 
   // Set particle weight to zero if it hit the time boundary
@@ -427,12 +456,14 @@ void Particle::event_revive_from_secondary()
     std::string msg;
     if (source_label() != 0) {
       msg = fmt::format(
-        "Particle {} underwent maximum number of events. [source_label={}, batch={}, source_pos=({:.6f},{:.6f},{:.6f}), current_pos=({:.6f},{:.6f},{:.6f})]",
+        "Particle {} underwent maximum number of events. [source_label={}, "
+        "batch={}, source_pos=({:.6f},{:.6f},{:.6f}), "
+        "current_pos=({:.6f},{:.6f},{:.6f})]",
         id(), source_label(), source_batch(), source_position().x,
         source_position().y, source_position().z, r().x, r().y, r().z);
     } else {
-      msg = fmt::format(
-        "Particle {} underwent maximum number of events. [current_pos=({:.6f},{:.6f},{:.6f})]",
+      msg = fmt::format("Particle {} underwent maximum number of events. "
+                        "[current_pos=({:.6f},{:.6f},{:.6f})]",
         id(), r().x, r().y, r().z);
     }
     warning(msg);

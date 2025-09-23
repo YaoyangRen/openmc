@@ -56,9 +56,10 @@ struct SourceSite {
   int64_t progeny_id;
 
   // Added for source tracking by ryy
-  int64_t source_label {0}; //!< 唯一的源标签，源与子代粒子共用
-  Position source_position; //!< 源粒子的位置
-  int source_batch {-1};    //!< 源粒子所属的批次号
+  int64_t source_label {0};        //!< 唯一的源标签，源与子代粒子共用
+  Position source_position;        //!< 源粒子的位置
+  int source_batch {-1};           //!< 源粒子所属的批次号
+  int64_t source_particle_id {-1}; //!< 源粒子ID，用于格林函数矩阵统计
 };
 
 //! State of a particle used for particle track files
@@ -546,6 +547,7 @@ private:
   int64_t source_label_ {0};
   Position source_position_ {};
   int source_batch_ {-1};
+  int64_t source_particle_id_ {-1}; // 源粒子ID，用于格林函数矩阵统计
 
 public:
   // --- Accessors for source tracking ---
@@ -557,6 +559,10 @@ public:
 
   int& source_batch() { return source_batch_; }
   const int& source_batch() const { return source_batch_; }
+
+  // 源粒子ID访问器
+  int64_t& source_particle_id() { return source_particle_id_; }
+  const int64_t& source_particle_id() const { return source_particle_id_; }
 
   //----------------------------------------------------------------------------
   // Constructors

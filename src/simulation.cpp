@@ -612,6 +612,11 @@ void initialize_history(Particle& p, int64_t index_source)
   // set identifier for particle
   p.id() = simulation::work_index[mpi::rank] + index_source;
 
+  // 设置源粒子ID，对于新的历史，源粒子ID就是自己的ID
+  if (p.source_particle_id() == -1) {
+    p.source_particle_id() = p.id();
+  }
+
   // set progeny count to zero
   p.n_progeny() = 0;
 

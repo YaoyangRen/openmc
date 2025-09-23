@@ -1010,7 +1010,8 @@ void score_general_ce_nonanalog(Particle& p, int i_tally, int start_index,
               p.neutron_xs(p.event_nuclide()).total; // TODO 是否需要除sigma_t
           }
           if (simulation::green_function_mesh) {
-            simulation::green_function_mesh->accumulate(p.r(), contribution);
+            simulation::green_function_mesh->accumulate(
+              p.r(), contribution, p.source_particle_id());
           }
         }
       }

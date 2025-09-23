@@ -2,7 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cstdint> // for int64_t
+#include <cstdint>
 #include <iostream>
 #include <string>
 
@@ -21,7 +21,6 @@ GreenFunctionMesh::GreenFunctionMesh(double resolution, int max_batches)
   : pitch_(resolution), inv_pitch_(1.0 / resolution), current_batch_id_(-1),
     max_batches_(max_batches)
 {
-
   // 手动设定边界
   // TODO: 这里可以改成读取模型的边界，目前是手动写死
   double llc[3] = {0, 0, 0};
@@ -33,21 +32,37 @@ GreenFunctionMesh::GreenFunctionMesh(double resolution, int max_batches)
   double dy = urc[1] - llc[1];
   double dz = urc[2] - llc[2];
 
-  // 修正：确保完全覆盖边界
   shape_[0] = std::max(1, static_cast<int>(std::ceil(dx / pitch_)) + 1);
   shape_[1] = std::max(1, static_cast<int>(std::ceil(dy / pitch_)) + 1);
   shape_[2] = std::max(1, static_cast<int>(std::ceil(dz / pitch_)) + 1);
 
-  size_t spatial_size = static_cast<size_t>(shape_[0]) * shape_[1] * shape_[2];
+  spatial_size_ = static_cast<size_t>(shape_[0]) * shape_[1] * shape_[2];
 
-  // 初始化batch数据存储
-  batch_data_.reserve(max_batches_);
-  current_batch_data_.resize(spatial_size, 0.0);
+  // 调试信息
+  std::cout << "GreenFunctionMesh initialized:" << std::endl;
+  std::cout << "  Bounds: [" << llc[0] << "," << llc[1] << "," << llc[2]
+            << "] to [" << urc[0] << "," << urc[1] << "," << urc[2] << "]"
+            << std::endl;
+  std::cout << "  Pitch: " << pitch_ << std::endl;
+  std::cout << "  Shape: [" << shape_[0] << "," << shape_[1] << "," << shape_[2]
+            << "]" << std::endl;
+  std::cout << "  Spatial size: " << spatial_size_ << std::endl;
+
+  // 初始化累积数据
+  cumulative_data_.resize(spatial_size_, 0.0);
 }
 
-void GreenFunctionMesh::accumulate(const Position& r, double contribution)
+void GreenFunctionMesh::accumulate(
+  const Position& r, double contribution, int64_t source_particle_id)
 {
   constexpr double eps = 1.0e-10;
+
+  // 验证源粒子ID
+  if (source_particle_id < 0) {
+    std::cerr << "Warning: Invalid source particle ID: " << source_particle_id
+              << std::endl;
+    return;
+  }
 
   int ix = static_cast<int>(std::floor((r.x - origin_[0] + eps) * inv_pitch_));
   int iy = static_cast<int>(std::floor((r.y - origin_[1] + eps) * inv_pitch_));
@@ -62,9 +77,37 @@ void GreenFunctionMesh::accumulate(const Position& r, double contribution)
                      (static_cast<size_t>(iy) + static_cast<size_t>(shape_[1]) *
                                                   static_cast<size_t>(iz));
 
-    // 向当前batch数据累积
+    // 额外的安全检查，确保索引在有效范围内
+    if (index >= spatial_size_) {
+      // 这不应该发生，但为了安全起见
+      std::cerr << "Warning: GreenFunctionMesh index out of bounds: " << index
+                << " >= " << spatial_size_ << " (ix=" << ix << ", iy=" << iy
+                << ", iz=" << iz << ")" << std::endl;
+      return;
+    }
+
+    // 确保该源粒子的数据结构存在
+    if (current_batch_particle_data_.find(source_particle_id) ==
+        current_batch_particle_data_.end()) {
+      current_batch_particle_data_[source_particle_id].resize(
+        spatial_size_, 0.0);
+    }
+
+    // 额外检查：确保粒子数据的大小正确
+    auto& particle_data = current_batch_particle_data_[source_particle_id];
+    if (particle_data.size() != spatial_size_) {
+      std::cerr << "Warning: Particle data size mismatch: "
+                << particle_data.size() << " != " << spatial_size_ << std::endl;
+      particle_data.resize(spatial_size_, 0.0);
+    }
+
+    // 为特定源粒子累积贡献
 #pragma omp atomic
-    current_batch_data_[index] += contribution;
+    particle_data[index] += contribution;
+
+    // 同时累积到总的格林函数中
+#pragma omp atomic
+    cumulative_data_[index] += contribution;
 
     // total_contributions_++;
   } else {
@@ -74,39 +117,68 @@ void GreenFunctionMesh::accumulate(const Position& r, double contribution)
 
 void GreenFunctionMesh::start_new_batch(int batch_id)
 {
-  // 如果有之前的batch数据，保存它
-  if (current_batch_id_ >= 0 && !current_batch_data_.empty()) {
-    // 检查是否有非零数据
-    double batch_total = 0.0;
-    for (const auto& val : current_batch_data_) {
-      batch_total += val;
-    }
-    // 有效数据保存
-    if (batch_total > 0.0) {
-      batch_data_.push_back(current_batch_data_);
+  // 保存上一个batch的数据
+  if (current_batch_id_ >= 0) {
+    for (const auto& [particle_id, data] : current_batch_particle_data_) {
+      // 检查是否有非零数据
+      double particle_total = 0.0;
+      for (const auto& val : data) {
+        particle_total += val;
+      }
+
+      if (particle_total > 0.0) {
+        // 如果这个源粒子的格林函数还不存在，创建它
+        if (particle_green_functions_.find(particle_id) ==
+            particle_green_functions_.end()) {
+          particle_green_functions_[particle_id].resize(spatial_size_, 0.0);
+        }
+
+        // 累积到该源粒子的总格林函数中
+        for (size_t i = 0; i < spatial_size_; ++i) {
+          // 安全检查
+          if (i >= data.size()) {
+            std::cerr
+              << "Warning: Data index out of bounds in start_new_batch: " << i
+              << " >= " << data.size() << std::endl;
+            break;
+          }
+          if (i >= particle_green_functions_[particle_id].size()) {
+            std::cerr
+              << "Warning: Particle green function index out of bounds: " << i
+              << " >= " << particle_green_functions_[particle_id].size()
+              << std::endl;
+            break;
+          }
+          particle_green_functions_[particle_id][i] += data[i];
+        }
+      }
     }
   }
+
   // 开始新batch
   current_batch_id_ = batch_id;
-  std::fill(current_batch_data_.begin(), current_batch_data_.end(), 0.0);
+  current_batch_particle_data_.clear();
+}
+
+const vector<double>& GreenFunctionMesh::get_particle_data(
+  int64_t source_particle_id) const
+{
+  auto it = particle_green_functions_.find(source_particle_id);
+  if (it != particle_green_functions_.end()) {
+    return it->second;
+  }
+
+  // 返回空向量或抛出异常
+  static vector<double> empty_data;
+  return empty_data;
 }
 
 void GreenFunctionMesh::finalize_greenfunction_mesh(const int batch_id)
 {
-
   // 保存最后一个batch的数据
-  if (!current_batch_data_.empty()) {
-    double batch_total = 0.0;
-    for (const auto& val : current_batch_data_) {
-      batch_total += val;
-    }
+  start_new_batch(-1); // 这会保存当前batch的数据
 
-    if (batch_total > 0.0) {
-      batch_data_.push_back(current_batch_data_);
-    }
-  }
-
-  if (batch_data_.empty()) {
+  if (particle_green_functions_.empty()) {
     return;
   }
 
@@ -114,36 +186,42 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(const int batch_id)
   hid_t file_id = file_open("green_function_data.h5", 'w');
 
   // 写入文件头部信息
-  write_attribute(file_id, "filetype", "green_function_mesh");
+  write_attribute(file_id, "filetype", "green_function_mesh_per_particle");
   write_attribute(file_id, "version", "1.0");
   write_attribute(file_id, "pitch", pitch_);
   write_dataset(file_id, "origin", origin_);
   write_dataset(file_id, "shape", shape_);
-  write_attribute(file_id, "n_batches", static_cast<int>(batch_data_.size()));
+  write_attribute(file_id, "n_source_particles",
+    static_cast<int>(particle_green_functions_.size()));
 
-  // 写入每个batch的数据
-  for (size_t i = 0; i < batch_data_.size(); ++i) {
-    std::string dataset_name = "batch_" + std::to_string(i);
-    write_dataset(file_id, dataset_name.c_str(), batch_data_[i]);
+  // 写入累积的总格林函数
+  write_dataset(file_id, "cumulative_green_function", cumulative_data_);
+
+  // 为每个源粒子创建一个组
+  hid_t particles_group = H5Gcreate(
+    file_id, "source_particles", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+
+  // 写入每个源粒子的格林函数
+  for (const auto& [particle_id, data] : particle_green_functions_) {
+    std::string particle_name = "particle_" + std::to_string(particle_id);
+    write_dataset(particles_group, particle_name.c_str(), data);
   }
 
-  // 计算并写入累积数据
-  if (!batch_data_.empty()) {
-    vector<double> cumulative_data = batch_data_[0]; // 复制第一个batch
-
-    for (size_t i = 1; i < batch_data_.size(); ++i) {
-      for (size_t j = 0; j < cumulative_data.size(); ++j) {
-        cumulative_data[j] += batch_data_[i][j];
-      }
-    }
-
-    write_dataset(file_id, "cumulative_data", cumulative_data);
+  // 写入源粒子ID列表
+  vector<int64_t> particle_ids;
+  particle_ids.reserve(particle_green_functions_.size());
+  for (const auto& [particle_id, data] : particle_green_functions_) {
+    particle_ids.push_back(particle_id);
   }
+  write_dataset(file_id, "source_particle_ids", particle_ids);
 
+  H5Gclose(particles_group);
   file_close(file_id);
+
   // 清理数据
-  batch_data_.clear();
-  current_batch_data_.clear();
+  particle_green_functions_.clear();
+  current_batch_particle_data_.clear();
+  cumulative_data_.clear();
 }
 
 } // namespace openmc
