@@ -6,6 +6,7 @@
 #include "openmc/position.h"
 #include "openmc/vector.h"
 #include <atomic>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 
@@ -54,6 +55,9 @@ private:
   size_t spatial_size_;          // 统计信息
   std::atomic<uint64_t> dropped_contributions_ {0};
   std::atomic<uint64_t> total_contributions_ {0};
+  
+  // 线程同步
+  mutable std::mutex data_mutex_;  // 保护current_batch_particle_data_的访问
 };
 
 } // namespace openmc

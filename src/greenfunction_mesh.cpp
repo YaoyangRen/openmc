@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstdint>
 #include <iostream>
+#include <mutex>
 #include <string>
 
 #include "openmc/capi.h"
@@ -59,9 +60,12 @@ void GreenFunctionMesh::accumulate(
 
   // 验证源粒子ID
   if (source_particle_id < 0) {
-    std::cerr << "Warning: Invalid source particle ID: " << source_particle_id
-              << std::endl;
-    return;
+    return; // 静默忽略无效ID，避免过多调试输出
+  }
+
+  // 验证贡献值
+  if (!std::isfinite(contribution) || contribution < 0.0) {
+    return; // 忽略无效的贡献值
   }
 
   int ix = static_cast<int>(std::floor((r.x - origin_[0] + eps) * inv_pitch_));
@@ -86,24 +90,36 @@ void GreenFunctionMesh::accumulate(
       return;
     }
 
-    // 确保该源粒子的数据结构存在
-    if (current_batch_particle_data_.find(source_particle_id) ==
-        current_batch_particle_data_.end()) {
-      current_batch_particle_data_[source_particle_id].resize(
-        spatial_size_, 0.0);
+    // 线程安全地获取或创建粒子数据
+    vector<double>* particle_data_ptr = nullptr;
+
+    {
+      std::lock_guard<std::mutex> lock(data_mutex_);
+
+      auto it = current_batch_particle_data_.find(source_particle_id);
+      if (it != current_batch_particle_data_.end()) {
+        particle_data_ptr = &(it->second);
+
+        // 确保数据大小正确
+        if (particle_data_ptr->size() != spatial_size_) {
+          particle_data_ptr->resize(spatial_size_, 0.0);
+        }
+      } else {
+        // 创建新的粒子数据条目
+        auto result = current_batch_particle_data_.emplace(
+          source_particle_id, vector<double>(spatial_size_, 0.0));
+        particle_data_ptr = &(result.first->second);
+      }
     }
 
-    // 额外检查：确保粒子数据的大小正确
-    auto& particle_data = current_batch_particle_data_[source_particle_id];
-    if (particle_data.size() != spatial_size_) {
-      std::cerr << "Warning: Particle data size mismatch: "
-                << particle_data.size() << " != " << spatial_size_ << std::endl;
-      particle_data.resize(spatial_size_, 0.0);
+    // 在锁外进行原子累积操作
+    if (particle_data_ptr == nullptr) {
+      return;
     }
 
     // 为特定源粒子累积贡献
 #pragma omp atomic
-    particle_data[index] += contribution;
+    (*particle_data_ptr)[index] += contribution;
 
     // 同时累积到总的格林函数中
 #pragma omp atomic
