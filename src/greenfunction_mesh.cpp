@@ -11,21 +11,75 @@
 #include "openmc/constants.h"
 #include "openmc/error.h"
 #include "openmc/file_utils.h"
+#include "openmc/geometry.h"
 #include "openmc/hdf5_interface.h"
 #include "openmc/simulation.h"
 #include "openmc/timer.h"
+#include "openmc/universe.h"
 #include "openmc/vector.h"
 
 namespace openmc {
 
-GreenFunctionMesh::GreenFunctionMesh(double resolution, int max_batches)
+GreenFunctionMesh::GreenFunctionMesh(double resolution, int max_batches,
+  bool auto_bounds, const std::array<double, 3>& manual_lower,
+  const std::array<double, 3>& manual_upper)
   : pitch_(resolution), inv_pitch_(1.0 / resolution), current_batch_id_(-1),
     max_batches_(max_batches)
 {
-  // 手动设定边界
-  // TODO: 这里可以改成读取模型的边界，目前是手动写死
-  double llc[3] = {0, 0, 0};
-  double urc[3] = {10, 10, 10};
+
+  double llc[3];
+  double urc[3];
+
+  if (auto_bounds) {
+    // 自动从根宇宙获取边界
+    auto bbox = model::universes.at(model::root_universe)->bounding_box();
+
+    llc[0] = bbox.xmin;
+    llc[1] = bbox.ymin;
+    llc[2] = bbox.zmin;
+
+    urc[0] = bbox.xmax;
+    urc[1] = bbox.ymax;
+    urc[2] = bbox.zmax;
+
+    // 检查是否有无限边界
+    bool has_infinite = false;
+    for (int i = 0; i < 3; ++i) {
+      if (llc[i] <= -INFTY || urc[i] >= INFTY) {
+        has_infinite = true;
+        break;
+      }
+    }
+
+    if (has_infinite) {
+      std::cerr << "Warning: Model has infinite boundaries. Using manual "
+                   "bounds instead."
+                << std::endl;
+      std::copy(manual_lower.begin(), manual_lower.end(), llc);
+      std::copy(manual_upper.begin(), manual_upper.end(), urc);
+    } else {
+      // 为边界添加一些边距，确保不会丢失边缘粒子
+      double margin = pitch_ * 0.1;
+      for (int i = 0; i < 3; ++i) {
+        llc[i] -= margin;
+        urc[i] += margin;
+      }
+
+      std::cout << "Auto-detected geometry bounds from root universe:"
+                << std::endl;
+      std::cout << "  Original: [" << bbox.xmin << "," << bbox.ymin << ","
+                << bbox.zmin << "] to [" << bbox.xmax << "," << bbox.ymax << ","
+                << bbox.zmax << "]" << std::endl;
+      std::cout << "  With margin (" << margin << "): [" << llc[0] << ","
+                << llc[1] << "," << llc[2] << "] to [" << urc[0] << ","
+                << urc[1] << "," << urc[2] << "]" << std::endl;
+    }
+  } else {
+    // 使用手动指定的边界
+    std::copy(manual_lower.begin(), manual_lower.end(), llc);
+    std::copy(manual_upper.begin(), manual_upper.end(), urc);
+  }
+
   origin_ = {llc[0], llc[1], llc[2]};
 
   // 计算网格尺寸

@@ -57,3 +57,9 @@ that a feature be added to the code, you may create an Issue on github.
 
 OpenMC is distributed under the MIT/X
 [license](https://docs.openmc.org/en/stable/license.html).
+
+## 格林函数功能
+
+OpenMC 现已支持每个源粒子的格林函数矩阵追踪。详细使用手册请参考：
+
+📘 [格林函数使用手册](docs/GREEN_FUNCTION_GUIDE.md)

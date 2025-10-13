@@ -15,7 +15,10 @@ namespace openmc {
 class GreenFunctionMesh {
 public:
   // 构造函数，初始化格林函数网格
-  explicit GreenFunctionMesh(double resolution, int max_batches);
+  explicit GreenFunctionMesh(double resolution, int max_batches,
+    bool auto_bounds = true,
+    const std::array<double, 3>& manual_lower = {0.0, 0.0, 0.0},
+    const std::array<double, 3>& manual_upper = {10.0, 10.0, 10.0});
 
   // 为特定源粒子累积贡献
   void accumulate(
@@ -55,9 +58,9 @@ private:
   size_t spatial_size_;          // 统计信息
   std::atomic<uint64_t> dropped_contributions_ {0};
   std::atomic<uint64_t> total_contributions_ {0};
-  
+
   // 线程同步
-  mutable std::mutex data_mutex_;  // 保护current_batch_particle_data_的访问
+  mutable std::mutex data_mutex_; // 保护current_batch_particle_data_的访问
 };
 
 } // namespace openmc
