@@ -304,9 +304,9 @@ void Particle::event_advance()
     score_track_derivative(*this, distance);
   }
 
-  // 累积格林函数贡献
+  // 累积通量格林函数贡献 (Flux Green's Function)
   if (simulation::green_function_mesh && material() != MATERIAL_VOID) {
-    // 计算格林函数贡献 - 使用通量贡献（权重 × 距离 / 总截面）
+    // 计算通量贡献（权重 × 距离 / 总截面）
     double contribution = 0.0;
     if (macro_xs().total > 0.0) {
       contribution = wgt() * distance / macro_xs().total;

@@ -243,7 +243,8 @@ const vector<double>& GreenFunctionMesh::get_particle_data(
   return empty_data;
 }
 
-void GreenFunctionMesh::finalize_greenfunction_mesh(const int batch_id)
+void GreenFunctionMesh::finalize_greenfunction_mesh(
+  const int batch_id, const std::string& filename)
 {
   // 保存最后一个batch的数据
   start_new_batch(-1); // 这会保存当前batch的数据
@@ -252,8 +253,8 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(const int batch_id)
     return;
   }
 
-  // 创建HDF5文件
-  hid_t file_id = file_open("green_function_data.h5", 'w');
+  // 创建HDF5文件，使用指定的文件名
+  hid_t file_id = file_open(filename, 'w');
 
   // 写入文件头部信息
   write_attribute(file_id, "filetype", "green_function_mesh_per_particle");

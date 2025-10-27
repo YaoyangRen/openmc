@@ -51,7 +51,11 @@ extern vector<double> k_generation;
 extern vector<int64_t> work_index;
 
 extern std::unique_ptr<GreenFunctionMesh>
-  green_function_mesh; // Greenfunction mesh
+  green_function_mesh; // Flux Green's Function mesh (通量格林函数)
+
+extern std::unique_ptr<GreenFunctionMesh>
+  fission_green_function_mesh; // Fission Source Green's Function mesh
+                               // (裂变源格林函数)
 
 } // namespace simulation
 

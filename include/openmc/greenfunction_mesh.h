@@ -27,8 +27,9 @@ public:
   // 开始新batch
   void start_new_batch(int batch_id);
 
-  // 写入文件
-  void finalize_greenfunction_mesh(const int batch_id);
+  // 写入文件（可指定文件名）
+  void finalize_greenfunction_mesh(
+    const int batch_id, const std::string& filename = "green_function_data.h5");
 
   // 获取特定源粒子的数据
   const vector<double>& get_particle_data(int64_t source_particle_id) const;
