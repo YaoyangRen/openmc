@@ -52,9 +52,7 @@ GreenFunctionMesh::GreenFunctionMesh(double resolution, int max_batches,
     }
 
     if (has_infinite) {
-      std::cerr << "Warning: Model has infinite boundaries. Using manual "
-                   "bounds instead."
-                << std::endl;
+      // 静默使用手动边界，在finalize时输出警告
       std::copy(manual_lower.begin(), manual_lower.end(), llc);
       std::copy(manual_upper.begin(), manual_upper.end(), urc);
     } else {
@@ -64,15 +62,7 @@ GreenFunctionMesh::GreenFunctionMesh(double resolution, int max_batches,
         llc[i] -= margin;
         urc[i] += margin;
       }
-
-      std::cout << "Auto-detected geometry bounds from root universe:"
-                << std::endl;
-      std::cout << "  Original: [" << bbox.xmin << "," << bbox.ymin << ","
-                << bbox.zmin << "] to [" << bbox.xmax << "," << bbox.ymax << ","
-                << bbox.zmax << "]" << std::endl;
-      std::cout << "  With margin (" << margin << "): [" << llc[0] << ","
-                << llc[1] << "," << llc[2] << "] to [" << urc[0] << ","
-                << urc[1] << "," << urc[2] << "]" << std::endl;
+      // 边界信息将在finalize时输出
     }
   } else {
     // 使用手动指定的边界
@@ -81,6 +71,7 @@ GreenFunctionMesh::GreenFunctionMesh(double resolution, int max_batches,
   }
 
   origin_ = {llc[0], llc[1], llc[2]};
+  upper_bound_ = {urc[0], urc[1], urc[2]};
 
   // 计算网格尺寸
   double dx = urc[0] - llc[0];
@@ -93,15 +84,7 @@ GreenFunctionMesh::GreenFunctionMesh(double resolution, int max_batches,
 
   spatial_size_ = static_cast<size_t>(shape_[0]) * shape_[1] * shape_[2];
 
-  // 调试信息
-  std::cout << "GreenFunctionMesh initialized:" << std::endl;
-  std::cout << "  Bounds: [" << llc[0] << "," << llc[1] << "," << llc[2]
-            << "] to [" << urc[0] << "," << urc[1] << "," << urc[2] << "]"
-            << std::endl;
-  std::cout << "  Pitch: " << pitch_ << std::endl;
-  std::cout << "  Shape: [" << shape_[0] << "," << shape_[1] << "," << shape_[2]
-            << "]" << std::endl;
-  std::cout << "  Spatial size: " << spatial_size_ << std::endl;
+  // 初始化信息将在finalize时输出
 
   // 初始化累积数据
   cumulative_data_.resize(spatial_size_, 0.0);
@@ -253,6 +236,27 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(
     return;
   }
 
+  // 输出格林函数网格配置信息
+  std::cout << "\n" << std::string(70, '=') << std::endl;
+  std::cout << "GREEN FUNCTION MESH FINALIZATION" << std::endl;
+  std::cout << std::string(70, '=') << std::endl;
+
+  std::cout << "\nGrid Configuration:" << std::endl;
+  std::cout << "  Bounds: [" << origin_[0] << "," << origin_[1] << ","
+            << origin_[2] << "] to [" << upper_bound_[0] << ","
+            << upper_bound_[1] << "," << upper_bound_[2] << "]" << std::endl;
+  std::cout << "  Pitch: " << pitch_ << " cm" << std::endl;
+  std::cout << "  Shape: [" << shape_[0] << "," << shape_[1] << "," << shape_[2]
+            << "]" << std::endl;
+  std::cout << "  Spatial size: " << spatial_size_ << std::endl;
+
+  std::cout << "\nData Collection Summary:" << std::endl;
+  std::cout << "  Number of source particles: "
+            << particle_green_functions_.size() << std::endl;
+  std::cout << "  Total contributions: " << total_contributions_ << std::endl;
+  std::cout << "  Dropped contributions: " << dropped_contributions_
+            << std::endl;
+
   // 创建HDF5文件，使用指定的文件名
   hid_t file_id = file_open(filename, 'w');
 
@@ -288,6 +292,9 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(
 
   H5Gclose(particles_group);
   file_close(file_id);
+
+  std::cout << "\nOutput File: " << filename << std::endl;
+  std::cout << std::string(70, '=') << std::endl;
 
   // 清理数据
   particle_green_functions_.clear();

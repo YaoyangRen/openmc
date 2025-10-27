@@ -50,13 +50,14 @@ private:
   // 累积所有源粒子的数据（总的格林函数）
   vector<double> cumulative_data_;
 
-  std::array<int, 3> shape_;     // 网格的形状（每个维度的单元数）
-  std::array<double, 3> origin_; // 网格的原点位置
-  double pitch_;                 // 网格单元的边长
-  double inv_pitch_;             // 网格单元边长的倒数
-  int current_batch_id_;         // 当前处理的batch ID
-  int max_batches_;              // 最大batch数量
-  size_t spatial_size_;          // 统计信息
+  std::array<int, 3> shape_;          // 网格的形状（每个维度的单元数）
+  std::array<double, 3> origin_;      // 网格的原点位置
+  std::array<double, 3> upper_bound_; // 上边界（用于输出）
+  double pitch_;                      // 网格单元的边长
+  double inv_pitch_;                  // 网格单元边长的倒数
+  int current_batch_id_;              // 当前处理的batch ID
+  int max_batches_;                   // 最大batch数量
+  size_t spatial_size_;               // 统计信息
   std::atomic<uint64_t> dropped_contributions_ {0};
   std::atomic<uint64_t> total_contributions_ {0};
 

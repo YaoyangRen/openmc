@@ -168,6 +168,12 @@ void Particle::from_source(const SourceSite* src)
   }
   // 对于新的源粒子，源粒子ID在initialize_history中设置
 
+  // 记录源粒子的出生位置到裂变矩阵
+  if (simulation::fission_matrix && source_particle_id() != -1) {
+    simulation::fission_matrix->record_source_birth(
+      src->r, source_particle_id());
+  }
+
   if (settings::run_CE) {
     E() = src->E;
     g() = 0;

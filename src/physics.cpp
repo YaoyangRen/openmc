@@ -178,6 +178,12 @@ void create_fission_sites(Particle& p, int i_nuclide, const Reaction& rx)
                 p.neutron_xs(i_nuclide).nu_fission /
                 p.neutron_xs(i_nuclide).total;
 
+  // 记录裂变事件到裂变矩阵
+  if (simulation::fission_matrix && p.source_particle_id() != -1) {
+    simulation::fission_matrix->record_fission_event(
+      p.r(), nu_t, p.source_particle_id());
+  }
+
   // Sample the number of neutrons produced
   int nu = static_cast<int>(nu_t);
   if (prn(p.current_seed()) <= (nu_t - nu))

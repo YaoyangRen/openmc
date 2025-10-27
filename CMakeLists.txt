@@ -448,6 +448,7 @@ list(APPEND libopenmc_SOURCES
   # ryy add
   src/clutch.cpp
   src/greenfunction_mesh.cpp
+  src/fission_matrix.cpp
 )
 
 # Add bundled external dependencies

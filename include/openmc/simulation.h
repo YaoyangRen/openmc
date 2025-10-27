@@ -4,6 +4,7 @@
 #ifndef OPENMC_SIMULATION_H
 #define OPENMC_SIMULATION_H
 
+#include "openmc/fission_matrix.h"
 #include "openmc/greenfunction_mesh.h"
 #include "openmc/mesh.h"
 #include "openmc/particle.h"
@@ -56,6 +57,9 @@ extern std::unique_ptr<GreenFunctionMesh>
 extern std::unique_ptr<GreenFunctionMesh>
   fission_green_function_mesh; // Fission Source Green's Function mesh
                                // (裂变源格林函数)
+
+extern std::unique_ptr<FissionMatrix>
+  fission_matrix; // Fission Matrix (裂变矩阵)
 
 } // namespace simulation
 
