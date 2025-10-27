@@ -43,11 +43,19 @@ private:
   // 将3D位置转换为线性索引
   int position_to_index(const Position& r) const;
 
-  // 裂变矩阵数据: F[i][j] = 源在i产生, 在j裂变的中子数
-  vector<vector<double>> fission_matrix_;
+  // 稀疏矩阵存储 (COO格式 - Coordinate format)
+  // 仅存储非零元素: (row, col, value)
+  struct SparseEntry {
+    size_t row;   // 源单元索引
+    size_t col;   // 裂变单元索引
+    double value; // 裂变中子数
+  };
 
-  // 当前batch的裂变矩阵
-  vector<vector<double>> current_batch_matrix_;
+  // 使用map存储当前batch的稀疏数据，key = row * n_cells + col
+  std::unordered_map<size_t, double> current_batch_sparse_;
+
+  // 累积的稀疏矩阵数据
+  std::unordered_map<size_t, double> fission_matrix_sparse_;
 
   // 记录每个源粒子的出生位置
   std::unordered_map<int64_t, int> source_birth_cells_;
