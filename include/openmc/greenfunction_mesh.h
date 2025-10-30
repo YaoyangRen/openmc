@@ -12,15 +12,36 @@
 
 namespace openmc {
 
+//! \class GreenFunctionMesh
+//! \brief 传递函数（Transfer Function）网格：T(P0 -> r)
+//!
+//! 根据传递函数理论：
+//!   T(P0 -> r) = ∫∫ ν̄Σf(r,E')Φ(r,Ω',E'|S0) dΩ'dE'
+//!
+//! 物理意义：
+//!   从初始相空间点 P0 出发的源中子在空间位置 r 处产生的
+//!   平均裂变中子数的期望值
+//!
+//! 实现方法：
+//!   - 路径积分累积：w × distance × ν̄Σf / Σt
+//!   - 裂变事件累积：w × ν̄Σf × σf / σt
+//!   均表示裂变中子产生率，而非通量
+//!
+//! 应用：
+//!   - 计算伴随通量
+//!   - 重要性函数求解
+//!   - 扰动分析
+//!
 class GreenFunctionMesh {
 public:
-  // 构造函数，初始化格林函数网格
+  // 构造函数，初始化传递函数网格
   explicit GreenFunctionMesh(double resolution, int max_batches,
     bool auto_bounds = true,
     const std::array<double, 3>& manual_lower = {0.0, 0.0, 0.0},
     const std::array<double, 3>& manual_upper = {10.0, 10.0, 10.0});
 
-  // 为特定源粒子累积贡献
+  // 为特定源粒子累积传递函数贡献
+  // contribution: w × distance × ν̄Σf / Σt (裂变中子产生数)
   void accumulate(
     const Position& r, double contribution, int64_t source_particle_id);
 
@@ -28,10 +49,10 @@ public:
   void start_new_batch(int batch_id);
 
   // 写入文件（可指定文件名）
-  void finalize_greenfunction_mesh(
-    const int batch_id, const std::string& filename = "green_function_data.h5");
+  void finalize_greenfunction_mesh(const int batch_id,
+    const std::string& filename = "transfer_function_data.h5");
 
-  // 获取特定源粒子的数据
+  // 获取特定源粒子的传递函数数据
   const vector<double>& get_particle_data(int64_t source_particle_id) const;
 
   // 网格尺寸信息
@@ -40,14 +61,14 @@ public:
   double pitch() const { return pitch_; }
 
 private:
-  // 每个源粒子的格林函数矩阵数据
-  // key: source_particle_id, value: 该粒子的格林函数数据
+  // 每个源粒子的传递函数矩阵数据 T_i(P_i -> r)
+  // key: source_particle_id, value: 该粒子的传递函数数据
   std::unordered_map<int64_t, vector<double>> particle_green_functions_;
 
-  // 当前batch中每个源粒子的数据
+  // 当前batch中每个源粒子的传递函数数据
   std::unordered_map<int64_t, vector<double>> current_batch_particle_data_;
 
-  // 累积所有源粒子的数据（总的格林函数）
+  // 累积所有源粒子的传递函数（总的传递函数）
   vector<double> cumulative_data_;
 
   std::array<int, 3> shape_;          // 网格的形状（每个维度的单元数）

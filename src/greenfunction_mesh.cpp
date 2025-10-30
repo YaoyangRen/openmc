@@ -93,6 +93,11 @@ GreenFunctionMesh::GreenFunctionMesh(double resolution, int max_batches,
 void GreenFunctionMesh::accumulate(
   const Position& r, double contribution, int64_t source_particle_id)
 {
+  // 累积传递函数 T(P0 -> r):
+  // contribution = w × distance × ν̄Σf / Σt (从 particle.cpp)
+  // 或 contribution = w × ν̄Σf × σf / σt (从 tally_scoring.cpp 裂变事件)
+  // 均表示源粒子在位置 r 处产生的平均裂变中子数
+
   constexpr double eps = 1.0e-10;
 
   // 验证源粒子ID
@@ -238,8 +243,15 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(
 
   // 输出格林函数网格配置信息
   std::cout << "\n" << std::string(70, '=') << std::endl;
-  std::cout << "GREEN FUNCTION MESH FINALIZATION" << std::endl;
+  std::cout << "GREEN FUNCTION MESH FINALIZATION (Transfer Function)"
+            << std::endl;
   std::cout << std::string(70, '=') << std::endl;
+
+  std::cout << "\nTransfer Function Theory:" << std::endl;
+  std::cout << "  T(P0 -> r) = ∫∫ ν̄Σf(r,E')Φ(r,Ω',E'|S0) dΩ'dE'" << std::endl;
+  std::cout << "  Represents: Expected number of fission neutrons produced at r"
+            << std::endl;
+  std::cout << "              by source particle from P0" << std::endl;
 
   std::cout << "\nGrid Configuration:" << std::endl;
   std::cout << "  Bounds: [" << origin_[0] << "," << origin_[1] << ","
@@ -261,22 +273,24 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(
   hid_t file_id = file_open(filename, 'w');
 
   // 写入文件头部信息
-  write_attribute(file_id, "filetype", "green_function_mesh_per_particle");
-  write_attribute(file_id, "version", "1.0");
+  write_attribute(file_id, "filetype", "transfer_function_mesh_per_particle");
+  write_attribute(file_id, "version", "2.0");
+  write_attribute(file_id, "description",
+    "Transfer function T(P0->r): Expected fission neutron production");
   write_attribute(file_id, "pitch", pitch_);
   write_dataset(file_id, "origin", origin_);
   write_dataset(file_id, "shape", shape_);
   write_attribute(file_id, "n_source_particles",
     static_cast<int>(particle_green_functions_.size()));
 
-  // 写入累积的总格林函数
-  write_dataset(file_id, "cumulative_green_function", cumulative_data_);
+  // 写入累积的传递函数（所有源粒子的总和）
+  write_dataset(file_id, "cumulative_transfer_function", cumulative_data_);
 
   // 为每个源粒子创建一个组
   hid_t particles_group = H5Gcreate(
     file_id, "source_particles", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
 
-  // 写入每个源粒子的格林函数
+  // 写入每个源粒子的传递函数 T_i(P_i -> r)
   for (const auto& [particle_id, data] : particle_green_functions_) {
     std::string particle_name = "particle_" + std::to_string(particle_id);
     write_dataset(particles_group, particle_name.c_str(), data);
