@@ -177,21 +177,20 @@ void FissionMatrix::start_new_batch(int batch_id)
       source_counts_[i] += current_batch_source_counts_[i];
     }
     n_realizations_++;
-    
+
     // 如果启用了batch级伴随源迭代，执行迭代更新
     if (enable_batch_adjoint_ && !fission_matrix_sparse_.empty()) {
       // 执行设定次数的迭代（不输出详细信息）
       perform_adjoint_iteration(adjoint_max_iter_per_batch_, false);
-      
+
       // 记录当前batch后的k_adjoint
       k_adjoint_history_.push_back(k_adjoint_);
-      
+
       // 输出简要信息
       std::cout << "  Batch " << std::setw(4) << current_batch_id_
-                << " adjoint update: k_adj = " << std::fixed 
-                << std::setprecision(8) << k_adjoint_
-                << " (after " << adjoint_max_iter_per_batch_ 
-                << " iterations)" << std::endl;
+                << " adjoint update: k_adj = " << std::fixed
+                << std::setprecision(8) << k_adjoint_ << " (after "
+                << adjoint_max_iter_per_batch_ << " iterations)" << std::endl;
     }
   }
 
@@ -212,12 +211,13 @@ void FissionMatrix::enable_batch_adjoint_iteration(
   enable_batch_adjoint_ = enable;
   adjoint_max_iter_per_batch_ = iterations_per_batch;
   adjoint_tolerance_ = tolerance;
-  
+
   if (enable) {
     std::cout << "\nEnabled batch-level adjoint source iteration:" << std::endl;
-    std::cout << "  Iterations per batch: " << iterations_per_batch << std::endl;
+    std::cout << "  Iterations per batch: " << iterations_per_batch
+              << std::endl;
     std::cout << "  Convergence tolerance: " << tolerance << std::endl;
-    
+
     // 初始化伴随源为均匀分布
     std::fill(adjoint_source_.begin(), adjoint_source_.end(), 1.0);
     double norm = static_cast<double>(n_cells_);
@@ -394,7 +394,9 @@ void FissionMatrix::perform_adjoint_iteration(int iterations, bool verbose)
 {
   if (fission_matrix_sparse_.empty()) {
     if (verbose) {
-      std::cerr << "Warning: Fission matrix is empty, skipping adjoint iteration" << std::endl;
+      std::cerr
+        << "Warning: Fission matrix is empty, skipping adjoint iteration"
+        << std::endl;
     }
     return;
   }
@@ -409,7 +411,7 @@ void FissionMatrix::perform_adjoint_iteration(int iterations, bool verbose)
     for (const auto& [key, F_ij] : fission_matrix_sparse_) {
       size_t i = key / n_cells_; // 源单元（行）
       size_t j = key % n_cells_; // 裂变单元（列）
-      
+
       // (F^T × I*)_j += F[i][j] × I*_i
       I_new[j] += F_ij * adjoint_source_[i];
     }
@@ -448,8 +450,8 @@ void FissionMatrix::perform_adjoint_iteration(int iterations, bool verbose)
     if (dk < adjoint_tolerance_) {
       if (verbose) {
         std::cout << "\nConverged at iteration " << (iter + 1) << std::endl;
-        std::cout << "  Final k_adjoint = " << std::fixed << std::setprecision(8)
-                  << k_adjoint_ << std::endl;
+        std::cout << "  Final k_adjoint = " << std::fixed
+                  << std::setprecision(8) << k_adjoint_ << std::endl;
         std::cout << "  Final dk = " << std::scientific << std::setprecision(2)
                   << dk << std::endl;
       }
@@ -576,12 +578,13 @@ void FissionMatrix::finalize(const std::string& filename)
     write_attribute(file_id, "k_adjoint", k_adjoint_);
     write_attribute(file_id, "adjoint_iterations", adjoint_iterations_);
     write_attribute(file_id, "adjoint_converged", adjoint_computed_);
-    
+
     // 如果有batch级迭代历史，写入
     if (!k_adjoint_history_.empty()) {
       write_dataset(file_id, "k_adjoint_history", k_adjoint_history_);
       write_attribute(file_id, "batch_adjoint_enabled", enable_batch_adjoint_);
-      write_attribute(file_id, "adjoint_iter_per_batch", adjoint_max_iter_per_batch_);
+      write_attribute(
+        file_id, "adjoint_iter_per_batch", adjoint_max_iter_per_batch_);
     }
   }
 
@@ -618,18 +621,20 @@ void FissionMatrix::finalize(const std::string& filename)
               << k_adjoint_ << std::endl;
     std::cout << "  Iterations: " << adjoint_iterations_ << std::endl;
     std::cout << "  Adjoint source saved to HDF5 file" << std::endl;
-    
+
     if (!k_adjoint_history_.empty()) {
       std::cout << "  Batch-level iteration enabled" << std::endl;
-      std::cout << "  Number of batches tracked: " << k_adjoint_history_.size() << std::endl;
+      std::cout << "  Number of batches tracked: " << k_adjoint_history_.size()
+                << std::endl;
       std::cout << "  k_adjoint convergence:" << std::endl;
       std::cout << "    Initial = " << k_adjoint_history_.front() << std::endl;
       std::cout << "    Final   = " << k_adjoint_history_.back() << std::endl;
-      
+
       // 计算收敛速率
       if (k_adjoint_history_.size() > 1) {
-        double dk_total = std::abs(k_adjoint_history_.back() - k_adjoint_history_.front());
-        std::cout << "    Change  = " << std::scientific << std::setprecision(3) 
+        double dk_total =
+          std::abs(k_adjoint_history_.back() - k_adjoint_history_.front());
+        std::cout << "    Change  = " << std::scientific << std::setprecision(3)
                   << dk_total << std::endl;
       }
     }
