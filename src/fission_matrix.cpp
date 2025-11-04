@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
 #include <iostream>
 
 #include "openmc/capi.h"
@@ -18,7 +19,10 @@ FissionMatrix::FissionMatrix(double resolution, int max_batches,
   bool auto_bounds, const std::array<double, 3>& manual_lower,
   const std::array<double, 3>& manual_upper)
   : pitch_(resolution), inv_pitch_(1.0 / resolution), current_batch_id_(-1),
-    max_batches_(max_batches), n_realizations_(0)
+    max_batches_(max_batches), n_realizations_(0), k_adjoint_(0.0),
+    adjoint_computed_(false), adjoint_iterations_(0),
+    enable_batch_adjoint_(false), adjoint_max_iter_per_batch_(10),
+    adjoint_tolerance_(1.0e-6)
 {
   double llc[3];
   double urc[3];
@@ -80,6 +84,10 @@ FissionMatrix::FissionMatrix(double resolution, int max_batches,
   // fission_matrix_sparse_ 和 current_batch_sparse_ 会按需增长
   source_counts_.resize(n_cells_, 0.0);
   current_batch_source_counts_.resize(n_cells_, 0.0);
+
+  // 初始化伴随源和正向源分布
+  adjoint_source_.resize(n_cells_, 0.0);
+  forward_source_.resize(n_cells_, 0.0);
 
   // 初始化信息将在finalize时输出
 }
@@ -169,6 +177,22 @@ void FissionMatrix::start_new_batch(int batch_id)
       source_counts_[i] += current_batch_source_counts_[i];
     }
     n_realizations_++;
+    
+    // 如果启用了batch级伴随源迭代，执行迭代更新
+    if (enable_batch_adjoint_ && !fission_matrix_sparse_.empty()) {
+      // 执行设定次数的迭代（不输出详细信息）
+      perform_adjoint_iteration(adjoint_max_iter_per_batch_, false);
+      
+      // 记录当前batch后的k_adjoint
+      k_adjoint_history_.push_back(k_adjoint_);
+      
+      // 输出简要信息
+      std::cout << "  Batch " << std::setw(4) << current_batch_id_
+                << " adjoint update: k_adj = " << std::fixed 
+                << std::setprecision(8) << k_adjoint_
+                << " (after " << adjoint_max_iter_per_batch_ 
+                << " iterations)" << std::endl;
+    }
   }
 
   // 开始新batch
@@ -180,6 +204,261 @@ void FissionMatrix::start_new_batch(int batch_id)
     current_batch_source_counts_.end(), 0.0);
 
   source_birth_cells_.clear();
+}
+
+void FissionMatrix::enable_batch_adjoint_iteration(
+  bool enable, int iterations_per_batch, double tolerance)
+{
+  enable_batch_adjoint_ = enable;
+  adjoint_max_iter_per_batch_ = iterations_per_batch;
+  adjoint_tolerance_ = tolerance;
+  
+  if (enable) {
+    std::cout << "\nEnabled batch-level adjoint source iteration:" << std::endl;
+    std::cout << "  Iterations per batch: " << iterations_per_batch << std::endl;
+    std::cout << "  Convergence tolerance: " << tolerance << std::endl;
+    
+    // 初始化伴随源为均匀分布
+    std::fill(adjoint_source_.begin(), adjoint_source_.end(), 1.0);
+    double norm = static_cast<double>(n_cells_);
+    for (size_t i = 0; i < n_cells_; ++i) {
+      adjoint_source_[i] /= norm;
+    }
+  }
+}
+
+void FissionMatrix::compute_adjoint_source(
+  const std::string& initial_guess, int max_iterations, double tolerance)
+{
+  std::cout << "\n" << std::string(70, '=') << std::endl;
+  std::cout << "ADJOINT SOURCE COMPUTATION" << std::endl;
+  std::cout << std::string(70, '=') << std::endl;
+
+  if (fission_matrix_sparse_.empty()) {
+    std::cerr << "Error: Fission matrix is empty. Cannot compute adjoint "
+                 "source."
+              << std::endl;
+    return;
+  }
+
+  // 初始化伴随源分布 I*
+  std::cout << "\nInitializing adjoint source..." << std::endl;
+  std::cout << "  Initial guess: " << initial_guess << std::endl;
+
+  if (initial_guess == "uniform") {
+    // 均匀分布初始化: I* = 1 (归一化后)
+    std::fill(adjoint_source_.begin(), adjoint_source_.end(), 1.0);
+    std::cout << "  Using uniform distribution: I*(i) = 1.0" << std::endl;
+  } else if (initial_guess == "forward") {
+    // 使用正向源分布初始化: I* = S
+    // 正向源分布即为 source_counts_ (已归一化)
+    double total_sources = 0.0;
+    for (size_t i = 0; i < n_cells_; ++i) {
+      total_sources += source_counts_[i];
+    }
+
+    if (total_sources > 0.0) {
+      for (size_t i = 0; i < n_cells_; ++i) {
+        adjoint_source_[i] = source_counts_[i] / total_sources;
+      }
+      std::cout << "  Using forward source distribution" << std::endl;
+    } else {
+      std::cerr << "Warning: Forward source is zero, using uniform instead"
+                << std::endl;
+      std::fill(adjoint_source_.begin(), adjoint_source_.end(), 1.0);
+    }
+  } else {
+    std::cerr << "Warning: Unknown initial guess '" << initial_guess
+              << "', using uniform" << std::endl;
+    std::fill(adjoint_source_.begin(), adjoint_source_.end(), 1.0);
+  }
+
+  // 归一化初始向量
+  double norm = 0.0;
+  for (double val : adjoint_source_) {
+    norm += val;
+  }
+  if (norm > 0.0) {
+    for (size_t i = 0; i < n_cells_; ++i) {
+      adjoint_source_[i] /= norm;
+    }
+  }
+
+  // 幂迭代法求解伴随源
+  // I* = (1/k) F^T I*
+  std::cout << "\nPerforming power iteration..." << std::endl;
+  std::cout << "  Max iterations: " << max_iterations << std::endl;
+  std::cout << "  Tolerance: " << tolerance << std::endl;
+
+  vector<double> I_new(n_cells_, 0.0);
+  double k_old = 1.0;
+  k_adjoint_ = 1.0;
+  adjoint_iterations_ = 0;
+
+  for (int iter = 0; iter < max_iterations; ++iter) {
+    // 计算 F^T × I*
+    // 由于 F[i][j] 存储为 key = i * n_cells + j
+    // F^T[j][i] = F[i][j]
+    // (F^T × I*)_j = Σ_i F^T[j][i] × I*_i = Σ_i F[i][j] × I*_i
+
+    std::fill(I_new.begin(), I_new.end(), 0.0);
+
+    for (const auto& [key, F_ij] : fission_matrix_sparse_) {
+      size_t i = key / n_cells_; // 源单元（行）
+      size_t j = key % n_cells_; // 裂变单元（列）
+
+      // F^T[j][i] = F[i][j]
+      // (F^T × I*)_j += F[i][j] × I*_i
+      I_new[j] += F_ij * adjoint_source_[i];
+    }
+
+    // 计算特征值 k = Σ I_new
+    k_adjoint_ = 0.0;
+    for (double val : I_new) {
+      k_adjoint_ += val;
+    }
+
+    if (k_adjoint_ == 0.0) {
+      std::cerr << "Error: k = 0 at iteration " << iter << std::endl;
+      break;
+    }
+
+    // 归一化: I* = I_new / k
+    for (size_t i = 0; i < n_cells_; ++i) {
+      adjoint_source_[i] = I_new[i] / k_adjoint_;
+    }
+
+    // 检查收敛性
+    double dk = std::abs(k_adjoint_ - k_old);
+    adjoint_iterations_ = iter + 1;
+
+    // 每50次迭代输出进度
+    if ((iter + 1) % 50 == 0 || iter == 0) {
+      std::cout << "  Iteration " << std::setw(4) << (iter + 1)
+                << ": k_adj = " << std::setw(10) << std::fixed
+                << std::setprecision(6) << k_adjoint_
+                << ", dk = " << std::scientific << std::setprecision(2) << dk
+                << std::endl;
+    }
+
+    if (dk < tolerance) {
+      std::cout << "\nConverged at iteration " << (iter + 1) << std::endl;
+      std::cout << "  Final k_adjoint = " << std::fixed << std::setprecision(8)
+                << k_adjoint_ << std::endl;
+      std::cout << "  Final dk = " << std::scientific << std::setprecision(2)
+                << dk << std::endl;
+      adjoint_computed_ = true;
+      break;
+    }
+
+    k_old = k_adjoint_;
+
+    if (iter == max_iterations - 1) {
+      std::cout << "\nWarning: Maximum iterations reached without convergence"
+                << std::endl;
+      std::cout << "  Final k_adjoint = " << std::fixed << std::setprecision(8)
+                << k_adjoint_ << std::endl;
+      std::cout << "  Final dk = " << std::scientific << std::setprecision(2)
+                << dk << std::endl;
+      adjoint_computed_ = true; // 仍标记为已计算
+    }
+  }
+
+  // 计算伴随源的统计信息
+  double max_adjoint = 0.0;
+  double min_adjoint = 1.0e100;
+  double sum_adjoint = 0.0;
+  int nonzero_count = 0;
+
+  for (size_t i = 0; i < n_cells_; ++i) {
+    if (adjoint_source_[i] > 0.0) {
+      max_adjoint = std::max(max_adjoint, adjoint_source_[i]);
+      min_adjoint = std::min(min_adjoint, adjoint_source_[i]);
+      sum_adjoint += adjoint_source_[i];
+      nonzero_count++;
+    }
+  }
+
+  std::cout << "\nAdjoint Source Statistics:" << std::endl;
+  std::cout << "  Nonzero cells: " << nonzero_count << " / " << n_cells_
+            << std::endl;
+  std::cout << "  Max value: " << std::scientific << std::setprecision(6)
+            << max_adjoint << std::endl;
+  std::cout << "  Min value: " << min_adjoint << std::endl;
+  std::cout << "  Sum: " << sum_adjoint << std::endl;
+
+  std::cout << std::string(70, '=') << std::endl;
+}
+
+void FissionMatrix::perform_adjoint_iteration(int iterations, bool verbose)
+{
+  if (fission_matrix_sparse_.empty()) {
+    if (verbose) {
+      std::cerr << "Warning: Fission matrix is empty, skipping adjoint iteration" << std::endl;
+    }
+    return;
+  }
+
+  vector<double> I_new(n_cells_, 0.0);
+  double k_old = k_adjoint_;
+
+  for (int iter = 0; iter < iterations; ++iter) {
+    // 计算 F^T × I*
+    std::fill(I_new.begin(), I_new.end(), 0.0);
+
+    for (const auto& [key, F_ij] : fission_matrix_sparse_) {
+      size_t i = key / n_cells_; // 源单元（行）
+      size_t j = key % n_cells_; // 裂变单元（列）
+      
+      // (F^T × I*)_j += F[i][j] × I*_i
+      I_new[j] += F_ij * adjoint_source_[i];
+    }
+
+    // 计算特征值 k = Σ I_new
+    k_adjoint_ = 0.0;
+    for (double val : I_new) {
+      k_adjoint_ += val;
+    }
+
+    if (k_adjoint_ == 0.0) {
+      if (verbose) {
+        std::cerr << "Error: k = 0 at iteration " << iter << std::endl;
+      }
+      break;
+    }
+
+    // 归一化: I* = I_new / k
+    for (size_t i = 0; i < n_cells_; ++i) {
+      adjoint_source_[i] = I_new[i] / k_adjoint_;
+    }
+
+    // 检查收敛性
+    double dk = std::abs(k_adjoint_ - k_old);
+    adjoint_iterations_++;
+
+    // 详细输出（每50次迭代或收敛时）
+    if (verbose && ((iter + 1) % 50 == 0 || iter == 0)) {
+      std::cout << "  Iteration " << std::setw(4) << (iter + 1)
+                << ": k_adj = " << std::setw(10) << std::fixed
+                << std::setprecision(6) << k_adjoint_
+                << ", dk = " << std::scientific << std::setprecision(2) << dk
+                << std::endl;
+    }
+
+    if (dk < adjoint_tolerance_) {
+      if (verbose) {
+        std::cout << "\nConverged at iteration " << (iter + 1) << std::endl;
+        std::cout << "  Final k_adjoint = " << std::fixed << std::setprecision(8)
+                  << k_adjoint_ << std::endl;
+        std::cout << "  Final dk = " << std::scientific << std::setprecision(2)
+                  << dk << std::endl;
+      }
+      adjoint_computed_ = true;
+      break;
+    }
+
+    k_old = k_adjoint_;
+  }
 }
 
 void FissionMatrix::finalize(const std::string& filename)
@@ -291,6 +570,21 @@ void FissionMatrix::finalize(const std::string& filename)
   // 写入源计数
   write_dataset(file_id, "source_counts", source_counts_);
 
+  // 写入伴随源分布（如果已计算）
+  if (adjoint_computed_) {
+    write_dataset(file_id, "adjoint_source", adjoint_source_);
+    write_attribute(file_id, "k_adjoint", k_adjoint_);
+    write_attribute(file_id, "adjoint_iterations", adjoint_iterations_);
+    write_attribute(file_id, "adjoint_converged", adjoint_computed_);
+    
+    // 如果有batch级迭代历史，写入
+    if (!k_adjoint_history_.empty()) {
+      write_dataset(file_id, "k_adjoint_history", k_adjoint_history_);
+      write_attribute(file_id, "batch_adjoint_enabled", enable_batch_adjoint_);
+      write_attribute(file_id, "adjoint_iter_per_batch", adjoint_max_iter_per_batch_);
+    }
+  }
+
   file_close(file_id);
 
   // 统计信息
@@ -316,6 +610,30 @@ void FissionMatrix::finalize(const std::string& filename)
   std::cout << "  Sparsity: " << compression_ratio * 100.0 << "%" << std::endl;
   std::cout << "  Max normalized element: " << max_element << std::endl;
   std::cout << "  Sum of normalized matrix: " << sum_normalized << std::endl;
+
+  // 输出伴随源信息（如果已计算）
+  if (adjoint_computed_) {
+    std::cout << "\nAdjoint Source Information:" << std::endl;
+    std::cout << "  k_adjoint = " << std::fixed << std::setprecision(8)
+              << k_adjoint_ << std::endl;
+    std::cout << "  Iterations: " << adjoint_iterations_ << std::endl;
+    std::cout << "  Adjoint source saved to HDF5 file" << std::endl;
+    
+    if (!k_adjoint_history_.empty()) {
+      std::cout << "  Batch-level iteration enabled" << std::endl;
+      std::cout << "  Number of batches tracked: " << k_adjoint_history_.size() << std::endl;
+      std::cout << "  k_adjoint convergence:" << std::endl;
+      std::cout << "    Initial = " << k_adjoint_history_.front() << std::endl;
+      std::cout << "    Final   = " << k_adjoint_history_.back() << std::endl;
+      
+      // 计算收敛速率
+      if (k_adjoint_history_.size() > 1) {
+        double dk_total = std::abs(k_adjoint_history_.back() - k_adjoint_history_.front());
+        std::cout << "    Change  = " << std::scientific << std::setprecision(3) 
+                  << dk_total << std::endl;
+      }
+    }
+  }
 
   std::cout << "\nStorage Format: COO (Coordinate)" << std::endl;
   std::cout << "Output File: " << filename << std::endl;

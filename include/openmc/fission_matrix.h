@@ -33,6 +33,20 @@ public:
   // 最终化并写入文件
   void finalize(const std::string& filename = "fission_matrix.h5");
 
+  // 伴随源迭代计算（最终化时调用，执行更多迭代）
+  // initial_guess: "uniform" 均匀分布, "forward" 正向源分布
+  // max_iterations: 最大迭代次数
+  // tolerance: 收敛容差
+  void compute_adjoint_source(const std::string& initial_guess = "uniform",
+    int max_iterations = 1000, double tolerance = 1.0e-6);
+
+  // 启用/禁用每个batch后的伴随源迭代
+  // enable: 是否启用batch级伴随源迭代
+  // iterations_per_batch: 每个batch执行的迭代次数
+  // tolerance: 收敛容差
+  void enable_batch_adjoint_iteration(
+    bool enable = true, int iterations_per_batch = 10, double tolerance = 1.0e-6);
+
   // 网格信息
   const std::array<int, 3>& shape() const { return shape_; }
   const std::array<double, 3>& origin() const { return origin_; }
@@ -81,8 +95,29 @@ private:
   std::atomic<uint64_t> total_fissions_ {0};
   std::atomic<uint64_t> total_sources_ {0};
 
+  // 伴随源相关
+  vector<double> adjoint_source_;     // 伴随源分布 I*
+  vector<double> forward_source_;     // 正向源分布 S (用于初始化)
+  double k_adjoint_;                  // 伴随k值
+  bool adjoint_computed_;             // 是否已计算伴随源
+  int adjoint_iterations_;            // 实际迭代次数
+  
+  // batch级伴随源迭代控制
+  bool enable_batch_adjoint_;         // 是否启用每batch迭代
+  int adjoint_max_iter_per_batch_;    // 每batch迭代次数
+  double adjoint_tolerance_;          // 收敛容差
+  
+  // 伴随源收敛历史（记录每个batch的k_adjoint）
+  vector<double> k_adjoint_history_;  // k_adjoint随batch的变化
+
   // 线程安全
   mutable std::mutex data_mutex_;
+  
+private:
+  // 内部伴随源迭代函数（被batch和finalize调用）
+  // iterations: 本次迭代的次数
+  // verbose: 是否输出详细信息
+  void perform_adjoint_iteration(int iterations, bool verbose = false);
 };
 
 } // namespace openmc
