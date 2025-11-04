@@ -253,9 +253,11 @@ void FissionMatrix::start_new_batch(int batch_id)
       }
 
       // 简洁输出
-      std::cout << "  Batch " << std::setw(3) << current_batch_id_ << " adjoint: "
-                << "k_batch=" << std::fixed << std::setprecision(6) << k_adjoint_batch_
-                << ", k_accum=" << k_adjoint_accumulated_ << std::endl;
+      std::cout << "  Batch " << std::setw(3) << current_batch_id_
+                << " adjoint: "
+                << "k_batch=" << std::fixed << std::setprecision(6)
+                << k_adjoint_batch_ << ", k_accum=" << k_adjoint_accumulated_
+                << std::endl;
 
       adjoint_iterations_++;
       adjoint_computed_ = true;
@@ -291,7 +293,7 @@ void FissionMatrix::enable_batch_adjoint_iteration(
   adjoint_start_batch_ = start_batch;
 
   if (enable) {
-    std::cout << "\nBatch adjoint iteration: start=" << start_batch 
+    std::cout << "\nBatch adjoint iteration: start=" << start_batch
               << ", iter/batch=" << iterations_per_batch << std::endl;
 
     // 初始化两个伴随源为均匀分布
@@ -809,24 +811,27 @@ void FissionMatrix::finalize(const std::string& filename)
     std::cout << "\n" << std::string(70, '=') << std::endl;
     std::cout << "ADJOINT SOURCE SUMMARY" << std::endl;
     std::cout << std::string(70, '=') << std::endl;
-    
+
     // 统计非零单元
     int nonzero_batch = std::count_if(adjoint_source_batch_.begin(),
       adjoint_source_batch_.end(), [](double x) { return x > 1e-10; });
     int nonzero_accum = std::count_if(adjoint_source_accumulated_.begin(),
       adjoint_source_accumulated_.end(), [](double x) { return x > 1e-10; });
-    
-    std::cout << "\nBatch FM method:  k_final = " << std::fixed << std::setprecision(6)
-              << k_adjoint_batch_ << "  (nonzero cells: " << nonzero_batch << ")" << std::endl;
+
+    std::cout << "\nBatch FM method:  k_final = " << std::fixed
+              << std::setprecision(6) << k_adjoint_batch_
+              << "  (nonzero cells: " << nonzero_batch << ")" << std::endl;
     std::cout << "Accum FM method:  k_final = " << k_adjoint_accumulated_
               << "  (nonzero cells: " << nonzero_accum << ")" << std::endl;
 
     if (!k_adjoint_history_batch_.empty()) {
       std::cout << "\nConvergence: " << k_adjoint_history_batch_.size()
-                << " iterations from batch " << adjoint_start_batch_ << std::endl;
+                << " iterations from batch " << adjoint_start_batch_
+                << std::endl;
     }
-    
-    std::cout << "Saved to '" << filename << "': adjoint_source_batch, adjoint_source_accumulated"
+
+    std::cout << "Saved to '" << filename
+              << "': adjoint_source_batch, adjoint_source_accumulated"
               << std::endl;
     std::cout << std::string(70, '=') << std::endl;
   }
