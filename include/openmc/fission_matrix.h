@@ -44,8 +44,10 @@ public:
   // enable: 是否启用batch级伴随源迭代
   // iterations_per_batch: 每个batch执行的迭代次数
   // tolerance: 收敛容差
+  // start_batch: 从哪个batch开始统计（默认从第5个batch开始）
   void enable_batch_adjoint_iteration(bool enable = true,
-    int iterations_per_batch = 10, double tolerance = 1.0e-6);
+    int iterations_per_batch = 10, double tolerance = 1.0e-6,
+    int start_batch = 5);
 
   // 网格信息
   const std::array<int, 3>& shape() const { return shape_; }
@@ -96,19 +98,25 @@ private:
   std::atomic<uint64_t> total_sources_ {0};
 
   // 伴随源相关
-  vector<double> adjoint_source_; // 伴随源分布 I*
-  vector<double> forward_source_; // 正向源分布 S (用于初始化)
-  double k_adjoint_;              // 伴随k值
-  bool adjoint_computed_;         // 是否已计算伴随源
-  int adjoint_iterations_;        // 实际迭代次数
+  vector<double> adjoint_source_;       // 伴随源分布 I* (默认，使用累积FM)
+  vector<double> adjoint_source_batch_; // 使用每个batch的FM逐步迭代
+  vector<double> adjoint_source_accumulated_; // 使用累积的FM逐步迭代
+  vector<double> forward_source_;             // 正向源分布 S (用于初始化)
+  double k_adjoint_;                          // 伴随k值 (累积FM的)
+  double k_adjoint_batch_;                    // 使用batch FM的k值
+  double k_adjoint_accumulated_;              // 使用累积FM的k值
+  bool adjoint_computed_;                     // 是否已计算伴随源
+  int adjoint_iterations_;                    // 实际迭代次数
 
   // batch级伴随源迭代控制
   bool enable_batch_adjoint_;      // 是否启用每batch迭代
   int adjoint_max_iter_per_batch_; // 每batch迭代次数
   double adjoint_tolerance_;       // 收敛容差
+  int adjoint_start_batch_;        // 从哪个batch开始统计FM和计算伴随源
 
   // 伴随源收敛历史（记录每个batch的k_adjoint）
-  vector<double> k_adjoint_history_; // k_adjoint随batch的变化
+  vector<double> k_adjoint_history_batch_;       // batch FM的k历史
+  vector<double> k_adjoint_history_accumulated_; // 累积FM的k历史
 
   // 线程安全
   mutable std::mutex data_mutex_;
@@ -117,7 +125,9 @@ private:
   // 内部伴随源迭代函数（被batch和finalize调用）
   // iterations: 本次迭代的次数
   // verbose: 是否输出详细信息
-  void perform_adjoint_iteration(int iterations, bool verbose = false);
+  // use_current_batch: true=仅用当前batch的矩阵, false=用累积矩阵
+  void perform_adjoint_iteration(
+    int iterations, bool verbose = false, bool use_current_batch = false);
 };
 
 } // namespace openmc

@@ -411,6 +411,12 @@ void initialize_batch()
   if (!simulation::fission_matrix) {
     simulation::fission_matrix = std::make_unique<FissionMatrix>(
       1.0, settings::n_batches, true); // 1cm分辨率，自动获取边界
+
+    // 启用batch级伴随源迭代（每个batch执行10次迭代）
+    simulation::fission_matrix->enable_batch_adjoint_iteration(true, // 启用
+      10,    // 每batch迭代10次
+      1.0e-6 // 收敛容差
+    );
   }
 
   // Add user tallies to active tallies list
@@ -442,11 +448,30 @@ void initialize_batch()
   //     simulation::fission_matrix->start_new_batch(simulation::current_batch);
   //   }
   // }
+
   // 选项 3: 仅在非活跃代运行裂变矩阵（当前激活）✓
-  if (settings::clutch_on &&
+  // if (settings::clutch_on &&
+  //     simulation::current_batch <= settings::n_inactive) {
+  //   if (simulation::fission_matrix) {
+  //     simulation::fission_matrix->start_new_batch(simulation::current_batch);
+  //   }
+  // }
+
+  // 选项 4: 裂变矩阵仅在非活跃代运行（独立于clutch_on）
+  if (simulation::fission_matrix &&
       simulation::current_batch <= settings::n_inactive) {
-    if (simulation::fission_matrix) {
-      simulation::fission_matrix->start_new_batch(simulation::current_batch);
+    simulation::fission_matrix->start_new_batch(simulation::current_batch);
+  }
+
+  // 格林函数mesh的batch管理
+  if (settings::clutch_on) {
+    if (simulation::green_function_mesh) {
+      simulation::green_function_mesh->start_new_batch(
+        simulation::current_batch);
+    }
+    if (simulation::fission_green_function_mesh) {
+      simulation::fission_green_function_mesh->start_new_batch(
+        simulation::current_batch);
     }
   }
 }
@@ -568,11 +593,16 @@ void finalize_batch()
         simulation::current_batch,
         "fission_green_function_data.h5"); // 裂变源格林函数文件
     }
+  }
 
-    // 输出裂变矩阵数据
-    if (simulation::fission_matrix) {
-      simulation::fission_matrix->finalize("fission_matrix.h5");
-    }
+  // 输出裂变矩阵数据（在非活跃代结束时）
+  if (simulation::fission_matrix &&
+      simulation::current_batch == settings::n_inactive) {
+    std::cout << "\n" << std::string(70, '=') << std::endl;
+    std::cout << "FINALIZING FISSION MATRIX (End of Inactive Batches)"
+              << std::endl;
+    std::cout << std::string(70, '=') << std::endl;
+    simulation::fission_matrix->finalize("fission_matrix.h5");
   }
 
   // RYY ADD: 在最后一个batch输出随机粒子的源追踪信息
