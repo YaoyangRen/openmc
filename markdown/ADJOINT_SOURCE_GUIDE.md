@@ -38,7 +38,7 @@ $$\vec{I^*} = \frac{1}{k} \vec{F^*} \vec{I^*} = \frac{1}{k} \vec{F^T} \vec{I^*}$
 
 采用经典幂迭代（Power Iteration）算法：
 
-```
+```txt
 初始化: I* = I_0
 重复直到收敛:
     1. I_new = F^T × I*
