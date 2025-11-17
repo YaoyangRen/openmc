@@ -86,128 +86,156 @@ GreenFunctionMesh::GreenFunctionMesh(double resolution, int max_batches,
 
   // 初始化信息将在finalize时输出
 
-  // 初始化累积数据
+  // 初始化累积数据和源计数
   cumulative_data_.resize(spatial_size_, 0.0);
+  source_counts_.resize(spatial_size_, 0);
 }
 
-void GreenFunctionMesh::accumulate(
-  const Position& r, double contribution, int64_t source_particle_id)
+int GreenFunctionMesh::position_to_cell_index(const Position& r) const
 {
-  // 累积传递函数 T(P0 -> r):
-  // contribution = w × distance × ν̄Σf / Σt (从 particle.cpp)
-  // 或 contribution = w × ν̄Σf × σf / σt (从 tally_scoring.cpp 裂变事件)
-  // 均表示源粒子在位置 r 处产生的平均裂变中子数
-
   constexpr double eps = 1.0e-10;
-
-  // 验证源粒子ID
-  if (source_particle_id < 0) {
-    return; // 静默忽略无效ID，避免过多调试输出
-  }
-
-  // 验证贡献值
-  if (!std::isfinite(contribution) || contribution < 0.0) {
-    return; // 忽略无效的贡献值
-  }
 
   int ix = static_cast<int>(std::floor((r.x - origin_[0] + eps) * inv_pitch_));
   int iy = static_cast<int>(std::floor((r.y - origin_[1] + eps) * inv_pitch_));
   int iz = static_cast<int>(std::floor((r.z - origin_[2] + eps) * inv_pitch_));
 
   // 边界检查
-  if (ix >= 0 && ix < shape_[0] && iy >= 0 && iy < shape_[1] && iz >= 0 &&
-      iz < shape_[2]) {
-    // 计算线性索引 EG: index = ix + shape_[0] * (iy + shape_[1] * iz);
-    size_t index = static_cast<size_t>(ix) +
-                   static_cast<size_t>(shape_[0]) *
-                     (static_cast<size_t>(iy) + static_cast<size_t>(shape_[1]) *
-                                                  static_cast<size_t>(iz));
-
-    // 额外的安全检查，确保索引在有效范围内
-    if (index >= spatial_size_) {
-      // 这不应该发生，但为了安全起见
-      std::cerr << "Warning: GreenFunctionMesh index out of bounds: " << index
-                << " >= " << spatial_size_ << " (ix=" << ix << ", iy=" << iy
-                << ", iz=" << iz << ")" << std::endl;
-      return;
-    }
-
-    // 线程安全地获取或创建粒子数据
-    vector<double>* particle_data_ptr = nullptr;
-
-    {
-      std::lock_guard<std::mutex> lock(data_mutex_);
-
-      auto it = current_batch_particle_data_.find(source_particle_id);
-      if (it != current_batch_particle_data_.end()) {
-        particle_data_ptr = &(it->second);
-
-        // 确保数据大小正确
-        if (particle_data_ptr->size() != spatial_size_) {
-          particle_data_ptr->resize(spatial_size_, 0.0);
-        }
-      } else {
-        // 创建新的粒子数据条目
-        auto result = current_batch_particle_data_.emplace(
-          source_particle_id, vector<double>(spatial_size_, 0.0));
-        particle_data_ptr = &(result.first->second);
-      }
-    }
-
-    // 在锁外进行原子累积操作
-    if (particle_data_ptr == nullptr) {
-      return;
-    }
-
-    // 为特定源粒子累积贡献
-#pragma omp atomic
-    (*particle_data_ptr)[index] += contribution;
-
-    // 同时累积到总的格林函数中
-#pragma omp atomic
-    cumulative_data_[index] += contribution;
-
-    total_contributions_++;
-  } else {
-    dropped_contributions_++;
+  if (ix < 0 || ix >= shape_[0] || iy < 0 || iy >= shape_[1] || iz < 0 ||
+      iz >= shape_[2]) {
+    return -1; // 超出边界
   }
+
+  // 计算线性索引
+  return ix * shape_[1] * shape_[2] + iy * shape_[2] + iz;
+}
+
+void GreenFunctionMesh::record_source_birth(
+  const Position& r, int64_t source_particle_id)
+{
+  // 验证源粒子ID
+  if (source_particle_id < 0) {
+    return;
+  }
+
+  // 计算源单元索引
+  int i_source = position_to_cell_index(r);
+
+  if (i_source < 0) {
+    // 源粒子在网格边界外，静默忽略
+    return;
+  }
+
+  // 记录源粒子到源单元的映射
+  particle_to_source_cell_[source_particle_id] = i_source;
+
+  // 增加该源单元的计数
+  source_counts_[i_source]++;
+
+  // 初始化该源单元的传递函数数组（如果尚未初始化）
+  std::lock_guard<std::mutex> lock(data_mutex_);
+  if (transfer_functions_.find(i_source) == transfer_functions_.end()) {
+    transfer_functions_[i_source].resize(spatial_size_, 0.0);
+  }
+  if (current_batch_transfer_data_.find(i_source) ==
+      current_batch_transfer_data_.end()) {
+    current_batch_transfer_data_[i_source].resize(spatial_size_, 0.0);
+  }
+}
+
+void GreenFunctionMesh::accumulate(
+  const Position& r, double contribution, int64_t source_particle_id)
+{
+  // 累积传递函数 T(r_source -> r_response):
+  // contribution = nu_t = (w/k_eff) × w_ufs × (ν̄Σf/Σt)
+  // 表示源位置在响应位置 r 处产生的期望裂变中子数
+
+  // 验证源粒子ID
+  if (source_particle_id < 0) {
+    return;
+  }
+
+  // 验证贡献值
+  if (!std::isfinite(contribution) || contribution < 0.0) {
+    return;
+  }
+
+  // 查找源单元
+  auto it = particle_to_source_cell_.find(source_particle_id);
+  if (it == particle_to_source_cell_.end()) {
+    // 这个粒子没有记录源位置，忽略
+    return;
+  }
+
+  int i_source = it->second;
+
+  // 计算响应位置的单元索引
+  int j_response = position_to_cell_index(r);
+
+  if (j_response < 0) {
+    dropped_contributions_++;
+    return;
+  }
+
+  // 线程安全地获取源单元数据
+  vector<double>* source_data_ptr = nullptr;
+
+  {
+    std::lock_guard<std::mutex> lock(data_mutex_);
+
+    auto sit = current_batch_transfer_data_.find(i_source);
+    if (sit != current_batch_transfer_data_.end()) {
+      source_data_ptr = &(sit->second);
+
+      // 确保数据大小正确
+      if (source_data_ptr->size() != spatial_size_) {
+        source_data_ptr->resize(spatial_size_, 0.0);
+      }
+    } else {
+      // 创建新的源单元数据条目
+      auto result = current_batch_transfer_data_.emplace(
+        i_source, vector<double>(spatial_size_, 0.0));
+      source_data_ptr = &(result.first->second);
+    }
+  }
+
+  if (source_data_ptr == nullptr) {
+    return;
+  }
+
+  // 为特定源单元累积贡献
+#pragma omp atomic
+  (*source_data_ptr)[j_response] += contribution;
+
+  // 同时累积到总的传递函数中
+#pragma omp atomic
+  cumulative_data_[j_response] += contribution;
+
+  total_contributions_++;
 }
 
 void GreenFunctionMesh::start_new_batch(int batch_id)
 {
   // 保存上一个batch的数据
   if (current_batch_id_ >= 0) {
-    for (const auto& [particle_id, data] : current_batch_particle_data_) {
+    for (const auto& [i_source, data] : current_batch_transfer_data_) {
       // 检查是否有非零数据
-      double particle_total = 0.0;
+      double source_total = 0.0;
       for (const auto& val : data) {
-        particle_total += val;
+        source_total += val;
       }
 
-      if (particle_total > 0.0) {
-        // 如果这个源粒子的格林函数还不存在，创建它
-        if (particle_green_functions_.find(particle_id) ==
-            particle_green_functions_.end()) {
-          particle_green_functions_[particle_id].resize(spatial_size_, 0.0);
+      if (source_total > 0.0) {
+        // 如果这个源单元的传递函数还不存在，创建它
+        if (transfer_functions_.find(i_source) == transfer_functions_.end()) {
+          transfer_functions_[i_source].resize(spatial_size_, 0.0);
         }
 
-        // 累积到该源粒子的总格林函数中
+        // 累积到该源单元的总传递函数中
         for (size_t i = 0; i < spatial_size_; ++i) {
-          // 安全检查
-          if (i >= data.size()) {
-            std::cerr
-              << "Warning: Data index out of bounds in start_new_batch: " << i
-              << " >= " << data.size() << std::endl;
+          if (i >= data.size() || i >= transfer_functions_[i_source].size()) {
             break;
           }
-          if (i >= particle_green_functions_[particle_id].size()) {
-            std::cerr
-              << "Warning: Particle green function index out of bounds: " << i
-              << " >= " << particle_green_functions_[particle_id].size()
-              << std::endl;
-            break;
-          }
-          particle_green_functions_[particle_id][i] += data[i];
+          transfer_functions_[i_source][i] += data[i];
         }
       }
     }
@@ -215,80 +243,112 @@ void GreenFunctionMesh::start_new_batch(int batch_id)
 
   // 开始新batch
   current_batch_id_ = batch_id;
-  current_batch_particle_data_.clear();
+  current_batch_transfer_data_.clear();
 }
 
-const vector<double>& GreenFunctionMesh::get_particle_data(
-  int64_t source_particle_id) const
+const vector<double>& GreenFunctionMesh::get_source_cell_data(
+  int source_cell_index) const
 {
-  auto it = particle_green_functions_.find(source_particle_id);
-  if (it != particle_green_functions_.end()) {
+  auto it = transfer_functions_.find(source_cell_index);
+  if (it != transfer_functions_.end()) {
     return it->second;
   }
 
-  // 返回空向量或抛出异常
+  // 返回空向量
   static vector<double> empty_data;
   return empty_data;
+}
+
+const vector<int>& GreenFunctionMesh::get_source_cell_indices() const
+{
+  static vector<int> indices;
+  indices.clear();
+  indices.reserve(transfer_functions_.size());
+
+  for (const auto& [i_source, data] : transfer_functions_) {
+    indices.push_back(i_source);
+  }
+
+  std::sort(indices.begin(), indices.end());
+  return indices;
 }
 
 void GreenFunctionMesh::finalize_greenfunction_mesh(
   const int batch_id, const std::string& filename)
 {
   // 保存最后一个batch的数据
-  start_new_batch(-1); // 这会保存当前batch的数据
+  start_new_batch(-1);
 
-  if (particle_green_functions_.empty()) {
+  if (transfer_functions_.empty()) {
     return;
   }
 
+  // 计算有源的单元数和总源粒子数
+  int n_source_cells = transfer_functions_.size();
+  int total_source_particles = 0;
+  for (const auto& count : source_counts_) {
+    total_source_particles += count;
+  }
+
   // 简洁输出传递函数信息
-  std::cout << "\nTransfer Function (Expected fission neutrons): "
-            << particle_green_functions_.size() << " source particles, "
-            << total_contributions_ << " contributions -> " << filename
-            << std::endl;
+  std::cout << "\nTransfer Function T(r_s->r): " << n_source_cells
+            << " source cells, " << total_source_particles
+            << " source particles, " << total_contributions_
+            << " contributions -> " << filename << std::endl;
 
   // 创建HDF5文件，使用指定的文件名
   hid_t file_id = file_open(filename, 'w');
 
   // 写入文件头部信息
-  write_attribute(file_id, "filetype", "transfer_function_mesh_per_particle");
+  write_attribute(file_id, "filetype", "transfer_function_mesh");
   write_attribute(file_id, "version", "2.0");
   write_attribute(file_id, "description",
-    "Transfer function T(P0->r): Expected fission neutron production");
+    "Transfer function T(r_source->r_response): Spatial convolution kernel");
   write_attribute(file_id, "pitch", pitch_);
   write_dataset(file_id, "origin", origin_);
   write_dataset(file_id, "shape", shape_);
-  write_attribute(file_id, "n_source_particles",
-    static_cast<int>(particle_green_functions_.size()));
+  write_attribute(file_id, "n_source_cells", n_source_cells);
+  write_attribute(file_id, "total_source_particles", total_source_particles);
 
-  // 写入累积的传递函数（所有源粒子的总和）
+  // 写入累积的传递函数（所有源单元的总和）
   write_dataset(file_id, "cumulative_transfer_function", cumulative_data_);
 
-  // 为每个源粒子创建一个组
-  hid_t particles_group = H5Gcreate(
-    file_id, "source_particles", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+  // 收集有源的单元索引列表
+  vector<int> source_cell_indices;
+  source_cell_indices.reserve(n_source_cells);
+  for (const auto& [i_source, data] : transfer_functions_) {
+    source_cell_indices.push_back(i_source);
+  }
+  std::sort(source_cell_indices.begin(), source_cell_indices.end());
+  write_dataset(file_id, "source_cell_indices", source_cell_indices);
 
-  // 写入每个源粒子的传递函数 T_i(P_i -> r)
-  for (const auto& [particle_id, data] : particle_green_functions_) {
-    std::string particle_name = "particle_" + std::to_string(particle_id);
-    write_dataset(particles_group, particle_name.c_str(), data);
+  // 收集每个源单元的粒子计数（仅有源的单元）
+  vector<int> source_counts_nonzero;
+  source_counts_nonzero.reserve(n_source_cells);
+  for (int i_source : source_cell_indices) {
+    source_counts_nonzero.push_back(source_counts_[i_source]);
+  }
+  write_dataset(file_id, "source_counts", source_counts_nonzero);
+
+  // 为每个源单元创建一个组
+  hid_t transfer_group = H5Gcreate(
+    file_id, "transfer_functions", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+
+  // 写入每个源单元的传递函数 T(i_source -> r)
+  for (const auto& [i_source, data] : transfer_functions_) {
+    std::string cell_name = "source_cell_" + std::to_string(i_source);
+    write_dataset(transfer_group, cell_name.c_str(), data);
   }
 
-  // 写入源粒子ID列表
-  vector<int64_t> particle_ids;
-  particle_ids.reserve(particle_green_functions_.size());
-  for (const auto& [particle_id, data] : particle_green_functions_) {
-    particle_ids.push_back(particle_id);
-  }
-  write_dataset(file_id, "source_particle_ids", particle_ids);
-
-  H5Gclose(particles_group);
+  H5Gclose(transfer_group);
   file_close(file_id);
 
   // 清理数据
-  particle_green_functions_.clear();
-  current_batch_particle_data_.clear();
+  transfer_functions_.clear();
+  current_batch_transfer_data_.clear();
   cumulative_data_.clear();
+  source_counts_.clear();
+  particle_to_source_cell_.clear();
 }
 
 } // namespace openmc

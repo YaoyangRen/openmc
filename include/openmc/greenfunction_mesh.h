@@ -13,22 +13,22 @@
 namespace openmc {
 
 //! \class GreenFunctionMesh
-//! \brief 传递函数（Transfer Function）网格：T(P0 -> r)
+//! \brief 传递函数（Transfer Function）网格：T(r_source -> r_response)
 //!
 //! 根据传递函数理论：
-//!   T(P0 -> r) = ∫∫ ν̄Σf(r,E')Φ(r,Ω',E'|S0) dΩ'dE'
+//!   T(r_s -> r) = ∫∫ ν̄Σf(r,E')Φ(r,Ω',E'|S(r_s)) dΩ'dE'
 //!
 //! 物理意义：
-//!   从初始相空间点 P0 出发的源中子在空间位置 r 处产生的
+//!   从源位置 r_s 出发的中子在响应位置 r 处产生的
 //!   平均裂变中子数的期望值
 //!
-//! 实现方法：
-//!   - 路径积分累积：w × distance × ν̄Σf / Σt
-//!   - 裂变事件累积：w × ν̄Σf × σf / σt
-//!   均表示裂变中子产生率，而非通量
+//! 数据结构：
+//!   - 按源单元索引存储：map<i_source, T(i -> r)>
+//!   - 便于与伴随源 S†(r_s) 进行空间卷积
+//!   - 共轭通量：Φ†(r) = Σ_i T(i -> r) × S†(i)
 //!
 //! 应用：
-//!   - 计算伴随通量
+//!   - 计算共轭通量（伴随通量）
 //!   - 重要性函数求解
 //!   - 扰动分析
 //!
@@ -39,6 +39,9 @@ public:
     bool auto_bounds = true,
     const std::array<double, 3>& manual_lower = {0.0, 0.0, 0.0},
     const std::array<double, 3>& manual_upper = {10.0, 10.0, 10.0});
+
+  // 记录源粒子的出生位置（建立源粒子ID到源单元的映射）
+  void record_source_birth(const Position& r, int64_t source_particle_id);
 
   // 为特定源粒子累积传递函数贡献
   // contribution: 期望裂变中子数 nu_t = (w/k_eff) × w_ufs × (ν̄Σf/Σt)
@@ -52,23 +55,37 @@ public:
   void finalize_greenfunction_mesh(const int batch_id,
     const std::string& filename = "transfer_function_data.h5");
 
-  // 获取特定源粒子的传递函数数据
-  const vector<double>& get_particle_data(int64_t source_particle_id) const;
+  // 获取特定源单元的传递函数数据 T(i_source -> r)
+  const vector<double>& get_source_cell_data(int source_cell_index) const;
+
+  // 获取源单元统计信息
+  const vector<int>& get_source_counts() const { return source_counts_; }
+  const vector<int>& get_source_cell_indices() const;
 
   // 网格尺寸信息
   const std::array<int, 3>& shape() const { return shape_; }
   const std::array<double, 3>& origin() const { return origin_; }
   double pitch() const { return pitch_; }
 
+  // 计算空间位置对应的单元索引
+  int position_to_cell_index(const Position& r) const;
+
 private:
-  // 每个源粒子的传递函数矩阵数据 T_i(P_i -> r)
-  // key: source_particle_id, value: 该粒子的传递函数数据
-  std::unordered_map<int64_t, vector<double>> particle_green_functions_;
+  // 核心数据：按源单元索引存储的传递函数
+  // Key: 源单元索引 i_source (0 到 nx*ny*nz-1)
+  // Value: 该源单元的传递函数 T(i_source -> r) [nx*ny*nz]
+  std::unordered_map<int, vector<double>> transfer_functions_;
 
-  // 当前batch中每个源粒子的传递函数数据
-  std::unordered_map<int64_t, vector<double>> current_batch_particle_data_;
+  // 当前batch中每个源单元的传递函数数据
+  std::unordered_map<int, vector<double>> current_batch_transfer_data_;
 
-  // 累积所有源粒子的传递函数（总的传递函数）
+  // 每个源单元产生的源粒子计数 [nx*ny*nz]
+  vector<int> source_counts_;
+
+  // 源粒子ID到源单元索引的映射
+  std::unordered_map<int64_t, int> particle_to_source_cell_;
+
+  // 累积所有源单元的传递函数（总的传递函数）
   vector<double> cumulative_data_;
 
   std::array<int, 3> shape_;          // 网格的形状（每个维度的单元数）

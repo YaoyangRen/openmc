@@ -449,6 +449,7 @@ list(APPEND libopenmc_SOURCES
   src/clutch.cpp
   src/greenfunction_mesh.cpp
   src/fission_matrix.cpp
+  #src/adjoint_flux.cpp
 )
 
 # Add bundled external dependencies

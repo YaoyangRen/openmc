@@ -62,6 +62,9 @@ public:
       [](double x) { return x > 1e-10; });
   }
 
+  // 获取伴随源数据（用于共轭通量计算）
+  const vector<double>& get_adjoint_source() const { return adjoint_source_; }
+
   // 网格信息
   const std::array<int, 3>& shape() const { return shape_; }
   const std::array<double, 3>& origin() const { return origin_; }

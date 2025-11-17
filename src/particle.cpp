@@ -174,6 +174,12 @@ void Particle::from_source(const SourceSite* src)
       src->r, source_particle_id());
   }
 
+  // 记录源粒子的出生位置到传递函数网格
+  if (simulation::transfer_function_mesh && source_particle_id() != -1) {
+    simulation::transfer_function_mesh->record_source_birth(
+      src->r, source_particle_id());
+  }
+
   if (settings::run_CE) {
     E() = src->E;
     g() = 0;
