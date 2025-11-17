@@ -75,10 +75,12 @@ private:
   // 外层 Key: 源单元索引 i_source (0 到 nx*ny*nz-1)
   // 内层 Key: 响应单元索引 j_response (0 到 nx*ny*nz-1)
   // Value: T(i_source -> j_response) 传递函数值
-  std::unordered_map<int, std::unordered_map<int, double>> transfer_functions_sparse_;
+  std::unordered_map<int, std::unordered_map<int, double>>
+    transfer_functions_sparse_;
 
   // 当前batch中每个源单元的传递函数数据（稀疏）
-  std::unordered_map<int, std::unordered_map<int, double>> current_batch_transfer_data_sparse_;
+  std::unordered_map<int, std::unordered_map<int, double>>
+    current_batch_transfer_data_sparse_;
 
   // 每个源单元产生的源粒子计数 [nx*ny*nz]
   vector<int> source_counts_;
