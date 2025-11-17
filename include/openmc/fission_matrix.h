@@ -49,6 +49,9 @@ public:
     int iterations_per_batch = 10, double tolerance = 1.0e-6,
     int start_batch = 5);
 
+  // 计算伴随源分布（用于最后一个非活跃batch）
+  void compute_batch_adjoint();
+
   // 网格信息
   const std::array<int, 3>& shape() const { return shape_; }
   const std::array<double, 3>& origin() const { return origin_; }

@@ -602,6 +602,11 @@ void finalize_batch()
     std::cout << "FINALIZING FISSION MATRIX (End of Inactive Batches)"
               << std::endl;
     std::cout << std::string(70, '=') << std::endl;
+
+    // 计算伴随源分布（使用累积的FM）
+    simulation::fission_matrix->compute_batch_adjoint();
+
+    // 输出到文件
     simulation::fission_matrix->finalize("fission_matrix.h5");
   }
 
