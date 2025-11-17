@@ -310,23 +310,6 @@ void Particle::event_advance()
     score_track_derivative(*this, distance);
   }
 
-  // 累积传递函数贡献 T(P0 -> r) = ∫∫ ν̄Σf(r,E')Φ(r,Ω',E'|S0) dΩ'dE'
-  // 通过路径积分统计：weight × distance × ν̄Σf / Σt
-  if (simulation::green_function_mesh && material() != MATERIAL_VOID) {
-    double contribution = 0.0;
-    if (macro_xs().total > 0.0) {
-      // 传递函数：统计该源粒子在空间点r处产生的平均裂变中子数
-      // contribution = w × (distance/Σt) × ν̄Σf = w × distance × ν̄Σf / Σt
-      contribution =
-        wgt() * distance * macro_xs().nu_fission / macro_xs().total;
-    }
-    // 只在有裂变截面时累积（contribution > 0）
-    if (contribution > 0.0) {
-      simulation::green_function_mesh->accumulate(
-        r(), contribution, source_particle_id());
-    }
-  }
-
   // Set particle weight to zero if it hit the time boundary
   if (distance == distance_cutoff) {
     wgt() = 0.0;

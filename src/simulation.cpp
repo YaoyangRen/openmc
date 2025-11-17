@@ -323,7 +323,6 @@ const RegularMesh* ufs_mesh {nullptr};
 vector<double> k_generation;
 vector<int64_t> work_index;
 
-std::unique_ptr<GreenFunctionMesh> green_function_mesh;
 std::unique_ptr<GreenFunctionMesh> fission_green_function_mesh;
 std::unique_ptr<FissionMatrix> fission_matrix;
 
@@ -394,12 +393,6 @@ void initialize_batch()
     }
   }
 
-  // Initialize flux green function mesh (通量格林函数)
-  if (!simulation::green_function_mesh) {
-    simulation::green_function_mesh = std::make_unique<GreenFunctionMesh>(
-      1.0, settings::n_batches, true); // 1cm分辨率，自动获取边界
-  }
-
   // Initialize fission source green function mesh (裂变源格林函数)
   if (!simulation::fission_green_function_mesh) {
     simulation::fission_green_function_mesh =
@@ -422,12 +415,8 @@ void initialize_batch()
   // Add user tallies to active tallies list
   setup_active_tallies();
 
-  // Start new batch for both green function meshes
+  // Start new batch for fission green function mesh
   if (settings::clutch_on) {
-    if (simulation::green_function_mesh) {
-      simulation::green_function_mesh->start_new_batch(
-        simulation::current_batch);
-    }
     if (simulation::fission_green_function_mesh) {
       simulation::fission_green_function_mesh->start_new_batch(
         simulation::current_batch);
@@ -465,10 +454,6 @@ void initialize_batch()
 
   // 格林函数mesh的batch管理
   if (settings::clutch_on) {
-    if (simulation::green_function_mesh) {
-      simulation::green_function_mesh->start_new_batch(
-        simulation::current_batch);
-    }
     if (simulation::fission_green_function_mesh) {
       simulation::fission_green_function_mesh->start_new_batch(
         simulation::current_batch);
@@ -578,15 +563,8 @@ void finalize_batch()
     }
   }
 
-  // Finalize both green function meshes at the end
+  // Finalize fission green function mesh at the end
   if (settings::clutch_on && simulation::current_batch == settings::n_batches) {
-    // 输出通量格林函数数据
-    if (simulation::green_function_mesh) {
-      simulation::green_function_mesh->finalize_greenfunction_mesh(
-        simulation::current_batch,
-        "flux_green_function_data.h5"); // 通量格林函数文件
-    }
-
     // 输出裂变源格林函数数据
     if (simulation::fission_green_function_mesh) {
       simulation::fission_green_function_mesh->finalize_greenfunction_mesh(
