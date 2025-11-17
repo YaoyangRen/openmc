@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <iomanip>
 #include <iostream>
 #include <mutex>
 #include <string>
@@ -86,9 +87,10 @@ GreenFunctionMesh::GreenFunctionMesh(double resolution, int max_batches,
 
   // 初始化信息将在finalize时输出
 
-  // 初始化累积数据和源计数
-  cumulative_data_.resize(spatial_size_, 0.0);
+  // 初始化源计数
   source_counts_.resize(spatial_size_, 0);
+  
+  // 稀疏存储：transfer_functions_sparse_ 和 cumulative_data_sparse_ 按需增长
 }
 
 int GreenFunctionMesh::position_to_cell_index(const Position& r) const
@@ -131,15 +133,9 @@ void GreenFunctionMesh::record_source_birth(
   // 增加该源单元的计数
   source_counts_[i_source]++;
 
-  // 初始化该源单元的传递函数数组（如果尚未初始化）
-  std::lock_guard<std::mutex> lock(data_mutex_);
-  if (transfer_functions_.find(i_source) == transfer_functions_.end()) {
-    transfer_functions_[i_source].resize(spatial_size_, 0.0);
-  }
-  if (current_batch_transfer_data_.find(i_source) ==
-      current_batch_transfer_data_.end()) {
-    current_batch_transfer_data_[i_source].resize(spatial_size_, 0.0);
-  }
+  // 稀疏存储：不需要预分配，map 会按需增长
+  // transfer_functions_sparse_[i_source] 和 current_batch_transfer_data_sparse_[i_source]
+  // 会在 accumulate() 中首次使用时自动创建
 }
 
 void GreenFunctionMesh::accumulate(
@@ -154,8 +150,8 @@ void GreenFunctionMesh::accumulate(
     return;
   }
 
-  // 验证贡献值
-  if (!std::isfinite(contribution) || contribution < 0.0) {
+  // 验证贡献值（稀疏存储：只存储非零值）
+  if (!std::isfinite(contribution) || contribution <= 0.0) {
     return;
   }
 
@@ -165,93 +161,64 @@ void GreenFunctionMesh::accumulate(
     // 这个粒子没有记录源位置，忽略
     return;
   }
-
+  
   int i_source = it->second;
 
   // 计算响应位置的单元索引
   int j_response = position_to_cell_index(r);
-
+  
   if (j_response < 0) {
     dropped_contributions_++;
     return;
   }
 
-  // 线程安全地获取源单元数据
-  vector<double>* source_data_ptr = nullptr;
-
+  // 稀疏存储：只在有贡献时才创建条目
   {
     std::lock_guard<std::mutex> lock(data_mutex_);
-
-    auto sit = current_batch_transfer_data_.find(i_source);
-    if (sit != current_batch_transfer_data_.end()) {
-      source_data_ptr = &(sit->second);
-
-      // 确保数据大小正确
-      if (source_data_ptr->size() != spatial_size_) {
-        source_data_ptr->resize(spatial_size_, 0.0);
-      }
-    } else {
-      // 创建新的源单元数据条目
-      auto result = current_batch_transfer_data_.emplace(
-        i_source, vector<double>(spatial_size_, 0.0));
-      source_data_ptr = &(result.first->second);
-    }
+    
+    // 累积到当前batch的源单元数据（稀疏）
+    current_batch_transfer_data_sparse_[i_source][j_response] += contribution;
+    
+    // 累积到总的传递函数（稀疏）
+    cumulative_data_sparse_[j_response] += contribution;
   }
-
-  if (source_data_ptr == nullptr) {
-    return;
-  }
-
-  // 为特定源单元累积贡献
-#pragma omp atomic
-  (*source_data_ptr)[j_response] += contribution;
-
-  // 同时累积到总的传递函数中
-#pragma omp atomic
-  cumulative_data_[j_response] += contribution;
 
   total_contributions_++;
-}
-
-void GreenFunctionMesh::start_new_batch(int batch_id)
+}void GreenFunctionMesh::start_new_batch(int batch_id)
 {
-  // 保存上一个batch的数据
+  // 保存上一个batch的数据（稀疏）
   if (current_batch_id_ >= 0) {
-    for (const auto& [i_source, data] : current_batch_transfer_data_) {
-      // 检查是否有非零数据
-      double source_total = 0.0;
-      for (const auto& val : data) {
-        source_total += val;
-      }
-
-      if (source_total > 0.0) {
-        // 如果这个源单元的传递函数还不存在，创建它
-        if (transfer_functions_.find(i_source) == transfer_functions_.end()) {
-          transfer_functions_[i_source].resize(spatial_size_, 0.0);
-        }
-
-        // 累积到该源单元的总传递函数中
-        for (size_t i = 0; i < spatial_size_; ++i) {
-          if (i >= data.size() || i >= transfer_functions_[i_source].size()) {
-            break;
-          }
-          transfer_functions_[i_source][i] += data[i];
-        }
+    for (const auto& [i_source, response_map] : current_batch_transfer_data_sparse_) {
+      // 累积到该源单元的总传递函数中（稀疏）
+      for (const auto& [j_response, value] : response_map) {
+        transfer_functions_sparse_[i_source][j_response] += value;
       }
     }
   }
 
   // 开始新batch
   current_batch_id_ = batch_id;
-  current_batch_transfer_data_.clear();
+  current_batch_transfer_data_sparse_.clear();
 }
 
 const vector<double>& GreenFunctionMesh::get_source_cell_data(
   int source_cell_index) const
 {
-  auto it = transfer_functions_.find(source_cell_index);
-  if (it != transfer_functions_.end()) {
-    return it->second;
+  // 从稀疏存储构建稠密向量
+  static vector<double> dense_data;
+  
+  auto it = transfer_functions_sparse_.find(source_cell_index);
+  if (it != transfer_functions_sparse_.end()) {
+    dense_data.clear();
+    dense_data.resize(spatial_size_, 0.0);
+    
+    // 填充非零值
+    for (const auto& [j_response, value] : it->second) {
+      if (j_response >= 0 && j_response < static_cast<int>(spatial_size_)) {
+        dense_data[j_response] = value;
+      }
+    }
+    return dense_data;
   }
 
   // 返回空向量
@@ -263,60 +230,96 @@ const vector<int>& GreenFunctionMesh::get_source_cell_indices() const
 {
   static vector<int> indices;
   indices.clear();
-  indices.reserve(transfer_functions_.size());
-
-  for (const auto& [i_source, data] : transfer_functions_) {
+  indices.reserve(transfer_functions_sparse_.size());
+  
+  for (const auto& [i_source, response_map] : transfer_functions_sparse_) {
     indices.push_back(i_source);
   }
-
+  
   std::sort(indices.begin(), indices.end());
   return indices;
-}
-
-void GreenFunctionMesh::finalize_greenfunction_mesh(
+}void GreenFunctionMesh::finalize_greenfunction_mesh(
   const int batch_id, const std::string& filename)
 {
   // 保存最后一个batch的数据
   start_new_batch(-1);
 
-  if (transfer_functions_.empty()) {
+  if (transfer_functions_sparse_.empty()) {
     return;
   }
 
   // 计算有源的单元数和总源粒子数
-  int n_source_cells = transfer_functions_.size();
+  int n_source_cells = transfer_functions_sparse_.size();
   int total_source_particles = 0;
   for (const auto& count : source_counts_) {
     total_source_particles += count;
   }
 
+  // 计算稀疏性统计
+  size_t total_nonzero_entries = 0;
+  for (const auto& [i_source, response_map] : transfer_functions_sparse_) {
+    total_nonzero_entries += response_map.size();
+  }
+  
+  double sparsity = 100.0 * (1.0 - static_cast<double>(total_nonzero_entries) / 
+                             (n_source_cells * spatial_size_));
+  size_t sparse_memory_mb = (total_nonzero_entries * (sizeof(int) + sizeof(double)) + 
+                             n_source_cells * 64) / (1024 * 1024);  // 估算
+  size_t dense_memory_mb = (n_source_cells * spatial_size_ * sizeof(double)) / (1024 * 1024);
+
   // 简洁输出传递函数信息
   std::cout << "\nTransfer Function T(r_s->r): " << n_source_cells
             << " source cells, " << total_source_particles
             << " source particles, " << total_contributions_
-            << " contributions -> " << filename << std::endl;
+            << " contributions" << std::endl;
+  std::cout << "  Sparse storage: " << total_nonzero_entries 
+            << " non-zero entries (" << std::fixed << std::setprecision(2) 
+            << (100.0 - sparsity) << "% density, " << sparsity << "% sparsity)"
+            << std::endl;
+  std::cout << "  Memory saved: " << dense_memory_mb << " MB (dense) -> " 
+            << sparse_memory_mb << " MB (sparse), "
+            << std::fixed << std::setprecision(1)
+            << (100.0 * (1.0 - static_cast<double>(sparse_memory_mb) / dense_memory_mb))
+            << "% reduction" << std::endl;
+  std::cout << "  Output: " << filename << std::endl;
 
   // 创建HDF5文件，使用指定的文件名
   hid_t file_id = file_open(filename, 'w');
 
   // 写入文件头部信息
-  write_attribute(file_id, "filetype", "transfer_function_mesh");
-  write_attribute(file_id, "version", "2.0");
+  write_attribute(file_id, "filetype", "transfer_function_mesh_sparse");
+  write_attribute(file_id, "version", "3.0");
   write_attribute(file_id, "description",
-    "Transfer function T(r_source->r_response): Spatial convolution kernel");
+    "Transfer function T(r_source->r_response): Sparse storage format");
   write_attribute(file_id, "pitch", pitch_);
   write_dataset(file_id, "origin", origin_);
   write_dataset(file_id, "shape", shape_);
   write_attribute(file_id, "n_source_cells", n_source_cells);
   write_attribute(file_id, "total_source_particles", total_source_particles);
+  write_attribute(file_id, "total_nonzero_entries", static_cast<int64_t>(total_nonzero_entries));
+  write_attribute(file_id, "sparsity_percent", sparsity);
 
-  // 写入累积的传递函数（所有源单元的总和）
-  write_dataset(file_id, "cumulative_transfer_function", cumulative_data_);
+  // 写入累积的传递函数（稀疏格式）
+  vector<int> cumulative_indices;
+  vector<double> cumulative_values;
+  cumulative_indices.reserve(cumulative_data_sparse_.size());
+  cumulative_values.reserve(cumulative_data_sparse_.size());
+  
+  for (const auto& [j_response, value] : cumulative_data_sparse_) {
+    cumulative_indices.push_back(j_response);
+    cumulative_values.push_back(value);
+  }
+  
+  hid_t cumulative_group = H5Gcreate(
+    file_id, "cumulative_transfer_function", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+  write_dataset(cumulative_group, "indices", cumulative_indices);
+  write_dataset(cumulative_group, "values", cumulative_values);
+  H5Gclose(cumulative_group);
 
-  // 收集有源的单元索引列表
+  // 收集有源的单元索引列表（排序）
   vector<int> source_cell_indices;
   source_cell_indices.reserve(n_source_cells);
-  for (const auto& [i_source, data] : transfer_functions_) {
+  for (const auto& [i_source, response_map] : transfer_functions_sparse_) {
     source_cell_indices.push_back(i_source);
   }
   std::sort(source_cell_indices.begin(), source_cell_indices.end());
@@ -330,23 +333,41 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(
   }
   write_dataset(file_id, "source_counts", source_counts_nonzero);
 
-  // 为每个源单元创建一个组
+  // 为每个源单元创建一个组（稀疏格式）
   hid_t transfer_group = H5Gcreate(
     file_id, "transfer_functions", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
 
-  // 写入每个源单元的传递函数 T(i_source -> r)
-  for (const auto& [i_source, data] : transfer_functions_) {
+  // 写入每个源单元的传递函数 T(i_source -> r) - 稀疏格式
+  for (const auto& [i_source, response_map] : transfer_functions_sparse_) {
     std::string cell_name = "source_cell_" + std::to_string(i_source);
-    write_dataset(transfer_group, cell_name.c_str(), data);
+    hid_t cell_group = H5Gcreate(
+      transfer_group, cell_name.c_str(), H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+    
+    // 收集该源单元的非零响应
+    vector<int> response_indices;
+    vector<double> response_values;
+    response_indices.reserve(response_map.size());
+    response_values.reserve(response_map.size());
+    
+    for (const auto& [j_response, value] : response_map) {
+      response_indices.push_back(j_response);
+      response_values.push_back(value);
+    }
+    
+    write_dataset(cell_group, "indices", response_indices);
+    write_dataset(cell_group, "values", response_values);
+    write_attribute(cell_group, "n_nonzero", static_cast<int>(response_map.size()));
+    
+    H5Gclose(cell_group);
   }
 
   H5Gclose(transfer_group);
   file_close(file_id);
 
   // 清理数据
-  transfer_functions_.clear();
-  current_batch_transfer_data_.clear();
-  cumulative_data_.clear();
+  transfer_functions_sparse_.clear();
+  current_batch_transfer_data_sparse_.clear();
+  cumulative_data_sparse_.clear();
   source_counts_.clear();
   particle_to_source_cell_.clear();
 }

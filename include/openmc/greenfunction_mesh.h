@@ -71,13 +71,14 @@ public:
   int position_to_cell_index(const Position& r) const;
 
 private:
-  // 核心数据：按源单元索引存储的传递函数
-  // Key: 源单元索引 i_source (0 到 nx*ny*nz-1)
-  // Value: 该源单元的传递函数 T(i_source -> r) [nx*ny*nz]
-  std::unordered_map<int, vector<double>> transfer_functions_;
+  // 核心数据：按源单元索引存储的传递函数（稀疏存储）
+  // 外层 Key: 源单元索引 i_source (0 到 nx*ny*nz-1)
+  // 内层 Key: 响应单元索引 j_response (0 到 nx*ny*nz-1)
+  // Value: T(i_source -> j_response) 传递函数值
+  std::unordered_map<int, std::unordered_map<int, double>> transfer_functions_sparse_;
 
-  // 当前batch中每个源单元的传递函数数据
-  std::unordered_map<int, vector<double>> current_batch_transfer_data_;
+  // 当前batch中每个源单元的传递函数数据（稀疏）
+  std::unordered_map<int, std::unordered_map<int, double>> current_batch_transfer_data_sparse_;
 
   // 每个源单元产生的源粒子计数 [nx*ny*nz]
   vector<int> source_counts_;
@@ -85,8 +86,8 @@ private:
   // 源粒子ID到源单元索引的映射
   std::unordered_map<int64_t, int> particle_to_source_cell_;
 
-  // 累积所有源单元的传递函数（总的传递函数）
-  vector<double> cumulative_data_;
+  // 累积所有源单元的传递函数（总的传递函数，稀疏存储）
+  std::unordered_map<int, double> cumulative_data_sparse_;
 
   std::array<int, 3> shape_;          // 网格的形状（每个维度的单元数）
   std::array<double, 3> origin_;      // 网格的原点位置
