@@ -27,6 +27,7 @@
 #include "openmc/track_output.h"
 #include "openmc/weight_windows.h"
 
+#include "openmc/adjoint_flux.h"
 #include "openmc/greenfunction_mesh.h"
 
 #ifdef _OPENMP
@@ -562,16 +563,6 @@ void finalize_batch()
     }
   }
 
-  // Finalize transfer function mesh at the end
-  if (settings::clutch_on && simulation::current_batch == settings::n_batches) {
-    // 输出传递函数数据
-    if (simulation::transfer_function_mesh) {
-      simulation::transfer_function_mesh->finalize_greenfunction_mesh(
-        simulation::current_batch,
-        "transfer_function_data.h5"); // 传递函数文件
-    }
-  }
-
   // 输出裂变矩阵数据（在非活跃代结束时）
   if (simulation::fission_matrix &&
       simulation::current_batch == settings::n_inactive) {
@@ -585,6 +576,35 @@ void finalize_batch()
 
     // 输出到文件
     simulation::fission_matrix->finalize("fission_matrix.h5");
+  }
+
+  // Finalize transfer function mesh at the end
+  if (settings::clutch_on && simulation::current_batch == settings::n_batches) {
+    // 输出传递函数数据
+    if (simulation::transfer_function_mesh) {
+      simulation::transfer_function_mesh->finalize_greenfunction_mesh(
+        simulation::current_batch,
+        "transfer_function_data.h5"); // 传递函数文件
+
+      // 传递函数计算完成后，立即计算共轭通量
+      std::cout << "\n" << std::string(70, '=') << std::endl;
+      std::cout << "COMPUTING ADJOINT FLUX (Convolution)" << std::endl;
+      std::cout << std::string(70, '=') << std::endl;
+
+      try {
+        AdjointFlux adjoint_flux;
+        adjoint_flux.compute_from_files(
+          "transfer_function_data.h5", // 传递函数文件
+          "fission_matrix.h5",         // 伴随源文件
+          "adjoint_flux.h5"            // 输出文件
+        );
+        std::cout << "Adjoint flux computation completed successfully."
+                  << std::endl;
+      } catch (const std::exception& e) {
+        std::cerr << "Warning: Adjoint flux computation failed: " << e.what()
+                  << std::endl;
+      }
+    }
   }
 
   // RYY ADD: 在最后一个batch输出随机粒子的源追踪信息
