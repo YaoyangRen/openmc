@@ -1,53 +1,69 @@
-# 双格林函数网格修改指南
+# 传递函数（Transfer Function）使用指南
 
-本文档展示如何同时保留**通量格林函数**和**裂变源格林函数**两种贡献，并将它们分开存储。
-
----
-
-## 📊 两种格林函数的物理意义
-
-### 1. 通量格林函数 (Flux Green's Function)
-- **物理意义**: 单位点源在空间位置 r 处产生的中子通量
-- **计算公式**: `Φ(r | r') = ∫ w(s) × ds / Σ_t`
-- **累积时机**: 粒子每次移动时（`event_advance()`）
-- **应用**: 源重要性分析、探测器响应计算
-
-### 2. 裂变源格林函数 (Fission Source Green's Function)
-- **物理意义**: 单位点源产生的裂变中子在空间的分布
-- **计算公式**: `S_f(r | r') = w × ν × Σ_f / Σ_t`
-- **累积时机**: 发生裂变碰撞时（`event_collide()` → `score_collision_tally()`）
-- **应用**: 裂变链反应分析、临界安全评估
+**注意**: 本文档已更新以反映当前的实现。原先的"双格林函数网格"已简化为单一的"传递函数"。
 
 ---
 
-## 🔧 修改步骤
+## 📊 传递函数的物理意义
 
-### 步骤 1: 修改 `include/openmc/simulation.h`
+### 传递函数 (Transfer Function)
 
-```cpp
-namespace simulation {
+- **物理意义**: 从初始相空间点 P₀ 出发的源中子在空间位置 r 处产生的平均裂变中子数的期望值
+- **数学定义**: `T(P₀ → r) = ∫∫ ν̄Σf(r,E')Φ(r,Ω',E'|S₀) dΩ'dE'`
+- **计算公式**: `contribution = nu_t = (w/k_eff) × w_ufs × (ν̄Σf/Σt)`
+- **累积时机**: 发生裂变事件时（在 `tally_scoring.cpp` 的 `SCORE_GREENFUNCTION` case 中）
+- **应用**:
+  - 伴随通量计算
+  - 重要性函数求解
+  - 扰动分析
+  - 裂变链反应分析
 
-// 现有变量...
-extern "C" int current_batch;
-extern "C" int current_gen;
+### 实现特点
 
-// 添加两个格林函数网格
-extern std::unique_ptr<GreenFunctionMesh> 
-  green_function_mesh;          // 通量格林函数 (Flux)
-  
-extern std::unique_ptr<GreenFunctionMesh> 
-  fission_green_function_mesh;  // 裂变源格林函数 (Fission Source)
+- ✅ **统计期望裂变中子数**: 使用 `nu_t`（期望值）而非采样后的整数
+- ✅ **与裂变矩阵一致**: 使用相同的物理量和计算位置
+- ✅ **Tally 控制开关**: 通过定义包含 `greenfunction` score 的 tally 来启用统计
+- ✅ **代码维护性好**: 统计逻辑集中在 tally 系统中
 
-} // namespace simulation
+---
+
+## 🔧 使用方法
+
+### 步骤 1: 在输入文件中定义 Tally
+
+传递函数通过 tally 系统控制。在 `tallies.xml` 中添加：
+
+```xml
+<tallies>
+  <tally id="1">
+    <!-- 可选：添加过滤器 -->
+    <filter type="cell" bins="1"/>
+    
+    <!-- 关键：包含 greenfunction score -->
+    <scores>greenfunction</scores>
+  </tally>
+</tallies>
 ```
 
----
+**说明**:
 
-### 步骤 2: 修改 `src/simulation.cpp`
+- 如果定义了包含 `greenfunction` score 的 tally，传递函数统计将自动启用
+- 如果没有定义此 tally，传递函数将不会被计算，节省计算资源
+- tally 本身返回 `score = 0.0`，只作为开关使用
 
-#### 2.1 添加全局变量声明
+### 步骤 2: 初始化传递函数网格
 
-**位置**: 约第 326 行，在 `green_function_mesh` 声明后添加
+在 `src/simulation.cpp` 的 `initialize_batch()` 中：
+
+```cpp
+// Initialize transfer function mesh (传递函数)
+if (!simulation::transfer_function_mesh) {
+  simulation::transfer_function_mesh = std::make_unique<GreenFunctionMesh>(
+    1.0,                    // 1cm 网格分辨率
+    settings::n_batches,    // 最大批次数
+    true                    // 自动获取边界
+  );
+}
 
 ```cpp
 // 原有代码
@@ -62,6 +78,7 @@ std::unique_ptr<GreenFunctionMesh> fission_green_function_mesh;
 **位置**: `initialize_batch()` 函数中，约第 396-408 行
 
 **原代码**:
+
 ```cpp
 // Intialize greenfunction mesh
 if (!simulation::green_function_mesh) {
@@ -76,6 +93,7 @@ if (settings::clutch_on && simulation::green_function_mesh) {
 ```
 
 **修改为**:
+
 ```cpp
 // Initialize flux green function mesh (通量格林函数)
 if (!simulation::green_function_mesh) {
@@ -111,6 +129,7 @@ if (settings::clutch_on) {
 **位置**: `finalize_batch()` 函数中，约第 513-517 行
 
 **原代码**:
+
 ```cpp
 if (settings::clutch_on && simulation::green_function_mesh) {
   if (simulation::current_batch == settings::n_batches) {
@@ -121,6 +140,7 @@ if (settings::clutch_on && simulation::green_function_mesh) {
 ```
 
 **修改为**:
+
 ```cpp
 // Finalize both green function meshes at the end
 if (settings::clutch_on && simulation::current_batch == settings::n_batches) {
@@ -145,6 +165,7 @@ if (settings::clutch_on && simulation::current_batch == settings::n_batches) {
 **位置**: `event_advance()` 函数中，第 307-318 行
 
 **原代码**: （保持不变，但添加注释）
+
 ```cpp
 // 累积通量格林函数贡献
 if (simulation::green_function_mesh && material() != MATERIAL_VOID) {
@@ -164,56 +185,37 @@ if (simulation::green_function_mesh && material() != MATERIAL_VOID) {
 
 ---
 
-### 步骤 4: 修改 `src/tallies/tally_scoring.cpp`
+### 步骤 3: 传递函数统计代码
 
-**位置**: `score_collision_tally()` 函数中，约第 1003-1018 行
+在 `src/tallies/tally_scoring.cpp` 的 `score_general_ce_nonanalog()` 函数中：
 
-**原代码**:
 ```cpp
 case SCORE_GREENFUNCTION:
-  if (settings::clutch_on) {
-    if (p.type() == Type::neutron && (p.fission())) {
-      double contribution = 0.0;
-      if (p.neutron_xs(p.event_nuclide()).total > 0) {
-        contribution =
-          p.wgt_last() * p.neutron_xs(p.event_nuclide()).nu_fission *
-          p.neutron_xs(p.event_nuclide()).fission /
-          p.neutron_xs(p.event_nuclide()).total; // TODO 是否需要除sigma_t
-      }
-      if (simulation::green_function_mesh) {
-        simulation::green_function_mesh->accumulate(
-          p.r(), contribution, p.source_particle_id());
-      }
+  // 计算传递函数贡献 (Transfer Function)
+  // contribution = 期望裂变中子数 nu_t
+  if (p.type() == Type::neutron && p.fission()) {
+    // 计算期望裂变中子数（与 physics.cpp 中的 nu_t 相同）
+    double weight = settings::ufs_on ? ufs_get_weight(p) : 1.0;
+    double nu_t = p.wgt() / simulation::keff * weight *
+                  p.neutron_xs(p.event_nuclide()).nu_fission /
+                  p.neutron_xs(p.event_nuclide()).total;
+    
+    // 累积到传递函数网格
+    if (simulation::transfer_function_mesh && p.source_particle_id() != -1) {
+      simulation::transfer_function_mesh->accumulate(
+        p.r(), nu_t, p.source_particle_id());
     }
   }
+  score = 0.0; // tally 本身不记录数值，只作为开关
   break;
 ```
 
-**修改为**:
-```cpp
-case SCORE_GREENFUNCTION:
-  if (settings::clutch_on) {
-    if (p.type() == Type::neutron && (p.fission())) {
-      // 计算裂变源贡献
-      double contribution = 0.0;
-      if (p.neutron_xs(p.event_nuclide()).total > 0) {
-        contribution =
-          p.wgt_last() * p.neutron_xs(p.event_nuclide()).nu_fission *
-          p.neutron_xs(p.event_nuclide()).fission /
-          p.neutron_xs(p.event_nuclide()).total;
-      }
-      
-      // 累积到裂变源格林函数网格（注意这里改为 fission_green_function_mesh）
-      if (simulation::fission_green_function_mesh) {
-        simulation::fission_green_function_mesh->accumulate(
-          p.r(), contribution, p.source_particle_id());
-      }
-    }
-  }
-  break;
-```
+**关键点**:
 
-**关键变化**: 将 `simulation::green_function_mesh` 改为 `simulation::fission_green_function_mesh`
+- 使用期望裂变中子数 `nu_t` 作为贡献值
+- 与 `physics.cpp` 中裂变矩阵使用相同的计算公式
+- 仅在发生裂变事件时统计
+- 统计逻辑与 tally 系统集成，便于维护
 
 ---
 
@@ -224,6 +226,7 @@ case SCORE_GREENFUNCTION:
 需要修改输出文件名，以区分两种格林函数：
 
 **原代码**:
+
 ```cpp
 void GreenFunctionMesh::finalize_greenfunction_mesh(const int batch_id)
 {
@@ -243,6 +246,7 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(const int batch_id)
 #### 方案 A: 添加文件名参数（推荐）
 
 修改 `greenfunction_mesh.h`:
+
 ```cpp
 class GreenFunctionMesh {
 public:
@@ -255,6 +259,7 @@ public:
 ```
 
 修改 `greenfunction_mesh.cpp`:
+
 ```cpp
 void GreenFunctionMesh::finalize_greenfunction_mesh(
   const int batch_id,
@@ -275,6 +280,7 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(
 ```
 
 然后在 `simulation.cpp` 中调用时指定不同的文件名:
+
 ```cpp
 // Finalize both green function meshes with different filenames
 if (settings::clutch_on && simulation::current_batch == settings::n_batches) {
@@ -298,21 +304,19 @@ if (settings::clutch_on && simulation::current_batch == settings::n_batches) {
 
 ## 📂 输出文件说明
 
-修改后将生成两个 HDF5 文件：
+将生成一个 HDF5 文件：
 
-### 1. `flux_green_function_data.h5`
-- **内容**: 每个源粒子的通量格林函数矩阵
-- **物理意义**: G_flux(r, r') = 源位置 r' 的单位点源在 r 处产生的通量
-- **数据大小**: 较大（每次粒子移动都累积）
+### `transfer_function_data.h5`
 
-### 2. `fission_green_function_data.h5`
-- **内容**: 每个源粒子的裂变源格林函数矩阵
-- **物理意义**: G_fission(r, r') = 源位置 r' 产生的裂变中子在 r 处的分布
-- **数据大小**: 较小（仅裂变事件累积）
+- **内容**: 每个源粒子的传递函数矩阵
+- **物理意义**: T(P₀ → r) = 从源点 P₀ 出发的中子在 r 处产生的期望裂变中子数
+- **数据大小**: 取决于裂变事件频率（相对较小）
+- **统计量**: 期望裂变中子数 nu_t
 
-两个文件的内部结构相同：
+文件内部结构：
+
 ```
-green_function_data.h5
+transfer_function_data.h5
 ├── 属性
 │   ├── filetype
 │   ├── pitch
@@ -339,124 +343,141 @@ green_function_data.h5
 import h5py
 import numpy as np
 
-# 读取两个文件
-with h5py.File('flux_green_function_data.h5', 'r') as f_flux, \
-     h5py.File('fission_green_function_data.h5', 'r') as f_fission:
+# 读取传递函数数据
+with h5py.File('transfer_function_data.h5', 'r') as f:
+    # 获取网格参数
+    shape = f['shape'][:]
+    origin = f['origin'][:]
+    pitch = f.attrs['pitch']
     
-    # 验证网格参数一致
-    assert np.array_equal(f_flux['shape'][:], f_fission['shape'][:])
-    assert np.array_equal(f_flux['origin'][:], f_fission['origin'][:])
+    # 获取源粒子信息
+    source_ids = f['source_particle_ids'][:]
+    n_particles = len(source_ids)
     
-    # 验证源粒子ID一致
-    flux_ids = set(f_flux['source_particle_ids'][:])
-    fission_ids = set(f_fission['source_particle_ids'][:])
+    print(f"网格尺寸: {shape}")
+    print(f"网格原点: {origin}")
+    print(f"网格间距: {pitch} cm")
+    print(f"源粒子数量: {n_particles}")
     
-    print(f"通量格林函数粒子数: {len(flux_ids)}")
-    print(f"裂变源格林函数粒子数: {len(fission_ids)}")
-    print(f"共同粒子数: {len(flux_ids & fission_ids)}")
+    # 读取累积传递函数
+    cumulative_tf = f['cumulative_green_function'][:]
+    total_contribution = np.sum(cumulative_tf)
     
-    # 比较累积数据
-    flux_total = np.sum(f_flux['cumulative_green_function'][:])
-    fission_total = np.sum(f_fission['cumulative_green_function'][:])
+    print(f"\n传递函数总贡献: {total_contribution:.6e}")
+    print(f"平均每个网格单元: {total_contribution / np.prod(shape):.6e}")
     
-    print(f"\n通量格林函数总和: {flux_total:.6e}")
-    print(f"裂变源格林函数总和: {fission_total:.6e}")
-    print(f"比值 (Flux/Fission): {flux_total/fission_total:.2f}")
+    # 分析单个源粒子
+    particle_id = source_ids[0]
+    particle_tf = f[f'source_particles/particle_{particle_id}'][:]
+    
+    print(f"\n源粒子 {particle_id}:")
+    print(f"  总贡献: {np.sum(particle_tf):.6e}")
+    print(f"  非零网格数: {np.count_nonzero(particle_tf)}")
 ```
 
 **预期结果**:
-- 通量格林函数总和 >> 裂变源格林函数总和（因为累积频率不同）
-- 裂变源格林函数仅在发生裂变的区域有非零值
-- 通量格林函数在整个几何体中都有分布
+
+- 传递函数仅在发生裂变的区域有非零值
+- 每个源粒子的贡献值范围应该在合理的物理范围内
+- 总贡献值应该与裂变矩阵的数值量级一致
 
 ---
 
 ## ⚠️ 注意事项
 
-1. **内存使用**: 两个网格会占用双倍内存
-   - 估算: `2 × N_particles × (nx × ny × nz) × 8 bytes`
+1. **计算资源**:
+   - 内存估算: `N_particles × (nx × ny × nz) × 8 bytes`
    - 建议: 对于大规模计算，考虑使用较粗的网格或减少粒子数
 
-2. **性能影响**: 
-   - 通量格林函数累积频率高（每次移动）
-   - 裂变源格林函数累积频率低（仅裂变事件）
-   - 总体性能影响约 5-10%
+2. **性能影响**:
+   - 仅在裂变事件时累积，性能影响小
+   - 与裂变矩阵计算同时进行，几乎无额外开销
 
 3. **数据一致性**:
-   - 两个网格的空间参数（shape, origin, pitch）应该相同
-   - 建议在初始化时使用相同的参数
+   - 使用与裂变矩阵相同的物理量 `nu_t`
+   - 确保 tally 定义正确以启用统计
 
 4. **后处理分析**:
-   - 可以计算两者的比值来分析裂变增殖效应
-   - 通量/裂变源比值可以反映系统的增殖能力
+   - 可用于计算伴随通量
+   - 可用于重要性函数分析
+   - 可用于扰动分析
 
 ---
 
 ## 📊 应用示例
 
-### 示例 1: 源重要性对比
+### 示例 1: 传递函数可视化
 
 ```python
-# 对比同一个源粒子的两种贡献
 import matplotlib.pyplot as plt
+import h5py
+import numpy as np
 
-with h5py.File('flux_green_function_data.h5', 'r') as f_flux, \
-     h5py.File('fission_green_function_data.h5', 'r') as f_fission:
+with h5py.File('transfer_function_data.h5', 'r') as f:
+    # 读取单个源粒子的传递函数
+    particle_id = f['source_particle_ids'][0]
+    tf_data = f[f'source_particles/particle_{particle_id}'][:]
     
-    particle_id = 1
+    shape = f['shape'][:]
+    tf_3d = tf_data.reshape(shape)
     
-    flux_data = f_flux[f'source_particles/particle_{particle_id}'][:]
-    fission_data = f_fission[f'source_particles/particle_{particle_id}'][:]
-    
-    shape = f_flux['shape'][:]
-    flux_3d = flux_data.reshape(shape)
-    fission_3d = fission_data.reshape(shape)
-    
-    # 绘制中心截面对比
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    # 绘制中心截面
+    fig, ax = plt.subplots(figsize=(10, 8))
     
     center_z = shape[2] // 2
+    im = ax.imshow(tf_3d[:, :, center_z].T, cmap='hot')
+    ax.set_title(f'传递函数 - 源粒子 {particle_id}')
+    ax.set_xlabel('X 网格索引')
+    ax.set_ylabel('Y 网格索引')
     
-    im1 = ax1.imshow(flux_3d[:, :, center_z].T, cmap='viridis')
-    ax1.set_title(f'通量格林函数 - 源粒子 {particle_id}')
-    plt.colorbar(im1, ax=ax1)
-    
-    im2 = ax2.imshow(fission_3d[:, :, center_z].T, cmap='hot')
-    ax2.set_title(f'裂变源格林函数 - 源粒子 {particle_id}')
-    plt.colorbar(im2, ax=ax2)
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label('期望裂变中子数')
     
     plt.tight_layout()
-    plt.savefig('green_function_comparison.png', dpi=300)
+    plt.savefig('transfer_function_visualization.png', dpi=300)
 ```
 
-### 示例 2: 裂变增殖因子分析
+### 示例 2: 源重要性分析
 
 ```python
-# 计算空间相关的裂变增殖因子
-multiplication_factor = flux_3d / (fission_3d + 1e-10)  # 避免除零
+# 计算每个源粒子的总贡献（重要性）
+import h5py
+import numpy as np
+import matplotlib.pyplot as plt
 
-plt.figure(figsize=(10, 8))
-plt.imshow(multiplication_factor[:, :, center_z].T, cmap='coolwarm')
-plt.colorbar(label='通量/裂变源比值')
-plt.title('空间相关裂变增殖因子')
-plt.savefig('multiplication_factor.png', dpi=300)
+with h5py.File('transfer_function_data.h5', 'r') as f:
+    source_ids = f['source_particle_ids'][:]
+    
+    importances = []
+    for sid in source_ids:
+        tf = f[f'source_particles/particle_{sid}'][:]
+        importances.append(np.sum(tf))
+    
+    # 绘制重要性分布直方图
+    plt.figure(figsize=(12, 6))
+    plt.hist(importances, bins=50, edgecolor='black')
+    plt.xlabel('总传递函数值（重要性）')
+    plt.ylabel('源粒子数量')
+    plt.title('源粒子重要性分布')
+    plt.grid(True, alpha=0.3)
+    plt.savefig('source_importance_distribution.png', dpi=300)
 ```
 
 ---
 
 ## 🎯 总结
 
-通过以上修改，您将获得：
+当前的传递函数实现提供：
 
-✅ **通量格林函数** (`flux_green_function_data.h5`)
-  - 反映每个源粒子对空间通量的贡献
-  - 用于探测器响应、源重要性分析
+✅ **单一物理量** - 期望裂变中子数 `nu_t`，物理意义明确
 
-✅ **裂变源格林函数** (`fission_green_function_data.h5`)
-  - 反映每个源粒子产生的裂变链
-  - 用于临界安全、裂变增殖分析
+✅ **Tally 控制** - 通过定义 `<scores>greenfunction</scores>` 启用统计
 
-✅ **物理意义清晰** - 两种不同的物理量分开存储，便于分析
+✅ **代码维护性** - 统计逻辑集中在 tally 系统中，与物理过程分离
+
+✅ **与裂变矩阵一致** - 使用相同的计算公式，确保物理一致性
+
+✅ **高效计算** - 仅在裂变事件时累积，性能影响小
 
 ✅ **数据完整性** - 避免混合累积造成的数据污染
 

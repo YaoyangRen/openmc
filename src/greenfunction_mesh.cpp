@@ -167,9 +167,9 @@ void GreenFunctionMesh::accumulate(
 #pragma omp atomic
     cumulative_data_[index] += contribution;
 
-    // total_contributions_++;
+    total_contributions_++;
   } else {
-    // dropped_contributions_++;
+    dropped_contributions_++;
   }
 }
 
@@ -242,9 +242,10 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(
   }
 
   // 简洁输出传递函数信息
-  std::cout << "\nTransfer Function: " << particle_green_functions_.size()
-            << " source particles, " << total_contributions_
-            << " contributions -> " << filename << std::endl;
+  std::cout << "\nTransfer Function (Expected fission neutrons): "
+            << particle_green_functions_.size() << " source particles, "
+            << total_contributions_ << " contributions -> " << filename
+            << std::endl;
 
   // 创建HDF5文件，使用指定的文件名
   hid_t file_id = file_open(filename, 'w');

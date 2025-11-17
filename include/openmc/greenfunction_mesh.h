@@ -41,7 +41,7 @@ public:
     const std::array<double, 3>& manual_upper = {10.0, 10.0, 10.0});
 
   // 为特定源粒子累积传递函数贡献
-  // contribution: w × distance × ν̄Σf / Σt (裂变中子产生数)
+  // contribution: 期望裂变中子数 nu_t = (w/k_eff) × w_ufs × (ν̄Σf/Σt)
   void accumulate(
     const Position& r, double contribution, int64_t source_particle_id);
 

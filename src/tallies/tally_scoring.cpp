@@ -5,6 +5,7 @@
 #include "openmc/bank.h"
 #include "openmc/capi.h"
 #include "openmc/constants.h"
+#include "openmc/eigenvalue.h"
 #include "openmc/error.h"
 #include "openmc/ifp.h"
 #include "openmc/material.h"
@@ -1000,23 +1001,23 @@ void score_general_ce_nonanalog(Particle& p, int i_tally, int start_index,
       break;
 
     case SCORE_GREENFUNCTION:
-      if (settings::clutch_on) {
-        if (p.type() == Type::neutron && (p.fission())) {
-          // 计算传递函数贡献 (Transfer Function)
-          double contribution = 0.0;
-          if (p.neutron_xs(p.event_nuclide()).total > 0) {
-            contribution = p.wgt_last() *
-                           p.neutron_xs(p.event_nuclide()).nu_fission *
-                           p.neutron_xs(p.event_nuclide()).fission /
-                           p.neutron_xs(p.event_nuclide()).total;
-          }
-          // 累积到传递函数网格
-          if (simulation::transfer_function_mesh) {
-            simulation::transfer_function_mesh->accumulate(
-              p.r(), contribution, p.source_particle_id());
-          }
+      // 计算传递函数贡献 (Transfer Function)
+      // contribution = 期望裂变中子数 nu_t
+      if (p.type() == Type::neutron && p.fission()) {
+        // 计算期望裂变中子数（与 physics.cpp 中的 nu_t 相同）
+        double weight = settings::ufs_on ? ufs_get_weight(p) : 1.0;
+        double nu_t = p.wgt() / simulation::keff * weight *
+                      p.neutron_xs(p.event_nuclide()).nu_fission /
+                      p.neutron_xs(p.event_nuclide()).total;
+
+        // 累积到传递函数网格
+        if (simulation::transfer_function_mesh &&
+            p.source_particle_id() != -1) {
+          simulation::transfer_function_mesh->accumulate(
+            p.r(), nu_t, p.source_particle_id());
         }
       }
+      score = 0.0; // tally 本身不记录数值，只作为开关
       break;
 
     case N_2N:

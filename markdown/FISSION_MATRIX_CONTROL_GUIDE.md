@@ -16,6 +16,7 @@
 - **兼容性**: 标准格式，支持 SciPy、MATLAB、Eigen 等工具
 
 **内存节省示例**:
+
 | 网格尺寸 | 密集存储 | 稀疏存储 | 节省 |
 |---------|---------|---------|------|
 | 11×11×11 | 13.5 MB | 0.4 MB | 97% |
@@ -40,6 +41,7 @@ if (settings::clutch_on && simulation::current_batch > settings::n_inactive) {
 ```
 
 **适用场景**:
+
 - 🎯 正常生产计算
 - 💡 只关心收敛后的裂变分布
 - 💾 减少内存和计算开销
@@ -60,6 +62,7 @@ if (settings::clutch_on) {
 ```
 
 **适用场景**:
+
 - 📊 研究源收敛过程
 - 🔬 观察裂变分布随批次的演化
 - 🧪 调试和验证
@@ -80,6 +83,7 @@ if (settings::clutch_on && simulation::current_batch <= settings::n_inactive) {
 ```
 
 **适用场景**:
+
 - 🐛 调试源收敛问题
 - 📈 分析初始源分布的影响
 - 🔍 验证边界处理
@@ -134,10 +138,12 @@ mingw32-make -j24
 ## 批次编号说明
 
 假设您的设置是：
+
 - `n_inactive = 50` (非活跃代批次)
 - `n_batches = 150` (总批次数)
 
 则：
+
 - **非活跃代**: 批次 1-50
 - **活跃代**: 批次 51-150
 
@@ -174,12 +180,14 @@ mingw32-make -j24
 **文件名**: `fission_matrix.h5`
 
 **包含数据集**:
+
 - `fission_matrix_raw`: 原始累积矩阵
 - `fission_matrix_normalized`: 归一化矩阵（按源计数）
 - `source_counts`: 每个网格单元的源粒子计数
 - `origin`, `shape`, `pitch`: 网格几何信息
 
 **属性**:
+
 - `storage_format`: "COO" (稀疏矩阵格式)
 - `n_realizations`: 统计的批次数
 - `total_fissions`: 总裂变事件数
@@ -187,6 +195,7 @@ mingw32-make -j24
 - `nnz`: 非零元素数量
 
 **数据集** (稀疏格式):
+
 - `row_indices`, `col_indices`: 稀疏矩阵坐标
 - `data_raw`, `data_normalized`: 原始和归一化值
 
@@ -208,18 +217,21 @@ mingw32-make -j24
 | 100×100×100 | 1,000,000 | 7.45 TB | 1.1 GB | **99.985%** |
 
 ✅ **现在可以使用精细网格！**
+
 - 推荐: 0.5-2 cm 网格间距
 - 大规模问题: 100×100×100 网格仅需 ~1 GB 内存
 
 ### 计算开销
 
 稀疏矩阵操作开销：
+
 - **源出生记录**: O(1) - 哈希表插入
 - **裂变事件记录**: O(1) - 哈希表更新（有互斥锁）
 - **批次管理**: O(nnz) - 仅处理非零元素（原 O(n²)）
 - **归一化**: O(nnz) - 显著减少计算量
 
 **性能提升**:
+
 - 内存访问: ~100× 更快（缓存友好）
 - 矩阵操作: ~10-100× 加速
 - HDF5 写入: 文件大小减少 95%+
@@ -265,7 +277,8 @@ if (settings::clutch_on &&
 运行仿真时，控制台会在**结束时**输出详细信息：
 
 ### 最终统计输出（稀疏矩阵）
-```
+
+```txt
 ======================================================================
 FISSION MATRIX FINALIZATION
 ======================================================================
@@ -319,6 +332,7 @@ Output File: fission_matrix.h5
 ### Q4: 稀疏矩阵如何读取？
 
 使用 Python + h5py + SciPy:
+
 ```python
 import h5py
 from scipy.sparse import coo_matrix

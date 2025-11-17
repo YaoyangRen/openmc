@@ -1,4 +1,4 @@
-# OpenMC 格林函数功能使用手册
+# OpenMC 传递函数（Transfer Function）功能使用手册
 
 ## 目录
 
@@ -16,38 +16,47 @@
 
 ## 功能概述
 
-OpenMC 格林函数功能实现了每个源粒子的独立追踪和统计，能够：
+OpenMC 传递函数功能实现了每个源粒子的独立追踪和统计，能够：
 
-- ✅ 为每个源粒子生成独立的格林函数矩阵
+- ✅ 为每个源粒子生成独立的传递函数矩阵
 - ✅ 自动累积所有源粒子的总体贡献
 - ✅ 支持多批次（batch）计算和数据持久化
 - ✅ 提供 HDF5 格式的结构化数据输出
 - ✅ 线程安全的并行累积
 - ✅ 自动检测模型边界或手动指定
+- ✅ **通过 Tally 控制是否启用统计**（新增）
 
 ### 主要应用场景
 
-- **源重要性分析**: 评估不同源位置对系统响应的贡献
-- **敏感性研究**: 分析源分布变化对结果的影响
-- **响应函数计算**: 构建空间相关的响应函数
-- **不确定性量化**: 评估源项不确定性传播
-- **探测器优化**: 优化探测器位置和响应
+- **伴随通量计算**: 通过传递函数计算伴随通量分布
+- **重要性函数**: 评估不同源位置的重要性
+- **扰动分析**: 分析系统扰动对响应的影响
+- **裂变链分析**: 追踪裂变中子的空间传播
+- **临界安全评估**: 分析裂变增殖效应
 
 ---
 
 ## 理论背景
 
-### 格林函数定义
+### 传递函数定义
 
-格林函数 G(r, r') 表示位置 r' 处的单位点源对位置 r 处物理量的响应：
+传递函数 T(P₀ → r) 表示从初始相空间点 P₀ 出发的源中子在空间位置 r 处产生的平均裂变中子数的期望值：
 
-```
-G(r, r') = φ(r | S(r'))
-```
+$$T(P_0 \rightarrow r) = \int\int \bar{\nu}\Sigma_f(r,E')\Phi(r,\Omega',E'|S_0) d\Omega'dE'$$
 
 其中：
-- `φ(r)` 是位置 r 处的物理量（如通量、反应率等）
-- `S(r')` 是位置 r' 处的单位点源
+
+- `Φ(r,Ω',E'|S₀)` 是给定源 S₀ 条件下的中子通量
+- `ν̄Σf` 是平均裂变中子产生截面
+- 积分覆盖所有角度 Ω' 和能量 E'
+
+### 实现方法
+
+在 OpenMC 中，传递函数通过统计裂变事件时的期望裂变中子数来累积：
+
+$$\text{contribution} = \nu_t = \frac{w}{k_{\text{eff}}} \times w_{\text{ufs}} \times \frac{\bar{\nu}\Sigma_f}{\Sigma_t}$$
+
+这个公式与裂变矩阵使用相同的物理量，确保一致性
 
 ### 线性叠加原理
 
@@ -139,6 +148,7 @@ index = ix + shape[0] * (iy + shape[1] * iz)
 其中 `(ix, iy, iz)` 是三维网格索引。
 
 **空间复杂度**:
+
 - 每个源粒子: `shape[0] × shape[1] × shape[2] × 8 bytes`
 - N 个源粒子总计: `N × spatial_size × 8 bytes`
 
@@ -171,12 +181,14 @@ GreenFunctionMesh::GreenFunctionMesh(
 **自动边界检测机制**:
 
 当 `auto_bounds = true` 时，构造函数会：
+
 1. 从 OpenMC 根宇宙（root universe）自动读取几何边界
 2. 检查是否存在无限边界（如无限大平面）
 3. 如果存在无限边界，回退到使用 `manual_lower` 和 `manual_upper`
 4. 否则，在自动检测的边界上添加 `0.1 × pitch` 的边距，防止边缘粒子丢失
 
-**边界来源**: 
+**边界来源**:
+
 - 几何信息从 XML 输入文件（`geometry.xml`）读取
 - 通过 OpenMC 内部的 `model::universes` 和 `model::root_universe` 访问
 - 对应于模型中所有 Cell 和 Surface 定义的包络边界
@@ -208,6 +220,7 @@ void accumulate(
 **功能**: 为特定源粒子在指定位置累积贡献值
 
 **参数**:
+
 - `r`: 粒子当前位置 (cm)
 - `contribution`: 贡献值（通常为 权重 × 路径长度）
 - `source_particle_id`: 源粒子唯一标识符
@@ -242,47 +255,69 @@ void finalize_greenfunction_mesh(const int batch_id)
 
 ## 使用方法
 
-### 1. 初始化格林函数网格
+### 1. 在输入文件中启用传递函数
 
-在 `simulation.cpp` 中初始化：
+在 `tallies.xml` 中添加：
+
+```xml
+<tallies>
+  <tally id="1">
+    <!-- 可选：添加过滤器 -->
+    <filter type="cell" bins="1"/>
+    
+    <!-- 关键：包含 greenfunction score -->
+    <scores>greenfunction</scores>
+  </tally>
+</tallies>
+```
+
+**说明**:
+
+- 传递函数统计通过 tally 系统控制
+- 只有定义了包含 `greenfunction` score 的 tally 时才会统计
+- tally 本身返回 `score = 0.0`，只作为开关
+
+### 2. 初始化传递函数网格
+
+在 `simulation.cpp` 中自动初始化：
 
 ```cpp
-// 在 initialize_batch() 中创建格林函数网格
-if (!simulation::green_function_mesh) {
-  simulation::green_function_mesh = std::make_unique<GreenFunctionMesh>(
-    1.0,    // 1 cm 网格分辨率
-    100,    // 最大 100 个批次
-    true    // 自动获取模型边界
+// 在 initialize_batch() 中创建传递函数网格
+if (!simulation::transfer_function_mesh) {
+  simulation::transfer_function_mesh = std::make_unique<GreenFunctionMesh>(
+    1.0,                 // 1 cm 网格分辨率
+    settings::n_batches, // 最大批次数
+    true                 // 自动获取模型边界
   );
 }
 
 // 开始新批次
-if (settings::clutch_on && simulation::green_function_mesh) {
-  simulation::green_function_mesh->start_new_batch(simulation::current_batch);
+if (settings::clutch_on && simulation::transfer_function_mesh) {
+  simulation::transfer_function_mesh->start_new_batch(simulation::current_batch);
 }
 ```
 
-### 2. 粒子追踪中累积数据
+### 3. 裂变事件中累积数据
 
-在 `particle.cpp` 的 `event_advance()` 中：
+在 `tally_scoring.cpp` 的 `score_general_ce_nonanalog()` 中：
 
 ```cpp
-void Particle::event_advance() {
-  // ...现有代码...
-  
-  // 移动粒子
-  this->move_distance(distance);
-  
-  // 累积格林函数贡献
-  if (simulation::green_function_mesh && material() != MATERIAL_VOID) {
-    double contribution = wgt() * distance;  // 通量贡献
-    simulation::green_function_mesh->accumulate(
-      r(), contribution, source_particle_id()
-    );
+case SCORE_GREENFUNCTION:
+  if (p.type() == Type::neutron && p.fission()) {
+    // 计算期望裂变中子数（与 physics.cpp 中的 nu_t 相同）
+    double weight = settings::ufs_on ? ufs_get_weight(p) : 1.0;
+    double nu_t = p.wgt() / simulation::keff * weight *
+                  p.neutron_xs(p.event_nuclide()).nu_fission /
+                  p.neutron_xs(p.event_nuclide()).total;
+    
+    // 累积到传递函数网格
+    if (simulation::transfer_function_mesh && p.source_particle_id() != -1) {
+      simulation::transfer_function_mesh->accumulate(
+        p.r(), nu_t, p.source_particle_id());
+    }
   }
-  
-  // ...现有代码...
-}
+  score = 0.0;
+  break;
 ```
 
 ### 3. 源粒子 ID 追踪
@@ -332,14 +367,21 @@ bool Particle::create_secondary(double wgt, Direction u, double E, ParticleType 
 在模拟结束时：
 
 ```cpp
-// 在 finalize_batch() 或模拟结束时
-if (settings::clutch_on && simulation::green_function_mesh) {
-  if (simulation::current_batch == settings::n_batches) {
-    simulation::green_function_mesh->finalize_greenfunction_mesh(
-      simulation::current_batch
+// 在 finalize_batch() 中
+if (settings::clutch_on && simulation::current_batch == settings::n_batches) {
+  if (simulation::transfer_function_mesh) {
+    simulation::transfer_function_mesh->finalize_greenfunction_mesh(
+      simulation::current_batch,
+      "transfer_function_data.h5"  // 输出文件名
     );
   }
 }
+```
+
+输出信息示例：
+
+```
+Transfer Function (Expected fission neutrons): 1000 source particles, 15234 contributions -> transfer_function_data.h5
 ```
 
 ---
@@ -349,7 +391,7 @@ if (settings::clutch_on && simulation::green_function_mesh) {
 ### HDF5 文件结构
 
 ```
-green_function_data.h5
+transfer_function_data.h5
 ├── 属性 (Attributes)
 │   ├── filetype: "green_function_mesh_per_particle"
 │   ├── version: "1.0"
@@ -384,18 +426,21 @@ green_function_data.h5
 ### 空间索引映射
 
 **一维到三维**:
+
 ```python
 gf_3d = gf_1d.reshape(shape)
 value = gf_3d[ix, iy, iz]
 ```
 
 **三维到一维**:
+
 ```python
 index = ix + shape[0] * (iy + shape[1] * iz)
 value = gf_1d[index]
 ```
 
 **物理坐标计算**:
+
 ```python
 x = origin[0] + ix * pitch
 y = origin[1] + iy * pitch
@@ -414,7 +459,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # 读取HDF5文件
-with h5py.File('green_function_data.h5', 'r') as f:
+with h5py.File('transfer_function_data.h5', 'r') as f:
     # 读取网格信息
     shape = f['shape'][:]
     origin = f['origin'][:]
@@ -499,14 +544,17 @@ for i, (pid, contrib) in enumerate(sorted_particles[:10]):
 ### 1. 内存管理
 
 **稀疏存储**:
+
 - 使用 `std::unordered_map` 仅存储有贡献的源粒子
 - 自动过滤零贡献粒子
 
 **批次处理**:
+
 - 分批次累积数据，减少内存峰值
 - 每批次结束时清空临时缓存
 
 **内存估算**:
+
 ```
 总内存 ≈ N_particles × (nx × ny × nz) × 8 bytes
 
@@ -516,11 +564,13 @@ for i, (pid, contrib) in enumerate(sorted_particles[:10]):
 ### 2. 并行性能
 
 **线程安全机制**:
+
 - 使用 `std::mutex` 保护 `unordered_map` 访问
 - 使用 `#pragma omp atomic` 保护数值累积
 - 细粒度锁，最小化锁持有时间
 
 **并行策略**:
+
 ```cpp
 {
   // 短暂持有锁获取数据指针
@@ -537,10 +587,12 @@ for i, (pid, contrib) in enumerate(sorted_particles[:10]):
 ### 3. 计算优化
 
 **预计算优化**:
+
 - 存储 `inv_pitch_` = 1.0 / `pitch_`，避免重复除法
 - 使用整数索引计算，避免浮点运算
 
 **边界检查优化**:
+
 ```cpp
 // 快速边界检查
 if (ix >= 0 && ix < shape_[0] && 
@@ -553,10 +605,12 @@ if (ix >= 0 && ix < shape_[0] &&
 ### 4. I/O 优化
 
 **HDF5 写入**:
+
 - 批量写入数据集，减少I/O调用
 - 使用压缩（可选）减小文件大小
 
 **文件大小估算**:
+
 ```
 文件大小 ≈ (N_particles + 1) × spatial_size × 8 bytes + 元数据
 
@@ -573,7 +627,8 @@ if (ix >= 0 && ix < shape_[0] &&
 
 **原因**: 多线程并发访问导致数据结构不一致
 
-**解决方案**: 
+**解决方案**:
+
 - 已通过 `std::mutex` 保护解决
 - 确保使用最新版本的代码
 
@@ -582,6 +637,7 @@ if (ix >= 0 && ix < shape_[0] &&
 **原因**: 粒子位置超出网格边界
 
 **检查**:
+
 ```cpp
 // 查看初始化输出
 GreenFunctionMesh initialized:
@@ -589,6 +645,7 @@ GreenFunctionMesh initialized:
 ```
 
 **解决方案**:
+
 - 增加网格边界扩展 (`margin`)
 - 检查模型边界是否正确
 
@@ -597,6 +654,7 @@ GreenFunctionMesh initialized:
 **症状**: 程序崩溃或运行缓慢
 
 **解决方案**:
+
 - 增大网格间距 (`pitch`)
 - 减少源粒子数量
 - 使用分批次处理
@@ -605,6 +663,7 @@ GreenFunctionMesh initialized:
 #### 4. 文件无法生成
 
 **检查**:
+
 ```cpp
 // 确保调用了finalize
 simulation::green_function_mesh->finalize_greenfunction_mesh(batch_id);
