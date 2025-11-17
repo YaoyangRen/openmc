@@ -5,6 +5,7 @@
 #include "openmc/array.h"
 #include "openmc/position.h"
 #include "openmc/vector.h"
+#include <algorithm>
 #include <atomic>
 #include <mutex>
 #include <string>
@@ -51,6 +52,15 @@ public:
 
   // 计算伴随源分布（用于最后一个非活跃batch）
   void compute_batch_adjoint();
+
+  // 访问伴随源计算结果
+  bool is_adjoint_computed() const { return adjoint_computed_; }
+  double get_k_adjoint() const { return k_adjoint_; }
+  int get_adjoint_nonzero_cells() const
+  {
+    return std::count_if(adjoint_source_.begin(), adjoint_source_.end(),
+      [](double x) { return x > 1e-10; });
+  }
 
   // 网格信息
   const std::array<int, 3>& shape() const { return shape_; }

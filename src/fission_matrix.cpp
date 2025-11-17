@@ -584,42 +584,11 @@ void FissionMatrix::finalize(const std::string& filename)
     return;
   }
 
-  std::cout << "\n" << std::string(70, '=') << std::endl;
-  std::cout << "FISSION MATRIX FINALIZATION" << std::endl;
-  std::cout << std::string(70, '=') << std::endl;
-
-  // 输出网格配置信息
-  std::cout << "\nGrid Configuration:" << std::endl;
-  std::cout << "  Bounds: [" << origin_[0] << "," << origin_[1] << ","
-            << origin_[2] << "] to [" << upper_bound_[0] << ","
-            << upper_bound_[1] << "," << upper_bound_[2] << "]" << std::endl;
-  std::cout << "  Pitch: " << pitch_ << " cm" << std::endl;
-  std::cout << "  Shape: [" << shape_[0] << "," << shape_[1] << "," << shape_[2]
-            << "]" << std::endl;
-  std::cout << "  Total cells: " << n_cells_ << std::endl;
-  std::cout << "  Matrix size: " << n_cells_ << " x " << n_cells_ << " = "
-            << n_cells_ * n_cells_ << " elements" << std::endl;
-
-  // 计算稀疏存储节省的内存
+  // 简洁输出
   size_t sparse_elements = fission_matrix_sparse_.size();
-  size_t dense_memory = n_cells_ * n_cells_ * sizeof(double);
-  size_t sparse_memory =
-    sparse_elements * (2 * sizeof(size_t) + sizeof(double));
-  double compression_ratio =
-    1.0 - static_cast<double>(sparse_elements) / (n_cells_ * n_cells_);
-
-  std::cout << "  Non-zero elements: " << sparse_elements << std::endl;
-  std::cout << "  Sparsity: " << compression_ratio * 100.0 << "%" << std::endl;
-  std::cout << "  Dense storage would need: "
-            << dense_memory / (1024.0 * 1024.0) << " MB" << std::endl;
-  std::cout << "  Sparse storage uses: " << sparse_memory / (1024.0 * 1024.0)
-            << " MB" << std::endl;
-  std::cout << "  Memory saved: "
-            << (dense_memory - sparse_memory) / (1024.0 * 1024.0) << " MB"
+  std::cout << "\nFission Matrix: " << sparse_elements << " non-zero elements ("
+            << n_cells_ << "x" << n_cells_ << " grid) -> " << filename
             << std::endl;
-
-  // 归一化裂变矩阵（仅对非零元素）
-  std::cout << "\nNormalizing sparse fission matrix..." << std::endl;
   std::unordered_map<size_t, double> normalized_sparse;
 
   for (const auto& [key, value] : fission_matrix_sparse_) {
@@ -707,57 +676,6 @@ void FissionMatrix::finalize(const std::string& filename)
   }
 
   file_close(file_id);
-
-  // 统计信息
-  double max_element = 0.0;
-  double sum_normalized = 0.0;
-
-  for (double val : values_normalized) {
-    if (val > 0.0) {
-      max_element = std::max(max_element, val);
-      sum_normalized += val;
-    }
-  }
-
-  // 输出统计信息
-  std::cout << "\nData Collection Summary:" << std::endl;
-  std::cout << "  Total fissions recorded: " << total_fissions_ << std::endl;
-  std::cout << "  Total sources recorded: " << total_sources_ << std::endl;
-  std::cout << "  Number of batches: " << n_realizations_ << std::endl;
-
-  std::cout << "\nSparse Matrix Statistics:" << std::endl;
-  std::cout << "  Non-zero elements: " << sparse_elements << " / "
-            << n_cells_ * n_cells_ << std::endl;
-  std::cout << "  Sparsity: " << compression_ratio * 100.0 << "%" << std::endl;
-  std::cout << "  Max normalized element: " << max_element << std::endl;
-  std::cout << "  Sum of normalized matrix: " << sum_normalized << std::endl;
-
-  // 输出伴随源信息（如果已计算）
-  if (adjoint_computed_) {
-    std::cout << "\n" << std::string(70, '=') << std::endl;
-    std::cout << "ADJOINT SOURCE SUMMARY" << std::endl;
-    std::cout << std::string(70, '=') << std::endl;
-
-    // 统计非零单元
-    int nonzero_cells = std::count_if(adjoint_source_.begin(),
-      adjoint_source_.end(), [](double x) { return x > 1e-10; });
-
-    double max_importance =
-      *std::max_element(adjoint_source_.begin(), adjoint_source_.end());
-
-    std::cout << "k_adjoint = " << std::fixed << std::setprecision(6)
-              << k_adjoint_ << std::endl;
-    std::cout << "Nonzero cells: " << nonzero_cells << " / " << n_cells_
-              << std::endl;
-    std::cout << "Max importance: " << std::scientific << std::setprecision(4)
-              << max_importance << std::endl;
-    std::cout << "Saved to '" << filename << "': adjoint_source" << std::endl;
-    std::cout << std::string(70, '=') << std::endl;
-  }
-
-  std::cout << "\nStorage Format: COO (Coordinate)" << std::endl;
-  std::cout << "Output File: " << filename << std::endl;
-  std::cout << std::string(70, '=') << std::endl;
 }
 
 } // namespace openmc

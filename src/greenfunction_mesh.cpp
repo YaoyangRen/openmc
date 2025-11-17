@@ -241,33 +241,14 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(
     return;
   }
 
-  // 输出格林函数网格配置信息
-  std::cout << "\n" << std::string(70, '=') << std::endl;
-  std::cout << "GREEN FUNCTION MESH FINALIZATION (Transfer Function)"
-            << std::endl;
-  std::cout << std::string(70, '=') << std::endl;
-
-  std::cout << "\nTransfer Function Theory:" << std::endl;
-  std::cout << "  T(P0 -> r) = ∫∫ ν̄Σf(r,E')Φ(r,Ω',E'|S0) dΩ'dE'" << std::endl;
-  std::cout << "  Represents: Expected number of fission neutrons produced at r"
-            << std::endl;
-  std::cout << "              by source particle from P0" << std::endl;
-
-  std::cout << "\nGrid Configuration:" << std::endl;
-  std::cout << "  Bounds: [" << origin_[0] << "," << origin_[1] << ","
-            << origin_[2] << "] to [" << upper_bound_[0] << ","
-            << upper_bound_[1] << "," << upper_bound_[2] << "]" << std::endl;
-  std::cout << "  Pitch: " << pitch_ << " cm" << std::endl;
-  std::cout << "  Shape: [" << shape_[0] << "," << shape_[1] << "," << shape_[2]
-            << "]" << std::endl;
-  std::cout << "  Spatial size: " << spatial_size_ << std::endl;
-
-  std::cout << "\nData Collection Summary:" << std::endl;
-  std::cout << "  Number of source particles: "
-            << particle_green_functions_.size() << std::endl;
-  std::cout << "  Total contributions: " << total_contributions_ << std::endl;
-  std::cout << "  Dropped contributions: " << dropped_contributions_
-            << std::endl;
+  // 简洁输出格林函数信息
+  std::string type_name =
+    (filename.find("flux") != std::string::npos) ? "Flux" : "Fission";
+  std::cout << "\n"
+            << type_name
+            << " Green Function: " << particle_green_functions_.size()
+            << " source particles, " << total_contributions_
+            << " contributions -> " << filename << std::endl;
 
   // 创建HDF5文件，使用指定的文件名
   hid_t file_id = file_open(filename, 'w');
@@ -306,9 +287,6 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(
 
   H5Gclose(particles_group);
   file_close(file_id);
-
-  std::cout << "\nOutput File: " << filename << std::endl;
-  std::cout << std::string(70, '=') << std::endl;
 
   // 清理数据
   particle_green_functions_.clear();

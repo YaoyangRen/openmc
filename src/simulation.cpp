@@ -1011,38 +1011,12 @@ void output_random_particle_source_info()
 
   const auto& particle = simulation::source_bank[random_idx];
 
-  fmt::print("\n" + std::string(60, '=') + "\n");
-  fmt::print("SOURCE PARTICLE TRACKING OUTPUT (Final Batch {})\n",
-    simulation::current_batch);
-  fmt::print(std::string(60, '=') + "\n");
-
+  // 简化输出
   if (particle.source_label != 0) {
-    fmt::print("Particle Index: {}\n", random_idx);
-    fmt::print("Source Label: {}\n", particle.source_label);
-    fmt::print("Source Batch: {}\n", particle.source_batch);
-    fmt::print("Source Position: ({:.6f}, {:.6f}, {:.6f})\n",
-      particle.source_position.x, particle.source_position.y,
-      particle.source_position.z);
-    fmt::print("Current Position: ({:.6f}, {:.6f}, {:.6f})\n", particle.r.x,
-      particle.r.y, particle.r.z);
-
-    // 计算位移距离
-    Position displacement = particle.r - particle.source_position;
-    double distance = displacement.norm();
-    fmt::print("Displacement Distance: {:.6f} cm\n", distance);
-
-    fmt::print("Current Energy: {:.6e} eV\n", particle.E);
-    fmt::print("Current Weight: {:.6f}\n", particle.wgt);
-  } else {
-    // 如果没有源追踪信息，只显示当前信息
-    fmt::print("Particle Index: {} (No source tracking info)\n", random_idx);
-    fmt::print("Current Position: ({:.6f}, {:.6f}, {:.6f})\n", particle.r.x,
-      particle.r.y, particle.r.z);
-    fmt::print("Current Energy: {:.6e} eV\n", particle.E);
-    fmt::print("Current Weight: {:.6f}\n", particle.wgt);
+    fmt::print(
+      "\nRandom Source Particle #{}: displacement={:.2f} cm, E={:.2e} eV\n",
+      random_idx, (particle.r - particle.source_position).norm(), particle.E);
   }
-
-  fmt::print(std::string(60, '=') + "\n\n");
 }
 
 } // namespace openmc
