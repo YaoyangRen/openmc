@@ -1002,7 +1002,7 @@ void score_general_ce_nonanalog(Particle& p, int i_tally, int start_index,
     case SCORE_GREENFUNCTION:
       if (settings::clutch_on) {
         if (p.type() == Type::neutron && (p.fission())) {
-          // 计算裂变源贡献 (Fission Source Green's Function)
+          // 计算传递函数贡献 (Transfer Function)
           double contribution = 0.0;
           if (p.neutron_xs(p.event_nuclide()).total > 0) {
             contribution = p.wgt_last() *
@@ -1010,9 +1010,9 @@ void score_general_ce_nonanalog(Particle& p, int i_tally, int start_index,
                            p.neutron_xs(p.event_nuclide()).fission /
                            p.neutron_xs(p.event_nuclide()).total;
           }
-          // 累积到裂变源格林函数网格
-          if (simulation::fission_green_function_mesh) {
-            simulation::fission_green_function_mesh->accumulate(
+          // 累积到传递函数网格
+          if (simulation::transfer_function_mesh) {
+            simulation::transfer_function_mesh->accumulate(
               p.r(), contribution, p.source_particle_id());
           }
         }

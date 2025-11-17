@@ -323,7 +323,7 @@ const RegularMesh* ufs_mesh {nullptr};
 vector<double> k_generation;
 vector<int64_t> work_index;
 
-std::unique_ptr<GreenFunctionMesh> fission_green_function_mesh;
+std::unique_ptr<GreenFunctionMesh> transfer_function_mesh;
 std::unique_ptr<FissionMatrix> fission_matrix;
 
 } // namespace simulation
@@ -393,11 +393,10 @@ void initialize_batch()
     }
   }
 
-  // Initialize fission source green function mesh (裂变源格林函数)
-  if (!simulation::fission_green_function_mesh) {
-    simulation::fission_green_function_mesh =
-      std::make_unique<GreenFunctionMesh>(
-        1.0, settings::n_batches, true); // 1cm分辨率，自动获取边界
+  // Initialize transfer function mesh (传递函数)
+  if (!simulation::transfer_function_mesh) {
+    simulation::transfer_function_mesh = std::make_unique<GreenFunctionMesh>(
+      1.0, settings::n_batches, true); // 1cm分辨率，自动获取边界
   }
 
   // Initialize fission matrix (裂变矩阵)
@@ -415,10 +414,10 @@ void initialize_batch()
   // Add user tallies to active tallies list
   setup_active_tallies();
 
-  // Start new batch for fission green function mesh
+  // Start new batch for transfer function mesh
   if (settings::clutch_on) {
-    if (simulation::fission_green_function_mesh) {
-      simulation::fission_green_function_mesh->start_new_batch(
+    if (simulation::transfer_function_mesh) {
+      simulation::transfer_function_mesh->start_new_batch(
         simulation::current_batch);
     }
   }
@@ -452,10 +451,10 @@ void initialize_batch()
     simulation::fission_matrix->start_new_batch(simulation::current_batch);
   }
 
-  // 格林函数mesh的batch管理
+  // 传递函数mesh的batch管理
   if (settings::clutch_on) {
-    if (simulation::fission_green_function_mesh) {
-      simulation::fission_green_function_mesh->start_new_batch(
+    if (simulation::transfer_function_mesh) {
+      simulation::transfer_function_mesh->start_new_batch(
         simulation::current_batch);
     }
   }
@@ -563,13 +562,13 @@ void finalize_batch()
     }
   }
 
-  // Finalize fission green function mesh at the end
+  // Finalize transfer function mesh at the end
   if (settings::clutch_on && simulation::current_batch == settings::n_batches) {
-    // 输出裂变源格林函数数据
-    if (simulation::fission_green_function_mesh) {
-      simulation::fission_green_function_mesh->finalize_greenfunction_mesh(
+    // 输出传递函数数据
+    if (simulation::transfer_function_mesh) {
+      simulation::transfer_function_mesh->finalize_greenfunction_mesh(
         simulation::current_batch,
-        "fission_green_function_data.h5"); // 裂变源格林函数文件
+        "transfer_function_data.h5"); // 传递函数文件
     }
   }
 

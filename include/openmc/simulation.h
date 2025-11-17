@@ -52,8 +52,7 @@ extern vector<double> k_generation;
 extern vector<int64_t> work_index;
 
 extern std::unique_ptr<GreenFunctionMesh>
-  fission_green_function_mesh; // Fission Source Green's Function mesh
-                               // (裂变源格林函数)
+  transfer_function_mesh; // Transfer Function mesh (传递函数)
 
 extern std::unique_ptr<FissionMatrix>
   fission_matrix; // Fission Matrix (裂变矩阵)

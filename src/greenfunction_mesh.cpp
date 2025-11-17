@@ -241,12 +241,8 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(
     return;
   }
 
-  // 简洁输出格林函数信息
-  std::string type_name =
-    (filename.find("flux") != std::string::npos) ? "Flux" : "Fission";
-  std::cout << "\n"
-            << type_name
-            << " Green Function: " << particle_green_functions_.size()
+  // 简洁输出传递函数信息
+  std::cout << "\nTransfer Function: " << particle_green_functions_.size()
             << " source particles, " << total_contributions_
             << " contributions -> " << filename << std::endl;
 
