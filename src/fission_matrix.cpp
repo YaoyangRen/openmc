@@ -174,42 +174,10 @@ void FissionMatrix::start_new_batch(int batch_id)
     std::lock_guard<std::mutex> lock(data_mutex_);
 
     // 如果启用了batch级伴随源迭代，并且当前batch已达到统计起始batch
-    // 计算两个伴随源分布：
-    // 1. 使用当前batch的FM迭代 adjoint_source_batch_
-    // 2. 使用累积的FM迭代 adjoint_source_accumulated_
+    // 使用累积的FM矩阵，不进行迭代，只计算一次 I_new = F^T × I*
     if (enable_batch_adjoint_ && current_batch_id_ >= adjoint_start_batch_ &&
         !current_batch_sparse_.empty()) {
 
-      // ========== 方法1: 使用当前batch的FM迭代 ==========
-      std::unordered_map<size_t, double> normalized_batch;
-      for (const auto& [key, value] : current_batch_sparse_) {
-        size_t row = key / n_cells_;
-        double source_total = current_batch_source_counts_[row];
-        if (source_total > 0.0) {
-          normalized_batch[key] = value / source_total;
-        }
-      }
-
-      if (!normalized_batch.empty()) {
-        vector<double> I_new(n_cells_, 0.0);
-
-        for (const auto& [key, F_ij] : normalized_batch) {
-          size_t i = key / n_cells_;
-          size_t j = key % n_cells_;
-          I_new[j] += F_ij * adjoint_source_batch_[i];
-        }
-
-        k_adjoint_batch_ = std::accumulate(I_new.begin(), I_new.end(), 0.0);
-
-        if (k_adjoint_batch_ > 0.0) {
-          for (size_t i = 0; i < n_cells_; ++i) {
-            adjoint_source_batch_[i] = I_new[i] / k_adjoint_batch_;
-          }
-        }
-        k_adjoint_history_batch_.push_back(k_adjoint_batch_);
-      }
-
-      // ========== 方法2: 使用累积的FM迭代 ==========
       // 先累积当前batch到总矩阵（临时）
       std::unordered_map<size_t, double> temp_accumulated =
         fission_matrix_sparse_;
@@ -222,45 +190,49 @@ void FissionMatrix::start_new_batch(int batch_id)
         temp_source_counts[i] += current_batch_source_counts_[i];
       }
 
-      // 归一化累积矩阵
-      std::unordered_map<size_t, double> normalized_accum;
+      // 归一化累积矩阵 F_norm[i][j] = F[i][j] / source_counts[i]
+      std::unordered_map<size_t, double> normalized_fm;
       for (const auto& [key, value] : temp_accumulated) {
         size_t row = key / n_cells_;
         double source_total = temp_source_counts[row];
         if (source_total > 0.0) {
-          normalized_accum[key] = value / source_total;
+          normalized_fm[key] = value / source_total;
         }
       }
 
-      if (!normalized_accum.empty()) {
+      // 单次计算: I_new = F^T × I*
+      if (!normalized_fm.empty()) {
         vector<double> I_new(n_cells_, 0.0);
 
-        for (const auto& [key, F_ij] : normalized_accum) {
-          size_t i = key / n_cells_;
-          size_t j = key % n_cells_;
-          I_new[j] += F_ij * adjoint_source_accumulated_[i];
+        for (const auto& [key, F_ij] : normalized_fm) {
+          size_t i = key / n_cells_; // 源单元（行）
+          size_t j = key % n_cells_; // 裂变单元（列）
+          // F^T × I*: (I_new)_j += F[i][j] × I*_i
+          I_new[j] += F_ij * adjoint_source_[i];
         }
 
-        k_adjoint_accumulated_ =
-          std::accumulate(I_new.begin(), I_new.end(), 0.0);
+        // 计算 k = sum(I_new)
+        k_adjoint_ = std::accumulate(I_new.begin(), I_new.end(), 0.0);
 
-        if (k_adjoint_accumulated_ > 0.0) {
+        // 归一化: I* = I_new / k （如果 k > 0）
+        if (k_adjoint_ > 0.0) {
           for (size_t i = 0; i < n_cells_; ++i) {
-            adjoint_source_accumulated_[i] = I_new[i] / k_adjoint_accumulated_;
+            adjoint_source_[i] = I_new[i] / k_adjoint_;
           }
+
+          // 简洁输出
+          std::cout << "  Batch " << std::setw(3) << current_batch_id_
+                    << " adjoint: k=" << std::fixed << std::setprecision(6)
+                    << k_adjoint_ << std::endl;
+        } else {
+          std::cout << "  Batch " << std::setw(3) << current_batch_id_
+                    << " adjoint: k=0 (not updated)" << std::endl;
         }
-        k_adjoint_history_accumulated_.push_back(k_adjoint_accumulated_);
+
+        k_adjoint_history_batch_.push_back(k_adjoint_);
+        adjoint_iterations_++;
+        adjoint_computed_ = true;
       }
-
-      // 简洁输出
-      std::cout << "  Batch " << std::setw(3) << current_batch_id_
-                << " adjoint: "
-                << "k_batch=" << std::fixed << std::setprecision(6)
-                << k_adjoint_batch_ << ", k_accum=" << k_adjoint_accumulated_
-                << std::endl;
-
-      adjoint_iterations_++;
-      adjoint_computed_ = true;
     }
 
     // 然后合并当前batch的稀疏数据到累积矩阵
@@ -293,15 +265,13 @@ void FissionMatrix::enable_batch_adjoint_iteration(
   adjoint_start_batch_ = start_batch;
 
   if (enable) {
-    std::cout << "\nBatch adjoint iteration: start=" << start_batch
-              << ", iter/batch=" << iterations_per_batch << std::endl;
+    std::cout << "\nBatch adjoint (single update): start_batch=" << start_batch
+              << std::endl;
 
-    // 初始化两个伴随源为均匀分布
+    // 初始化伴随源为均匀分布
     double norm = static_cast<double>(n_cells_);
     for (size_t i = 0; i < n_cells_; ++i) {
-      adjoint_source_batch_[i] = 1.0 / norm;
-      adjoint_source_accumulated_[i] = 1.0 / norm;
-      adjoint_source_[i] = 1.0 / norm; // 保持兼容性
+      adjoint_source_[i] = 1.0 / norm;
     }
   }
 }
@@ -726,56 +696,31 @@ void FissionMatrix::finalize(const std::string& filename)
 
   // 写入伴随源分布（如果已计算）
   if (adjoint_computed_) {
-    // 归一化batch方法的伴随源
-    double adj_sum_batch = std::accumulate(
-      adjoint_source_batch_.begin(), adjoint_source_batch_.end(), 0.0);
-    if (adj_sum_batch > 0.0) {
-      for (auto& val : adjoint_source_batch_) {
-        val /= adj_sum_batch;
+    // 归一化伴随源，使其总和为1
+    double adj_sum =
+      std::accumulate(adjoint_source_.begin(), adjoint_source_.end(), 0.0);
+    if (adj_sum > 0.0) {
+      for (auto& val : adjoint_source_) {
+        val /= adj_sum;
       }
+      std::cout << "\nAdjoint source normalized (sum = 1.0)" << std::endl;
     }
 
-    // 归一化accumulated方法的伴随源
-    double adj_sum_accum = std::accumulate(adjoint_source_accumulated_.begin(),
-      adjoint_source_accumulated_.end(), 0.0);
-    if (adj_sum_accum > 0.0) {
-      for (auto& val : adjoint_source_accumulated_) {
-        val /= adj_sum_accum;
-      }
-    }
-
-    std::cout << "\nBoth adjoint sources normalized (sum = 1.0)" << std::endl;
-
-    // 写入两个伴随源分布
-    write_dataset(file_id, "adjoint_source_batch", adjoint_source_batch_);
-    write_dataset(
-      file_id, "adjoint_source_accumulated", adjoint_source_accumulated_);
-
-    // 保持兼容性：默认使用accumulated方法
-    adjoint_source_ = adjoint_source_accumulated_;
-    k_adjoint_ = k_adjoint_accumulated_;
+    // 写入伴随源分布
     write_dataset(file_id, "adjoint_source", adjoint_source_);
-
-    write_attribute(file_id, "k_adjoint_batch", k_adjoint_batch_);
-    write_attribute(file_id, "k_adjoint_accumulated", k_adjoint_accumulated_);
     write_attribute(file_id, "k_adjoint", k_adjoint_);
     write_attribute(file_id, "adjoint_iterations", adjoint_iterations_);
     write_attribute(file_id, "adjoint_converged", adjoint_computed_);
 
     // 添加说明信息
     write_attribute(file_id, "adjoint_source_description",
-      "Two methods: batch (each batch FM) and accumulated (cumulative FM)");
+      "Adjoint source computed using accumulated FM (single update per batch)");
     write_attribute(file_id, "adjoint_source_units", "normalized importance");
 
-    // 写入两个历史记录
+    // 写入历史记录
     if (!k_adjoint_history_batch_.empty()) {
-      write_dataset(
-        file_id, "k_adjoint_history_batch", k_adjoint_history_batch_);
-      write_dataset(file_id, "k_adjoint_history_accumulated",
-        k_adjoint_history_accumulated_);
+      write_dataset(file_id, "k_adjoint_history", k_adjoint_history_batch_);
       write_attribute(file_id, "batch_adjoint_enabled", enable_batch_adjoint_);
-      write_attribute(
-        file_id, "adjoint_iter_per_batch", adjoint_max_iter_per_batch_);
       write_attribute(file_id, "adjoint_start_batch", adjoint_start_batch_);
     }
   }
@@ -813,26 +758,30 @@ void FissionMatrix::finalize(const std::string& filename)
     std::cout << std::string(70, '=') << std::endl;
 
     // 统计非零单元
-    int nonzero_batch = std::count_if(adjoint_source_batch_.begin(),
-      adjoint_source_batch_.end(), [](double x) { return x > 1e-10; });
-    int nonzero_accum = std::count_if(adjoint_source_accumulated_.begin(),
-      adjoint_source_accumulated_.end(), [](double x) { return x > 1e-10; });
+    int nonzero_cells = std::count_if(adjoint_source_.begin(),
+      adjoint_source_.end(), [](double x) { return x > 1e-10; });
 
-    std::cout << "\nBatch FM method:  k_final = " << std::fixed
-              << std::setprecision(6) << k_adjoint_batch_
-              << "  (nonzero cells: " << nonzero_batch << ")" << std::endl;
-    std::cout << "Accum FM method:  k_final = " << k_adjoint_accumulated_
-              << "  (nonzero cells: " << nonzero_accum << ")" << std::endl;
+    double max_importance =
+      *std::max_element(adjoint_source_.begin(), adjoint_source_.end());
+
+    std::cout << "\nFinal k_adjoint = " << std::fixed << std::setprecision(6)
+              << k_adjoint_ << std::endl;
+    std::cout << "Nonzero cells: " << nonzero_cells << " / " << n_cells_
+              << std::endl;
+    std::cout << "Max importance: " << std::scientific << std::setprecision(4)
+              << max_importance << std::endl;
 
     if (!k_adjoint_history_batch_.empty()) {
-      std::cout << "\nConvergence: " << k_adjoint_history_batch_.size()
-                << " iterations from batch " << adjoint_start_batch_
+      std::cout << "\nIterations: " << k_adjoint_history_batch_.size()
+                << " (from batch " << adjoint_start_batch_ << ")" << std::endl;
+      std::cout << "  Initial k = " << std::fixed << std::setprecision(6)
+                << k_adjoint_history_batch_.front() << std::endl;
+      std::cout << "  Final k   = " << k_adjoint_history_batch_.back()
                 << std::endl;
     }
 
-    std::cout << "Saved to '" << filename
-              << "': adjoint_source_batch, adjoint_source_accumulated"
-              << std::endl;
+    std::cout << "\nSaved to '" << filename
+              << "': adjoint_source, k_adjoint_history" << std::endl;
     std::cout << std::string(70, '=') << std::endl;
   }
 
