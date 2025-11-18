@@ -92,9 +92,7 @@ void SharedMeshGrid::initialize()
 
   n_cells_ = static_cast<size_t>(shape_[0]) * shape_[1] * shape_[2];
 
-  if (mpi::master) {
-    print_info();
-  }
+  print_info();
 }
 
 // 验证网格配置
@@ -123,7 +121,7 @@ void SharedMeshGrid::validate() const
 // 输出网格信息
 void SharedMeshGrid::print_info(const std::string& label) const
 {
-  std::cout << "\n========== " << label << " ==========\n";
+  std::cout << "\n============= " << label << " =============\n";
   std::cout << "  形状 [nx, ny, nz]: [" << shape_[0] << ", " << shape_[1]
             << ", " << shape_[2] << "]\n";
   std::cout << "  网格分辨率: " << pitch_ << " cm\n";

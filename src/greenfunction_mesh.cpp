@@ -26,7 +26,7 @@ GreenFunctionMesh::GreenFunctionMesh(
   : grid_(grid), inv_pitch_(1.0 / grid->pitch()), current_batch_id_(-1),
     max_batches_(max_batches)
 {
-  // 计算上边界（用于输出�?
+  // 计算上边界（用于输出）
   const auto& origin = grid_->origin();
   const auto& shape = grid_->shape();
   double pitch = grid_->pitch();
@@ -35,12 +35,12 @@ GreenFunctionMesh::GreenFunctionMesh(
 
   spatial_size_ = grid_->n_cells();
 
-  // 初始化信息将在finalize时输�?
+  // 初始化信息将在finalize时输出
 
   // 初始化源计数
   source_counts_.resize(spatial_size_, 0);
 
-  // 稀疏存储：transfer_functions_sparse_ �?cumulative_data_sparse_ 按需增长
+  // 稀疏存储：transfer_functions_sparse_ 和 cumulative_data_sparse_ 按需增长
 }
 
 int GreenFunctionMesh::position_to_cell_index(const Position& r) const
@@ -54,13 +54,13 @@ int GreenFunctionMesh::position_to_cell_index(const Position& r) const
   int iz =
     static_cast<int>(std::floor((r.z - grid_->origin()[2] + eps) * inv_pitch_));
 
-  // 边界检�?
+  // 边界检查
   if (ix < 0 || ix >= grid_->shape()[0] || iy < 0 || iy >= grid_->shape()[1] ||
       iz < 0 || iz >= grid_->shape()[2]) {
     return -1; // 超出边界
   }
 
-  // 计算线性索�?
+  // 计算线性索引
   return ix * grid_->shape()[1] * grid_->shape()[2] + iy * grid_->shape()[2] +
          iz;
 }
@@ -73,7 +73,7 @@ void GreenFunctionMesh::record_source_birth(
     return;
   }
 
-  // 计算源单元索�?
+  // 计算源单元索引
   int i_source = position_to_cell_index(r);
 
   if (i_source < 0) {
@@ -84,11 +84,11 @@ void GreenFunctionMesh::record_source_birth(
   // 记录源粒子到源单元的映射
   particle_to_source_cell_[source_particle_id] = i_source;
 
-  // 增加该源单元的计�?
+  // 增加该源单元的计数
   source_counts_[i_source]++;
 
   // 稀疏存储：不需要预分配，map 会按需增长
-  // transfer_functions_sparse_[i_source] �?
+  // transfer_functions_sparse_[i_source] 和
   // current_batch_transfer_data_sparse_[i_source] 会在 accumulate()
   // 中首次使用时自动创建
 }
@@ -96,9 +96,9 @@ void GreenFunctionMesh::record_source_birth(
 void GreenFunctionMesh::accumulate(
   const Position& r, double contribution, int64_t source_particle_id)
 {
-  // 累积传递函�?T(r_source -> r_response):
+  // 累积传递函数 T(r_source -> r_response):
   // contribution = nu_t = (w/k_eff) × w_ufs × (ν̄Σf/Σt)
-  // 表示源位置在响应位置 r 处产生的期望裂变中子�?
+  // 表示源位置在响应位置 r 处产生的期望裂变中子数
 
   // 验证源粒子ID
   if (source_particle_id < 0) {
@@ -110,7 +110,7 @@ void GreenFunctionMesh::accumulate(
     return;
   }
 
-  // 查找源单�?
+  // 查找源单元
   auto it = particle_to_source_cell_.find(source_particle_id);
   if (it == particle_to_source_cell_.end()) {
     // 这个粒子没有记录源位置，忽略
@@ -119,7 +119,7 @@ void GreenFunctionMesh::accumulate(
 
   int i_source = it->second;
 
-  // 计算响应位置的单元索�?
+  // 计算响应位置的单元索引
   int j_response = position_to_cell_index(r);
 
   if (j_response < 0) {
@@ -127,7 +127,7 @@ void GreenFunctionMesh::accumulate(
     return;
   }
 
-  // 稀疏存储：只在有贡献时才创建条�?
+  // 稀疏存储：只在有贡献时才创建条目
   {
     std::lock_guard<std::mutex> lock(data_mutex_);
 
@@ -161,7 +161,7 @@ void GreenFunctionMesh::start_new_batch(int batch_id)
 const vector<double>& GreenFunctionMesh::get_source_cell_data(
   int source_cell_index) const
 {
-  // 从稀疏存储构建稠密向�?
+  // 从稀疏存储构建稠密向量
   static vector<double> dense_data;
 
   auto it = transfer_functions_sparse_.find(source_cell_index);
@@ -169,7 +169,7 @@ const vector<double>& GreenFunctionMesh::get_source_cell_data(
     dense_data.clear();
     dense_data.resize(spatial_size_, 0.0);
 
-    // 填充非零�?
+    // 填充非零值
     for (const auto& [j_response, value] : it->second) {
       if (j_response >= 0 && j_response < static_cast<int>(spatial_size_)) {
         dense_data[j_response] = value;
@@ -178,7 +178,7 @@ const vector<double>& GreenFunctionMesh::get_source_cell_data(
     return dense_data;
   }
 
-  // 返回空向�?
+  // 返回空向量
   static vector<double> empty_data;
   return empty_data;
 }
@@ -199,21 +199,21 @@ const vector<int>& GreenFunctionMesh::get_source_cell_indices() const
 void GreenFunctionMesh::finalize_greenfunction_mesh(
   const int batch_id, const std::string& filename)
 {
-  // 保存最后一个batch的数�?
+  // 保存最后一个batch的数据
   start_new_batch(-1);
 
   if (transfer_functions_sparse_.empty()) {
     return;
   }
 
-  // 计算有源的单元数和总源粒子�?
+  // 计算有源的单元数和总源粒子数
   int n_source_cells = transfer_functions_sparse_.size();
   int total_source_particles = 0;
   for (const auto& count : source_counts_) {
     total_source_particles += count;
   }
 
-  // 计算稀疏性统�?
+  // 计算稀疏性统计
   size_t total_nonzero_entries = 0;
   for (const auto& [i_source, response_map] : transfer_functions_sparse_) {
     total_nonzero_entries += response_map.size();
@@ -228,7 +228,7 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(
   size_t dense_memory_mb =
     (n_source_cells * spatial_size_ * sizeof(double)) / (1024 * 1024);
 
-  // 简洁输出传递函数信�?
+  // 简洁输出传递函数信�?
   std::cout << "\nTransfer Function T(r_s->r): " << n_source_cells
             << " source cells, " << total_source_particles
             << " source particles, " << total_contributions_ << " contributions"
@@ -245,7 +245,7 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(
             << "% reduction" << std::endl;
   std::cout << "  Output: " << filename << std::endl;
 
-  // 创建HDF5文件，使用指定的文件�?
+  // 创建HDF5文件，使用指定的文件名
   hid_t file_id = file_open(filename, 'w');
 
   // 写入文件头部信息
@@ -279,7 +279,7 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(
   write_dataset(cumulative_group, "values", cumulative_values);
   H5Gclose(cumulative_group);
 
-  // 收集有源的单元索引列表（排序�?
+  // 收集有源的单元索引列表（排序�?
   vector<int> source_cell_indices;
   source_cell_indices.reserve(n_source_cells);
   for (const auto& [i_source, response_map] : transfer_functions_sparse_) {
@@ -300,13 +300,13 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(
   hid_t transfer_group = H5Gcreate(
     file_id, "transfer_functions", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
 
-  // 写入每个源单元的传递函�?T(i_source -> r) - 稀疏格�?
+  // 写入每个源单元的传递函�?T(i_source -> r) - 稀疏格�?
   for (const auto& [i_source, response_map] : transfer_functions_sparse_) {
     std::string cell_name = "source_cell_" + std::to_string(i_source);
     hid_t cell_group = H5Gcreate(
       transfer_group, cell_name.c_str(), H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
 
-    // 收集该源单元的非零响�?
+    // 收集该源单元的非零响�?
     vector<int> response_indices;
     vector<double> response_values;
     response_indices.reserve(response_map.size());
