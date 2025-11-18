@@ -3,9 +3,11 @@
 
 #include "hdf5.h"
 #include "openmc/array.h"
+#include "openmc/mesh_init.h"
 #include "openmc/position.h"
 #include "openmc/vector.h"
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -35,10 +37,8 @@ namespace openmc {
 class GreenFunctionMesh {
 public:
   // 构造函数，初始化传递函数网格
-  explicit GreenFunctionMesh(double resolution, int max_batches,
-    bool auto_bounds = true,
-    const std::array<double, 3>& manual_lower = {0.0, 0.0, 0.0},
-    const std::array<double, 3>& manual_upper = {10.0, 10.0, 10.0});
+  explicit GreenFunctionMesh(
+    std::shared_ptr<SharedMeshGrid> grid, int max_batches);
 
   // 记录源粒子的出生位置（建立源粒子ID到源单元的映射）
   void record_source_birth(const Position& r, int64_t source_particle_id);
@@ -63,9 +63,9 @@ public:
   const vector<int>& get_source_cell_indices() const;
 
   // 网格尺寸信息
-  const std::array<int, 3>& shape() const { return shape_; }
-  const std::array<double, 3>& origin() const { return origin_; }
-  double pitch() const { return pitch_; }
+  const std::array<int, 3>& shape() const { return grid_->shape(); }
+  const std::array<double, 3>& origin() const { return grid_->origin(); }
+  double pitch() const { return grid_->pitch(); }
 
   // 计算空间位置对应的单元索引
   int position_to_cell_index(const Position& r) const;
@@ -91,10 +91,9 @@ private:
   // 累积所有源单元的传递函数（总的传递函数，稀疏存储）
   std::unordered_map<int, double> cumulative_data_sparse_;
 
-  std::array<int, 3> shape_;          // 网格的形状（每个维度的单元数）
-  std::array<double, 3> origin_;      // 网格的原点位置
+  // 统一网格配置
+  std::shared_ptr<SharedMeshGrid> grid_;
   std::array<double, 3> upper_bound_; // 上边界（用于输出）
-  double pitch_;                      // 网格单元的边长
   double inv_pitch_;                  // 网格单元边长的倒数
   int current_batch_id_;              // 当前处理的batch ID
   int max_batches_;                   // 最大batch数量

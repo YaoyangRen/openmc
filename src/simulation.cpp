@@ -29,6 +29,7 @@
 
 #include "openmc/adjoint_flux.h"
 #include "openmc/greenfunction_mesh.h"
+#include "openmc/mesh_init.h"
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -394,16 +395,22 @@ void initialize_batch()
     }
   }
 
+  // 创建统一网格（用于裂变矩阵和传递函数）
+  std::shared_ptr<SharedMeshGrid> shared_grid;
+  if (!simulation::transfer_function_mesh && !simulation::fission_matrix) {
+    shared_grid = SharedMeshGrid::create(1.0); // 1cm 分辨率
+  }
+
   // Initialize transfer function mesh (传递函数)
   if (!simulation::transfer_function_mesh) {
-    simulation::transfer_function_mesh = std::make_unique<GreenFunctionMesh>(
-      1.0, settings::n_batches, true); // 1cm分辨率，自动获取边界
+    simulation::transfer_function_mesh =
+      std::make_unique<GreenFunctionMesh>(shared_grid, settings::n_batches);
   }
 
   // Initialize fission matrix (裂变矩阵)
   if (!simulation::fission_matrix) {
-    simulation::fission_matrix = std::make_unique<FissionMatrix>(
-      1.0, settings::n_batches, true); // 1cm分辨率，自动获取边界
+    simulation::fission_matrix =
+      std::make_unique<FissionMatrix>(shared_grid, settings::n_batches);
 
     // 启用batch级伴随源迭代（每个batch执行10次迭代）
     simulation::fission_matrix->enable_batch_adjoint_iteration(true, // 启用

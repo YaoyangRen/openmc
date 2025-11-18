@@ -16,103 +16,60 @@
 
 namespace openmc {
 
-FissionMatrix::FissionMatrix(double resolution, int max_batches,
-  bool auto_bounds, const std::array<double, 3>& manual_lower,
-  const std::array<double, 3>& manual_upper)
-  : pitch_(resolution), inv_pitch_(1.0 / resolution), current_batch_id_(-1),
+FissionMatrix::FissionMatrix(
+  std::shared_ptr<SharedMeshGrid> grid, int max_batches)
+  : grid_(grid), inv_pitch_(1.0 / grid->pitch()), current_batch_id_(-1),
     max_batches_(max_batches), n_realizations_(0), k_adjoint_(0.0),
     k_adjoint_batch_(0.0), k_adjoint_accumulated_(0.0),
     adjoint_computed_(false), adjoint_iterations_(0),
     enable_batch_adjoint_(false), adjoint_max_iter_per_batch_(10),
     adjoint_tolerance_(1.0e-6)
 {
-  double llc[3];
-  double urc[3];
+  // 计算上边界（用于输出�?
+  const auto& origin = grid_->origin();
+  const auto& shape = grid_->shape();
+  double pitch = grid_->pitch();
+  upper_bound_ = {origin[0] + shape[0] * pitch, origin[1] + shape[1] * pitch,
+    origin[2] + shape[2] * pitch};
 
-  if (auto_bounds) {
-    // 自动从根宇宙获取边界
-    auto bbox = model::universes.at(model::root_universe)->bounding_box();
-
-    llc[0] = bbox.xmin;
-    llc[1] = bbox.ymin;
-    llc[2] = bbox.zmin;
-
-    urc[0] = bbox.xmax;
-    urc[1] = bbox.ymax;
-    urc[2] = bbox.zmax;
-
-    // 检查无限边界
-    bool has_infinite = false;
-    for (int i = 0; i < 3; ++i) {
-      if (llc[i] <= -INFTY || urc[i] >= INFTY) {
-        has_infinite = true;
-        break;
-      }
-    }
-
-    if (has_infinite) {
-      // 静默使用手动边界，在finalize时输出警告
-      std::copy(manual_lower.begin(), manual_lower.end(), llc);
-      std::copy(manual_upper.begin(), manual_upper.end(), urc);
-    } else {
-      // 添加边距
-      double margin = pitch_ * 0.1;
-      for (int i = 0; i < 3; ++i) {
-        llc[i] -= margin;
-        urc[i] += margin;
-      }
-      // 边界信息将在finalize时输出
-    }
-  } else {
-    std::copy(manual_lower.begin(), manual_lower.end(), llc);
-    std::copy(manual_upper.begin(), manual_upper.end(), urc);
-  }
-
-  origin_ = {llc[0], llc[1], llc[2]};
-  upper_bound_ = {urc[0], urc[1], urc[2]};
-
-  // 计算网格尺寸
-  double dx = urc[0] - llc[0];
-  double dy = urc[1] - llc[1];
-  double dz = urc[2] - llc[2];
-
-  shape_[0] = std::max(1, static_cast<int>(std::ceil(dx / pitch_)) + 1);
-  shape_[1] = std::max(1, static_cast<int>(std::ceil(dy / pitch_)) + 1);
-  shape_[2] = std::max(1, static_cast<int>(std::ceil(dz / pitch_)) + 1);
-
-  n_cells_ = static_cast<size_t>(shape_[0]) * shape_[1] * shape_[2];
+  size_t n_cells = grid_->n_cells();
 
   // 使用稀疏矩阵存储，初始化时不需要预分配大量内存
-  // fission_matrix_sparse_ 和 current_batch_sparse_ 会按需增长
-  source_counts_.resize(n_cells_, 0.0);
-  current_batch_source_counts_.resize(n_cells_, 0.0);
+  // fission_matrix_sparse_ �?current_batch_sparse_ 会按需增长
+  source_counts_.resize(n_cells, 0.0);
+  current_batch_source_counts_.resize(n_cells, 0.0);
 
   // 初始化伴随源和正向源分布
-  adjoint_source_.resize(n_cells_, 0.0);
-  adjoint_source_batch_.resize(n_cells_, 0.0);
-  adjoint_source_accumulated_.resize(n_cells_, 0.0);
-  forward_source_.resize(n_cells_, 0.0);
+  adjoint_source_.resize(n_cells, 0.0);
+  adjoint_source_batch_.resize(n_cells, 0.0);
+  adjoint_source_accumulated_.resize(n_cells, 0.0);
+  forward_source_.resize(n_cells, 0.0);
 
-  // 初始化信息将在finalize时输出
+  // 初始化信息将在finalize时输�?
 }
 
 int FissionMatrix::position_to_index(const Position& r) const
 {
   constexpr double eps = 1.0e-10;
 
-  int ix = static_cast<int>(std::floor((r.x - origin_[0] + eps) * inv_pitch_));
-  int iy = static_cast<int>(std::floor((r.y - origin_[1] + eps) * inv_pitch_));
-  int iz = static_cast<int>(std::floor((r.z - origin_[2] + eps) * inv_pitch_));
+  const auto& origin = grid_->origin();
+  const auto& shape = grid_->shape();
 
-  // 边界检查
-  if (ix < 0 || ix >= shape_[0] || iy < 0 || iy >= shape_[1] || iz < 0 ||
-      iz >= shape_[2]) {
+  int ix =
+    static_cast<int>(std::floor((r.x - origin[0] + eps) * inv_pitch_));
+  int iy =
+    static_cast<int>(std::floor((r.y - origin[1] + eps) * inv_pitch_));
+  int iz =
+    static_cast<int>(std::floor((r.z - origin[2] + eps) * inv_pitch_));
+
+  // 边界检�?
+  if (ix < 0 || ix >= shape[0] || iy < 0 || iy >= shape[1] || iz < 0 ||
+      iz >= shape[2]) {
     return -1; // 超出边界
   }
 
-  // 计算线性索引
-  int index = ix + shape_[0] * (iy + shape_[1] * iz);
-  return index;
+  // 计算线性索�?
+  return ix + iy * shape[0] + iz * shape[0] * shape[1];
 }
 
 void FissionMatrix::record_source_birth(
@@ -129,7 +86,7 @@ void FissionMatrix::record_source_birth(
   // 记录源粒子的出生位置
   source_birth_cells_[source_particle_id] = cell_index;
 
-  // 增加该源区域的计数
+  // 增加该源区域的计�?
   current_batch_source_counts_[cell_index] += 1.0;
   total_sources_++;
 }
@@ -143,7 +100,7 @@ void FissionMatrix::record_fission_event(
     return; // 超出网格范围
   }
 
-  // 查找该粒子的源位置
+  // 查找该粒子的源位�?
   int source_cell = -1;
   {
     std::lock_guard<std::mutex> lock(data_mutex_);
@@ -157,11 +114,12 @@ void FissionMatrix::record_fission_event(
     return; // 未找到源位置
   }
 
-  // 累积到稀疏裂变矩阵: F[source_cell][fission_cell]
-  // 使用线性索引: key = row * n_cells + col
+  // 累积到稀疏裂变矩�? F[source_cell][fission_cell]
+  // 使用线性索�? key = row * n_cells + col
   {
     std::lock_guard<std::mutex> lock(data_mutex_);
-    size_t key = static_cast<size_t>(source_cell) * n_cells_ + fission_cell;
+    size_t key =
+      static_cast<size_t>(source_cell) * grid_->n_cells() + fission_cell;
     current_batch_sparse_[key] += nu_fission;
     total_fissions_++;
   }
@@ -169,7 +127,7 @@ void FissionMatrix::record_fission_event(
 
 void FissionMatrix::start_new_batch(int batch_id)
 {
-  // 保存上一个batch的数据
+  // 保存上一个batch的数�?
   if (current_batch_id_ >= 0) {
     std::lock_guard<std::mutex> lock(data_mutex_);
 
@@ -177,8 +135,8 @@ void FissionMatrix::start_new_batch(int batch_id)
     for (const auto& [key, value] : current_batch_sparse_) {
       fission_matrix_sparse_[key] += value;
     }
-    // 累积源计数
-    for (size_t i = 0; i < n_cells_; ++i) {
+    // 累积源计�?
+    for (size_t i = 0; i < grid_->n_cells(); ++i) {
       source_counts_[i] += current_batch_source_counts_[i];
     }
     n_realizations_++;
@@ -197,7 +155,7 @@ void FissionMatrix::start_new_batch(int batch_id)
 
 void FissionMatrix::compute_batch_adjoint()
 {
-  // 只在调用时计算一次伴随源（用于最后一个非活跃batch）
+  // 只在调用时计算一次伴随源（用于最后一个非活跃batch�?
   if (!enable_batch_adjoint_ || fission_matrix_sparse_.empty()) {
     return;
   }
@@ -207,7 +165,7 @@ void FissionMatrix::compute_batch_adjoint()
   // 归一化累积的FM矩阵 F_norm[i][j] = F[i][j] / source_counts[i]
   std::unordered_map<size_t, double> normalized_fm;
   for (const auto& [key, value] : fission_matrix_sparse_) {
-    size_t row = key / n_cells_;
+    size_t row = key / grid_->n_cells();
     double source_total = source_counts_[row];
     if (source_total > 0.0) {
       normalized_fm[key] = value / source_total;
@@ -216,11 +174,11 @@ void FissionMatrix::compute_batch_adjoint()
 
   // 单次计算: I_new = F^T × I*
   if (!normalized_fm.empty()) {
-    vector<double> I_new(n_cells_, 0.0);
+    vector<double> I_new(grid_->n_cells(), 0.0);
 
     for (const auto& [key, F_ij] : normalized_fm) {
-      size_t i = key / n_cells_; // 源单元（行）
-      size_t j = key % n_cells_; // 裂变单元（列）
+      size_t i = key / grid_->n_cells(); // 源单元（行）
+      size_t j = key % grid_->n_cells(); // 裂变单元（列�?
       // F^T × I*: (I_new)_j += F[i][j] × I*_i
       I_new[j] += F_ij * adjoint_source_[i];
     }
@@ -228,9 +186,9 @@ void FissionMatrix::compute_batch_adjoint()
     // 计算 k = sum(I_new)
     k_adjoint_ = std::accumulate(I_new.begin(), I_new.end(), 0.0);
 
-    // 归一化: I* = I_new / k （如果 k > 0）
+    // 归一�? I* = I_new / k （如�?k > 0�?
     if (k_adjoint_ > 0.0) {
-      for (size_t i = 0; i < n_cells_; ++i) {
+      for (size_t i = 0; i < grid_->n_cells(); ++i) {
         adjoint_source_[i] = I_new[i] / k_adjoint_;
       }
 
@@ -258,8 +216,8 @@ void FissionMatrix::enable_batch_adjoint_iteration(
               << std::endl;
 
     // 初始化伴随源为均匀分布
-    double norm = static_cast<double>(n_cells_);
-    for (size_t i = 0; i < n_cells_; ++i) {
+    double norm = static_cast<double>(grid_->n_cells());
+    for (size_t i = 0; i < grid_->n_cells(); ++i) {
       adjoint_source_[i] = 1.0 / norm;
     }
   }
@@ -284,19 +242,19 @@ void FissionMatrix::compute_adjoint_source(
   std::cout << "  Initial guess: " << initial_guess << std::endl;
 
   if (initial_guess == "uniform") {
-    // 均匀分布初始化: I* = 1 (归一化后)
+    // 均匀分布初始�? I* = 1 (归一化后)
     std::fill(adjoint_source_.begin(), adjoint_source_.end(), 1.0);
     std::cout << "  Using uniform distribution: I*(i) = 1.0" << std::endl;
   } else if (initial_guess == "forward") {
     // 使用正向源分布初始化: I* = S
-    // 正向源分布即为 source_counts_ (已归一化)
+    // 正向源分布即�?source_counts_ (已归一�?
     double total_sources = 0.0;
-    for (size_t i = 0; i < n_cells_; ++i) {
+    for (size_t i = 0; i < grid_->n_cells(); ++i) {
       total_sources += source_counts_[i];
     }
 
     if (total_sources > 0.0) {
-      for (size_t i = 0; i < n_cells_; ++i) {
+      for (size_t i = 0; i < grid_->n_cells(); ++i) {
         adjoint_source_[i] = source_counts_[i] / total_sources;
       }
       std::cout << "  Using forward source distribution" << std::endl;
@@ -311,46 +269,46 @@ void FissionMatrix::compute_adjoint_source(
     std::fill(adjoint_source_.begin(), adjoint_source_.end(), 1.0);
   }
 
-  // 归一化初始向量
+  // 归一化初始向�?
   double norm = 0.0;
   for (double val : adjoint_source_) {
     norm += val;
   }
   if (norm > 0.0) {
-    for (size_t i = 0; i < n_cells_; ++i) {
+    for (size_t i = 0; i < grid_->n_cells(); ++i) {
       adjoint_source_[i] /= norm;
     }
   }
 
-  // 幂迭代法求解伴随源
+  // 幂迭代法求解伴随�?
   // I* = (1/k) F^T I*
   std::cout << "\nPerforming power iteration..." << std::endl;
   std::cout << "  Max iterations: " << max_iterations << std::endl;
   std::cout << "  Tolerance: " << tolerance << std::endl;
 
-  vector<double> I_new(n_cells_, 0.0);
+  vector<double> I_new(grid_->n_cells(), 0.0);
   double k_old = 1.0;
   k_adjoint_ = 1.0;
   adjoint_iterations_ = 0;
 
   for (int iter = 0; iter < max_iterations; ++iter) {
     // 计算 F^T × I*
-    // 由于 F[i][j] 存储为 key = i * n_cells + j
+    // 由于 F[i][j] 存储�?key = i * n_cells + j
     // F^T[j][i] = F[i][j]
     // (F^T × I*)_j = Σ_i F^T[j][i] × I*_i = Σ_i F[i][j] × I*_i
 
     std::fill(I_new.begin(), I_new.end(), 0.0);
 
     for (const auto& [key, F_ij] : fission_matrix_sparse_) {
-      size_t i = key / n_cells_; // 源单元（行）
-      size_t j = key % n_cells_; // 裂变单元（列）
+      size_t i = key / grid_->n_cells(); // 源单元（行）
+      size_t j = key % grid_->n_cells(); // 裂变单元（列�?
 
       // F^T[j][i] = F[i][j]
       // (F^T × I*)_j += F[i][j] × I*_i
       I_new[j] += F_ij * adjoint_source_[i];
     }
 
-    // 计算特征值 k = Σ I_new
+    // 计算特征�?k = Σ I_new
     k_adjoint_ = 0.0;
     for (double val : I_new) {
       k_adjoint_ += val;
@@ -361,16 +319,16 @@ void FissionMatrix::compute_adjoint_source(
       break;
     }
 
-    // 归一化: I* = I_new / k
-    for (size_t i = 0; i < n_cells_; ++i) {
+    // 归一�? I* = I_new / k
+    for (size_t i = 0; i < grid_->n_cells(); ++i) {
       adjoint_source_[i] = I_new[i] / k_adjoint_;
     }
 
-    // 检查收敛性
+    // 检查收敛�?
     double dk = std::abs(k_adjoint_ - k_old);
     adjoint_iterations_ = iter + 1;
 
-    // 每50次迭代输出进度
+    // �?0次迭代输出进�?
     if ((iter + 1) % 50 == 0 || iter == 0) {
       std::cout << "  Iteration " << std::setw(4) << (iter + 1)
                 << ": k_adj = " << std::setw(10) << std::fixed
@@ -398,7 +356,7 @@ void FissionMatrix::compute_adjoint_source(
                 << k_adjoint_ << std::endl;
       std::cout << "  Final dk = " << std::scientific << std::setprecision(2)
                 << dk << std::endl;
-      adjoint_computed_ = true; // 仍标记为已计算
+      adjoint_computed_ = true; // 仍标记为已计�?
     }
   }
 
@@ -408,7 +366,7 @@ void FissionMatrix::compute_adjoint_source(
   double sum_adjoint = 0.0;
   int nonzero_count = 0;
 
-  for (size_t i = 0; i < n_cells_; ++i) {
+  for (size_t i = 0; i < grid_->n_cells(); ++i) {
     if (adjoint_source_[i] > 0.0) {
       max_adjoint = std::max(max_adjoint, adjoint_source_[i]);
       min_adjoint = std::min(min_adjoint, adjoint_source_[i]);
@@ -418,7 +376,7 @@ void FissionMatrix::compute_adjoint_source(
   }
 
   std::cout << "\nAdjoint Source Statistics:" << std::endl;
-  std::cout << "  Nonzero cells: " << nonzero_count << " / " << n_cells_
+  std::cout << "  Nonzero cells: " << nonzero_count << " / " << grid_->n_cells()
             << std::endl;
   std::cout << "  Max value: " << std::scientific << std::setprecision(6)
             << max_adjoint << std::endl;
@@ -447,10 +405,10 @@ void FissionMatrix::perform_adjoint_iteration(
     return;
   }
 
-  // 归一化裂变矩阵（临时存储）
+  // 归一化裂变矩阵（临时存储�?
   std::unordered_map<size_t, double> normalized_matrix;
   for (const auto& [key, value] : matrix_to_use) {
-    size_t row = key / n_cells_;
+    size_t row = key / grid_->n_cells();
     double source_total = source_to_use[row];
     if (source_total > 0.0) {
       normalized_matrix[key] = value / source_total;
@@ -480,22 +438,22 @@ void FissionMatrix::perform_adjoint_iteration(
               << " entries, starting adjoint iteration..." << std::endl;
   }
 
-  vector<double> I_new(n_cells_, 0.0);
+  vector<double> I_new(grid_->n_cells(), 0.0);
   double k_old = k_adjoint_;
 
   for (int iter = 0; iter < iterations; ++iter) {
-    // 计算 F^T × I* (使用归一化矩阵)
+    // 计算 F^T × I* (使用归一化矩�?
     std::fill(I_new.begin(), I_new.end(), 0.0);
 
     for (const auto& [key, F_ij] : normalized_matrix) {
-      size_t i = key / n_cells_; // 源单元（行）
-      size_t j = key % n_cells_; // 裂变单元（列）
+      size_t i = key / grid_->n_cells(); // 源单元（行）
+      size_t j = key % grid_->n_cells(); // 裂变单元（列�?
 
       // (F^T × I*)_j += F[i][j] × I*_i
       I_new[j] += F_ij * adjoint_source_[i];
     }
 
-    // 计算特征值 k = Σ I_new
+    // 计算特征�?k = Σ I_new
     k_adjoint_ = 0.0;
     for (double val : I_new) {
       k_adjoint_ += val;
@@ -503,10 +461,10 @@ void FissionMatrix::perform_adjoint_iteration(
 
     // 调试输出
     if (verbose && k_adjoint_ == 0.0) {
-      // 检查 I* 中非零元素
+      // 检�?I* 中非零元�?
       int nonzero_I = 0;
       double sum_I = 0.0;
-      for (size_t i = 0; i < n_cells_; ++i) {
+      for (size_t i = 0; i < grid_->n_cells(); ++i) {
         if (adjoint_source_[i] > 0.0) {
           nonzero_I++;
           sum_I += adjoint_source_[i];
@@ -515,14 +473,14 @@ void FissionMatrix::perform_adjoint_iteration(
       std::cerr << "  Debug at iter " << iter << ": I* has " << nonzero_I
                 << " nonzero cells, sum=" << sum_I << std::endl;
 
-      // 检查哪些单元的 I* 被用到
+      // 检查哪些单元的 I* 被用�?
       int used_cells = 0;
       for (const auto& [key, F_ij] : normalized_matrix) {
-        size_t i = key / n_cells_;
+        size_t i = key / grid_->n_cells();
         if (adjoint_source_[i] > 1e-15) {
           used_cells++;
           if (used_cells <= 3) {
-            std::cerr << "    F[" << i << "][" << (key % n_cells_)
+            std::cerr << "    F[" << i << "][" << (key % grid_->n_cells())
                       << "]=" << F_ij << " * I*[" << i
                       << "]=" << adjoint_source_[i] << " = "
                       << (F_ij * adjoint_source_[i]) << std::endl;
@@ -540,12 +498,12 @@ void FissionMatrix::perform_adjoint_iteration(
       break;
     }
 
-    // 归一化: I* = I_new / k
-    for (size_t i = 0; i < n_cells_; ++i) {
+    // 归一�? I* = I_new / k
+    for (size_t i = 0; i < grid_->n_cells(); ++i) {
       adjoint_source_[i] = I_new[i] / k_adjoint_;
     }
 
-    // 检查收敛性
+    // 检查收敛�?
     double dk = std::abs(k_adjoint_ - k_old);
     adjoint_iterations_++;
 
@@ -584,15 +542,15 @@ void FissionMatrix::finalize(const std::string& filename)
     return;
   }
 
-  // 简洁输出
+  // 简洁输�?
   size_t sparse_elements = fission_matrix_sparse_.size();
   std::cout << "\nFission Matrix: " << sparse_elements << " non-zero elements ("
-            << n_cells_ << "x" << n_cells_ << " grid) -> " << filename
-            << std::endl;
+            << grid_->n_cells() << "x" << grid_->n_cells() << " grid) -> "
+            << filename << std::endl;
   std::unordered_map<size_t, double> normalized_sparse;
 
   for (const auto& [key, value] : fission_matrix_sparse_) {
-    size_t row = key / n_cells_;
+    size_t row = key / grid_->n_cells();
     double source_total = source_counts_[row];
     if (source_total > 0.0) {
       normalized_sparse[key] = value / source_total;
@@ -602,22 +560,22 @@ void FissionMatrix::finalize(const std::string& filename)
   // 写入HDF5文件
   hid_t file_id = file_open(filename, 'w');
 
-  // 写入文件属性
+  // 写入文件属�?
   write_attribute(file_id, "filetype", "fission_matrix_sparse");
   write_attribute(file_id, "version", "2.0");
   write_attribute(file_id, "storage_format", "COO"); // Coordinate format
-  write_attribute(file_id, "pitch", pitch_);
+  write_attribute(file_id, "pitch", grid_->pitch());
   write_attribute(file_id, "n_realizations", n_realizations_);
   write_attribute(
     file_id, "total_fissions", static_cast<int64_t>(total_fissions_.load()));
   write_attribute(
     file_id, "total_sources", static_cast<int64_t>(total_sources_.load()));
-  write_attribute(file_id, "n_cells", static_cast<int>(n_cells_));
+  write_attribute(file_id, "n_cells", static_cast<int>(grid_->n_cells()));
   write_attribute(file_id, "nnz", static_cast<int64_t>(sparse_elements));
 
   // 写入网格信息
-  write_dataset(file_id, "origin", origin_);
-  write_dataset(file_id, "shape", shape_);
+  write_dataset(file_id, "origin", grid_->origin());
+  write_dataset(file_id, "shape", grid_->shape());
 
   // 准备稀疏矩阵的COO格式数据: (row, col, value)
   vector<int> rows;
@@ -631,30 +589,30 @@ void FissionMatrix::finalize(const std::string& filename)
   values_normalized.reserve(sparse_elements);
 
   for (const auto& [key, value] : fission_matrix_sparse_) {
-    size_t row = key / n_cells_;
-    size_t col = key % n_cells_;
+    size_t row = key / grid_->n_cells();
+    size_t col = key % grid_->n_cells();
     rows.push_back(static_cast<int>(row));
     cols.push_back(static_cast<int>(col));
     values_raw.push_back(value);
 
-    // 添加归一化值
+    // 添加归一化�?
     auto it = normalized_sparse.find(key);
     values_normalized.push_back(
       it != normalized_sparse.end() ? it->second : 0.0);
   }
 
-  // 写入稀疏矩阵数据 (COO格式)
+  // 写入稀疏矩阵数�?(COO格式)
   write_dataset(file_id, "row_indices", rows);
   write_dataset(file_id, "col_indices", cols);
   write_dataset(file_id, "data_raw", values_raw);
   write_dataset(file_id, "data_normalized", values_normalized);
 
-  // 写入源计数
+  // 写入源计�?
   write_dataset(file_id, "source_counts", source_counts_);
 
   // 写入伴随源分布（如果已计算）
   if (adjoint_computed_) {
-    // 归一化伴随源，使其总和为1
+    // 归一化伴随源，使其总和�?
     double adj_sum =
       std::accumulate(adjoint_source_.begin(), adjoint_source_.end(), 0.0);
     if (adj_sum > 0.0) {
@@ -664,7 +622,7 @@ void FissionMatrix::finalize(const std::string& filename)
       std::cout << "Adjoint source normalized (sum = 1.0)" << std::endl;
     }
 
-    // 写入伴随源分布
+    // 写入伴随源分�?
     write_dataset(file_id, "adjoint_source", adjoint_source_);
     write_attribute(file_id, "k_adjoint", k_adjoint_);
     write_attribute(file_id, "adjoint_converged", adjoint_computed_);
@@ -679,3 +637,4 @@ void FissionMatrix::finalize(const std::string& filename)
 }
 
 } // namespace openmc
+

@@ -3,10 +3,12 @@
 
 #include "hdf5.h"
 #include "openmc/array.h"
+#include "openmc/mesh_init.h"
 #include "openmc/position.h"
 #include "openmc/vector.h"
 #include <algorithm>
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -16,10 +18,7 @@ namespace openmc {
 class FissionMatrix {
 public:
   // 构造函数
-  explicit FissionMatrix(double resolution, int max_batches,
-    bool auto_bounds = true,
-    const std::array<double, 3>& manual_lower = {0.0, 0.0, 0.0},
-    const std::array<double, 3>& manual_upper = {10.0, 10.0, 10.0});
+  explicit FissionMatrix(std::shared_ptr<SharedMeshGrid> grid, int max_batches);
 
   // 记录源中子的产生位置
   void record_source_birth(const Position& r, int64_t source_particle_id);
@@ -66,10 +65,10 @@ public:
   const vector<double>& get_adjoint_source() const { return adjoint_source_; }
 
   // 网格信息
-  const std::array<int, 3>& shape() const { return shape_; }
-  const std::array<double, 3>& origin() const { return origin_; }
-  double pitch() const { return pitch_; }
-  size_t n_cells() const { return n_cells_; }
+  const std::array<int, 3>& shape() const { return grid_->shape(); }
+  const std::array<double, 3>& origin() const { return grid_->origin(); }
+  double pitch() const { return grid_->pitch(); }
+  size_t n_cells() const { return grid_->n_cells(); }
 
 private:
   // 将3D位置转换为线性索引
@@ -96,13 +95,10 @@ private:
   vector<double> source_counts_;
   vector<double> current_batch_source_counts_;
 
-  // 网格参数
-  std::array<int, 3> shape_;
-  std::array<double, 3> origin_;
+  // 统一网格配置
+  std::shared_ptr<SharedMeshGrid> grid_;
   std::array<double, 3> upper_bound_; // 保存上边界用于输出
-  double pitch_;
   double inv_pitch_;
-  size_t n_cells_; // 总单元数
 
   // Batch管理
   int current_batch_id_;
