@@ -632,19 +632,14 @@ void finalize_batch()
     }
     // 计算有效缓发中子份额 β_eff
     if (simulation::flux_mesh && settings::flux_mesh_on) {
-      // std::cout << "\n" << std::string(70, '=') << std::endl;
-      // std::cout << "COMPUTING EFFECTIVE DELAYED NEUTRON FRACTION" <<
-      // std::endl; std::cout << std::string(70, '=') << std::endl;
-
       try {
-        openmc::BetaEffective beta_calc;
+        // Phase 2: 使用材料相关核数据
+        openmc::BetaEffective beta_calc(
+          openmc::BetaEffMode::MATERIAL_DEPENDENT);
+        // FIXED_U235 MATERIAL_DEPENDENT
         beta_calc.compute_from_files(
           "flux_mesh.h5", "adjoint_flux.h5", "beta_eff.h5");
 
-        // std::cout << "\nβ_eff computation completed successfully."
-        //           << std::endl;
-        // std::cout << "  β_eff = " << std::fixed << std::setprecision(5)
-        //           << beta_calc.get_beta_total() << std::endl;
       } catch (const std::exception& e) {
         std::cerr << "Warning: β_eff computation failed: " << e.what()
                   << std::endl;
