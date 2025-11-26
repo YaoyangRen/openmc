@@ -586,7 +586,6 @@ void finalize_batch()
     std::cout << "\n" << std::string(70, '=') << std::endl;
     std::cout << "FINALIZING FISSION MATRIX (End of Inactive Batches)"
               << std::endl;
-    std::cout << std::string(70, '=') << std::endl;
 
     // 计算伴随源分布（使用累积的FM）
     simulation::fission_matrix->compute_batch_adjoint();
@@ -600,7 +599,7 @@ void finalize_batch()
     simulation::flux_mesh->end_batch(simulation::current_batch);
   }
 
-  // Finalize transfer function mesh at the end
+  // Finalize beta_eff function at the end
   if (settings::clutch_on && simulation::current_batch == settings::n_batches) {
     // 输出传递函数数据
     if (simulation::transfer_function_mesh) {
@@ -609,9 +608,9 @@ void finalize_batch()
         "transfer_function_data.h5"); // 传递函数文件
 
       // 传递函数计算完成后，立即计算共轭通量
-      std::cout << "\n" << std::string(70, '=') << std::endl;
-      std::cout << "COMPUTING ADJOINT FLUX (Convolution)" << std::endl;
-      std::cout << std::string(70, '=') << std::endl;
+      // std::cout << "\n" << std::string(70, '=') << std::endl;
+      // std::cout << "COMPUTING ADJOINT FLUX (Convolution)" << std::endl;
+      // std::cout << std::string(70, '=') << std::endl;
 
       try {
         AdjointFlux adjoint_flux;
@@ -622,45 +621,42 @@ void finalize_batch()
         );
         std::cout << "Adjoint flux computation completed successfully."
                   << std::endl;
-
-        // 计算有效缓发中子份额 β_eff
-        if (simulation::flux_mesh && settings::flux_mesh_on) {
-          std::cout << "\n" << std::string(70, '=') << std::endl;
-          std::cout << "COMPUTING EFFECTIVE DELAYED NEUTRON FRACTION"
-                    << std::endl;
-          std::cout << std::string(70, '=') << std::endl;
-
-          try {
-            openmc::BetaEffective beta_calc;
-            beta_calc.compute_from_files(
-              "flux_mesh.h5", "adjoint_flux.h5", "beta_eff.h5");
-
-            std::cout << "\nβ_eff computation completed successfully."
-                      << std::endl;
-            std::cout << "  β_eff = " << std::fixed << std::setprecision(5)
-                      << beta_calc.get_beta_total() << std::endl;
-          } catch (const std::exception& e) {
-            std::cerr << "Warning: β_eff computation failed: " << e.what()
-                      << std::endl;
-          }
-        }
       } catch (const std::exception& e) {
         std::cerr << "Warning: Adjoint flux computation failed: " << e.what()
                   << std::endl;
       }
     }
-
     // 输出通量分布数据
     if (simulation::flux_mesh && settings::flux_mesh_on) {
       simulation::flux_mesh->finalize(settings::n_batches);
     }
+    // 计算有效缓发中子份额 β_eff
+    if (simulation::flux_mesh && settings::flux_mesh_on) {
+      // std::cout << "\n" << std::string(70, '=') << std::endl;
+      // std::cout << "COMPUTING EFFECTIVE DELAYED NEUTRON FRACTION" <<
+      // std::endl; std::cout << std::string(70, '=') << std::endl;
+
+      try {
+        openmc::BetaEffective beta_calc;
+        beta_calc.compute_from_files(
+          "flux_mesh.h5", "adjoint_flux.h5", "beta_eff.h5");
+
+        // std::cout << "\nβ_eff computation completed successfully."
+        //           << std::endl;
+        // std::cout << "  β_eff = " << std::fixed << std::setprecision(5)
+        //           << beta_calc.get_beta_total() << std::endl;
+      } catch (const std::exception& e) {
+        std::cerr << "Warning: β_eff computation failed: " << e.what()
+                  << std::endl;
+      }
+    }
   }
 
-  // RYY ADD: 在最后一个batch输出随机粒子的源追踪信息
-  if (simulation::current_batch == settings::n_batches &&
-      settings::run_mode == RunMode::EIGENVALUE) {
-    output_random_particle_source_info();
-  }
+  // // RYY ADD: 在最后一个batch输出随机粒子的源追踪信息
+  // if (simulation::current_batch == settings::n_batches &&
+  //     settings::run_mode == RunMode::EIGENVALUE) {
+  //   output_random_particle_source_info();
+  // }
 }
 
 void initialize_generation()

@@ -572,17 +572,17 @@ void print_results()
       gt(GlobalTally::LEAKAGE, TallyResult::SUM) / n);
   }
 
-  // 输出伴随源信息（如果已计算）
-  if (simulation::fission_matrix &&
-      simulation::fission_matrix->is_adjoint_computed()) {
-    auto k_adj = simulation::fission_matrix->get_k_adjoint();
-    auto nonzero = simulation::fission_matrix->get_adjoint_nonzero_cells();
-    auto n_cells = simulation::fission_matrix->n_cells();
+  // // 输出伴随源信息（如果已计算）
+  // if (simulation::fission_matrix &&
+  //     simulation::fission_matrix->is_adjoint_computed()) {
+  //   auto k_adj = simulation::fission_matrix->get_k_adjoint();
+  //   auto nonzero = simulation::fission_matrix->get_adjoint_nonzero_cells();
+  //   auto n_cells = simulation::fission_matrix->n_cells();
 
-    fmt::print(
-      " k-adjoint (Fission Matrix)  = {:.5f}  (nonzero cells: {} / {})\n",
-      k_adj, nonzero, n_cells);
-  }
+  //   fmt::print(
+  //     " k-adjoint (Fission Matrix)  = {:.5f}  (nonzero cells: {} / {})\n",
+  //     k_adj, nonzero, n_cells);
+  // }
 
   fmt::print("\n");
   std::fflush(stdout);

@@ -17,9 +17,8 @@ namespace openmc {
 void BetaEffective::compute_from_files(const std::string& flux_file,
   const std::string& adjoint_flux_file, const std::string& output_file)
 {
-  std::cout << "\n" << std::string(70, '=') << std::endl;
-  std::cout << "EFFECTIVE DELAYED NEUTRON FRACTION COMPUTATION" << std::endl;
   std::cout << std::string(70, '=') << std::endl;
+  std::cout << "EFFECTIVE DELAYED NEUTRON FRACTION COMPUTATION" << std::endl;
 
   // 1. 读取正向通量数据
   std::cout << "\n[1/4] Reading forward flux from: " << flux_file << std::endl;

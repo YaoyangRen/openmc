@@ -44,7 +44,7 @@ FluxMesh::FluxMesh(std::shared_ptr<SharedMeshGrid> grid)
             << grid_->origin()[1] << ", " << grid_->origin()[2] << "] 到 ["
             << grid_->upper_bound()[0] << ", " << grid_->upper_bound()[1]
             << ", " << grid_->upper_bound()[2] << "]" << std::endl;
-  std::cout << "  线程数: " << n_threads << std::endl;
+  std::cout << std::string(70, '=') << std::endl;
 }
 
 //------------------------------------------------------------------------------
@@ -97,10 +97,10 @@ void FluxMesh::end_batch(int batch)
   n_accumulated_batches_++;
 
   // 输出进度信息
-  if (batch % 10 == 0) {
-    std::cout << "通量网格: 批次 " << batch << " 已处理 ("
-              << n_accumulated_batches_ << " 批次已累积)" << std::endl;
-  }
+  // if (batch % 10 == 0) {
+  //   std::cout << "通量网格: 批次 " << batch << " 已处理 ("
+  //             << n_accumulated_batches_ << " 批次已累积)" << std::endl;
+  // }
 }
 
 //------------------------------------------------------------------------------

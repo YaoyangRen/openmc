@@ -228,7 +228,8 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(
   size_t dense_memory_mb =
     (n_source_cells * spatial_size_ * sizeof(double)) / (1024 * 1024);
 
-  // 简洁输出传递函数信�?
+  // 简洁输出传递函数信信息
+  std::cout << "\n" << std::string(70, '=') << std::endl;
   std::cout << "\nTransfer Function T(r_s->r): " << n_source_cells
             << " source cells, " << total_source_particles
             << " source particles, " << total_contributions_ << " contributions"
