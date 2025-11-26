@@ -452,6 +452,7 @@ list(APPEND libopenmc_SOURCES
   src/fission_matrix.cpp
   src/flux_mesh.cpp
   src/adjoint_flux.cpp
+  src/beta_effective.cpp
 )
 
 # Add bundled external dependencies
