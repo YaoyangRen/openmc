@@ -5,6 +5,7 @@
 #define OPENMC_SIMULATION_H
 
 #include "openmc/fission_matrix.h"
+#include "openmc/flux_mesh.h"
 #include "openmc/greenfunction_mesh.h"
 #include "openmc/mesh.h"
 #include "openmc/particle.h"
@@ -56,6 +57,9 @@ extern std::unique_ptr<GreenFunctionMesh>
 
 extern std::unique_ptr<FissionMatrix>
   fission_matrix; // Fission Matrix (裂变矩阵)
+
+extern std::unique_ptr<FluxMesh>
+  flux_mesh; // Flux distribution mesh (通量分布网格)
 
 } // namespace simulation
 

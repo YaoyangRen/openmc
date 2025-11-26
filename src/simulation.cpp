@@ -327,6 +327,7 @@ vector<int64_t> work_index;
 
 std::unique_ptr<GreenFunctionMesh> transfer_function_mesh;
 std::unique_ptr<FissionMatrix> fission_matrix;
+std::unique_ptr<FluxMesh> flux_mesh;
 
 } // namespace simulation
 
@@ -395,9 +396,10 @@ void initialize_batch()
     }
   }
 
-  // 创建统一网格（用于裂变矩阵和传递函数）
+  // 创建统一网格（用于裂变矩阵、传递函数和通量分布）
   std::shared_ptr<SharedMeshGrid> shared_grid;
-  if (!simulation::transfer_function_mesh && !simulation::fission_matrix) {
+  if (!simulation::transfer_function_mesh && !simulation::fission_matrix &&
+      !simulation::flux_mesh) {
     shared_grid = SharedMeshGrid::create(1.0); // 1cm 分辨率
   }
 
@@ -417,6 +419,11 @@ void initialize_batch()
       10,    // 每batch迭代10次
       1.0e-6 // 收敛容差
     );
+  }
+
+  // Initialize flux mesh (通量分布网格)
+  if (!simulation::flux_mesh && settings::flux_mesh_on) {
+    simulation::flux_mesh = std::make_unique<FluxMesh>(shared_grid);
   }
 
   // Add user tallies to active tallies list
@@ -585,6 +592,11 @@ void finalize_batch()
     simulation::fission_matrix->finalize("fission_matrix.h5");
   }
 
+  // Finalize flux mesh at each batch (if enabled)
+  if (simulation::flux_mesh && settings::flux_mesh_on) {
+    simulation::flux_mesh->end_batch(simulation::current_batch);
+  }
+
   // Finalize transfer function mesh at the end
   if (settings::clutch_on && simulation::current_batch == settings::n_batches) {
     // 输出传递函数数据
@@ -611,6 +623,11 @@ void finalize_batch()
         std::cerr << "Warning: Adjoint flux computation failed: " << e.what()
                   << std::endl;
       }
+    }
+
+    // 输出通量分布数据
+    if (simulation::flux_mesh && settings::flux_mesh_on) {
+      simulation::flux_mesh->finalize(settings::n_batches);
     }
   }
 

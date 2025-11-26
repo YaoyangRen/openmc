@@ -450,6 +450,7 @@ list(APPEND libopenmc_SOURCES
   src/mesh_init.cpp
   src/greenfunction_mesh.cpp
   src/fission_matrix.cpp
+  src/flux_mesh.cpp
   src/adjoint_flux.cpp
 )
 

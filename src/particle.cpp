@@ -11,6 +11,7 @@
 #include "openmc/constants.h"
 #include "openmc/dagmc.h"
 #include "openmc/error.h"
+#include "openmc/flux_mesh.h"
 #include "openmc/geometry.h"
 #include "openmc/greenfunction_mesh.h"
 #include "openmc/hdf5_interface.h"
@@ -299,6 +300,12 @@ void Particle::event_advance()
   double dt = distance / speed;
   this->time() += dt;
   this->lifetime() += dt;
+
+  // Accumulate flux mesh (if enabled) - 在所有粒子移动时累积
+  if (settings::flux_mesh_on && simulation::flux_mesh) {
+    std::array<double, 3> position = {r().x, r().y, r().z};
+    simulation::flux_mesh->accumulate(position, wgt(), distance);
+  }
 
   // Score track-length tallies
   if (!model::active_tracklength_tallies.empty()) {

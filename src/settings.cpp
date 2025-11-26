@@ -54,6 +54,7 @@ bool entropy_on {false};
 bool event_based {false};
 bool ifp_on {false};
 bool clutch_on {false};
+bool flux_mesh_on {false};
 bool legendre_to_tabular {true};
 bool material_cell_offsets {true};
 bool output_summary {true};
