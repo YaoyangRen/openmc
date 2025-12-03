@@ -1013,8 +1013,13 @@ void score_general_ce_nonanalog(Particle& p, int i_tally, int start_index,
         // 累积到传递函数网格
         if (simulation::transfer_function_mesh &&
             p.source_particle_id() != -1) {
+          double energy_eV = p.E();
+          int mg_group = -1;
+          if (!settings::run_CE && p.type() == Type::neutron) {
+            mg_group = p.g();
+          }
           simulation::transfer_function_mesh->accumulate(
-            p.r(), nu_t, p.source_particle_id());
+            p.r(), nu_t, p.source_particle_id(), energy_eV, mg_group);
         }
       }
       score = 0.0; // tally 本身不记录数值，只作为开关

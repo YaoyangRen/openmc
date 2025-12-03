@@ -20,7 +20,8 @@ class FluxMesh {
 public:
   //! 构造函数
   //! \param grid 共享的网格对象
-  explicit FluxMesh(std::shared_ptr<SharedMeshGrid> grid);
+  explicit FluxMesh(std::shared_ptr<SharedMeshGrid> grid,
+    std::vector<double> energy_edges = {});
 
   //! 析构函数
   ~FluxMesh() = default;
@@ -29,8 +30,8 @@ public:
   //! \param position 粒子位置 [x, y, z]
   //! \param weight 粒子权重
   //! \param distance 径迹长度(用于径迹长度估计器)
-  void accumulate(
-    const std::array<double, 3>& position, double weight, double distance);
+  void accumulate(const std::array<double, 3>& position, double weight,
+    double distance, double energy_eV = -1.0, int mg_group = -1);
 
   //! 批次结束处理 - 累积批次统计
   //! \param batch 当前批次号
@@ -81,13 +82,27 @@ private:
   std::shared_ptr<SharedMeshGrid> grid_; //!< 共享的网格对象
 
   // 当前批次的累积数据(稀疏存储)
-  std::unordered_map<int, double> batch_flux_; //!< 当前批次的通量累积
+  std::vector<double> make_zero_group_vector() const;
+  int determine_group(double energy_eV, int mg_group) const;
+
+  // 能群配置
+  std::vector<double> energy_edges_;
+  int n_groups_ {1};
+
+  // 当前批次的累积数据(稀疏存储)
+  std::unordered_map<int, std::vector<double>>
+    batch_flux_group_; //!< 当前批次分群通量
 
   // 线程局部缓冲区(避免多线程竞争)
-  std::vector<std::unordered_map<int, double>>
-    thread_flux_; //!< 每个线程的局部累积
+  std::vector<std::unordered_map<int, std::vector<double>>>
+    thread_flux_group_; //!< 每个线程的局部分群累积
 
-  // 跨批次的统计数据(稀疏存储)
+  // 跨批次聚合（分群）
+  std::unordered_map<int, std::vector<double>>
+    flux_group_sum_; //!< 各群通量总和
+  std::unordered_map<int, std::vector<double>> flux_group_sum_sq_;
+
+  // 兼容单群输出的标量统计
   std::unordered_map<int, double> flux_sum_;    //!< 通量总和 Σφ
   std::unordered_map<int, double> flux_sum_sq_; //!< 通量平方和 Σφ²
 

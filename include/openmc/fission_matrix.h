@@ -38,7 +38,7 @@ public:
   // max_iterations: 最大迭代次数
   // tolerance: 收敛容差
   void compute_adjoint_source(const std::string& initial_guess = "uniform",
-    int max_iterations = 1000, double tolerance = 1.0e-6);
+    int max_iterations = 1, double tolerance = 1.0e-6);
 
   // 启用/禁用每个batch后的伴随源迭代
   // enable: 是否启用batch级伴随源迭代
@@ -54,7 +54,6 @@ public:
 
   // 访问伴随源计算结果
   bool is_adjoint_computed() const { return adjoint_computed_; }
-  double get_k_adjoint() const { return k_adjoint_; }
   int get_adjoint_nonzero_cells() const
   {
     return std::count_if(adjoint_source_.begin(), adjoint_source_.end(),
@@ -114,21 +113,15 @@ private:
   vector<double> adjoint_source_batch_; // 使用每个batch的FM逐步迭代
   vector<double> adjoint_source_accumulated_; // 使用累积的FM逐步迭代
   vector<double> forward_source_;             // 正向源分布 S (用于初始化)
-  double k_adjoint_;                          // 伴随k值 (累积FM的)
-  double k_adjoint_batch_;                    // 使用batch FM的k值
-  double k_adjoint_accumulated_;              // 使用累积FM的k值
   bool adjoint_computed_;                     // 是否已计算伴随源
   int adjoint_iterations_;                    // 实际迭代次数
+  double keff_reference_ {1.0};               // 归一化所使用的主计算keff
 
   // batch级伴随源迭代控制
   bool enable_batch_adjoint_;      // 是否启用每batch迭代
   int adjoint_max_iter_per_batch_; // 每batch迭代次数
   double adjoint_tolerance_;       // 收敛容差
   int adjoint_start_batch_;        // 从哪个batch开始统计FM和计算伴随源
-
-  // 伴随源收敛历史（记录每个batch的k_adjoint）
-  vector<double> k_adjoint_history_batch_;       // batch FM的k历史
-  vector<double> k_adjoint_history_accumulated_; // 累积FM的k历史
 
   // 线程安全
   mutable std::mutex data_mutex_;

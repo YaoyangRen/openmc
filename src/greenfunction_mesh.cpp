@@ -2,10 +2,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
 #include <mutex>
+#include <numeric>
 #include <string>
 
 #include "openmc/capi.h"
@@ -21,10 +23,10 @@
 
 namespace openmc {
 
-GreenFunctionMesh::GreenFunctionMesh(
-  std::shared_ptr<SharedMeshGrid> grid, int max_batches)
+GreenFunctionMesh::GreenFunctionMesh(std::shared_ptr<SharedMeshGrid> grid,
+  int max_batches, std::vector<double> energy_edges)
   : grid_(grid), inv_pitch_(1.0 / grid->pitch()), current_batch_id_(-1),
-    max_batches_(max_batches)
+    max_batches_(max_batches), energy_edges_(std::move(energy_edges))
 {
   // 计算上边界（用于输出）
   const auto& origin = grid_->origin();
@@ -34,6 +36,17 @@ GreenFunctionMesh::GreenFunctionMesh(
     origin[2] + shape[2] * pitch};
 
   spatial_size_ = grid_->n_cells();
+
+  if (energy_edges_.size() >= 2) {
+    if (!std::is_sorted(energy_edges_.begin(), energy_edges_.end())) {
+      fatal_error(
+        "GreenFunctionMesh: energy group edges must be sorted ascending.");
+    }
+    n_groups_ = static_cast<int>(energy_edges_.size()) - 1;
+  } else {
+    energy_edges_.clear();
+    n_groups_ = 1;
+  }
 
   // 初始化信息将在finalize时输出
 
@@ -93,8 +106,8 @@ void GreenFunctionMesh::record_source_birth(
   // 中首次使用时自动创建
 }
 
-void GreenFunctionMesh::accumulate(
-  const Position& r, double contribution, int64_t source_particle_id)
+void GreenFunctionMesh::accumulate(const Position& r, double contribution,
+  int64_t source_particle_id, double energy_eV, int mg_group)
 {
   // 累积传递函数 T(r_source -> r_response):
   // contribution = nu_t = (w/k_eff) × w_ufs × (ν̄Σf/Σt)
@@ -127,15 +140,28 @@ void GreenFunctionMesh::accumulate(
     return;
   }
 
+  int group = determine_group(energy_eV, mg_group);
+  if (group < 0) {
+    fatal_error(
+      "GreenFunctionMesh: unable to determine energy group for contribution.");
+  }
+
   // 稀疏存储：只在有贡献时才创建条目
   {
     std::lock_guard<std::mutex> lock(data_mutex_);
 
-    // 累积到当前batch的源单元数据（稀疏）
-    current_batch_transfer_data_sparse_[i_source][j_response] += contribution;
+    auto& response_map = current_batch_transfer_data_sparse_[i_source];
+    auto& group_vector = response_map[j_response];
+    if (group_vector.empty()) {
+      group_vector = make_zero_group_vector();
+    }
+    group_vector[group] += contribution;
 
-    // 累积到总的传递函数（稀疏）
-    cumulative_data_sparse_[j_response] += contribution;
+    auto& cumulative_vector = cumulative_data_sparse_[j_response];
+    if (cumulative_vector.empty()) {
+      cumulative_vector = make_zero_group_vector();
+    }
+    cumulative_vector[group] += contribution;
   }
 
   total_contributions_++;
@@ -146,9 +172,15 @@ void GreenFunctionMesh::start_new_batch(int batch_id)
   if (current_batch_id_ >= 0) {
     for (const auto& [i_source, response_map] :
       current_batch_transfer_data_sparse_) {
-      // 累积到该源单元的总传递函数中（稀疏）
-      for (const auto& [j_response, value] : response_map) {
-        transfer_functions_sparse_[i_source][j_response] += value;
+      auto& target_map = transfer_functions_sparse_[i_source];
+      for (const auto& [j_response, values] : response_map) {
+        auto& target_vector = target_map[j_response];
+        if (target_vector.empty()) {
+          target_vector = make_zero_group_vector();
+        }
+        for (int g = 0; g < n_groups_; ++g) {
+          target_vector[g] += values[g];
+        }
       }
     }
   }
@@ -169,10 +201,11 @@ const vector<double>& GreenFunctionMesh::get_source_cell_data(
     dense_data.clear();
     dense_data.resize(spatial_size_, 0.0);
 
-    // 填充非零值
-    for (const auto& [j_response, value] : it->second) {
+    // 填充非零值（按群求和得到总贡献）
+    for (const auto& [j_response, values] : it->second) {
       if (j_response >= 0 && j_response < static_cast<int>(spatial_size_)) {
-        dense_data[j_response] = value;
+        double total = std::accumulate(values.begin(), values.end(), 0.0);
+        dense_data[j_response] = total;
       }
     }
     return dense_data;
@@ -262,16 +295,22 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(
   write_attribute(file_id, "total_nonzero_entries",
     static_cast<int64_t>(total_nonzero_entries));
   write_attribute(file_id, "sparsity_percent", sparsity);
+  write_dataset(file_id, "n_groups", n_groups_);
+  if (!energy_edges_.empty()) {
+    write_dataset(file_id, "energy_edges", energy_edges_);
+  }
 
   // 写入累积的传递函数（稀疏格式）
   vector<int> cumulative_indices;
   vector<double> cumulative_values;
   cumulative_indices.reserve(cumulative_data_sparse_.size());
-  cumulative_values.reserve(cumulative_data_sparse_.size());
+  cumulative_values.reserve(
+    cumulative_data_sparse_.size() * static_cast<size_t>(n_groups_));
 
-  for (const auto& [j_response, value] : cumulative_data_sparse_) {
+  for (const auto& [j_response, values] : cumulative_data_sparse_) {
     cumulative_indices.push_back(j_response);
-    cumulative_values.push_back(value);
+    cumulative_values.insert(
+      cumulative_values.end(), values.begin(), values.end());
   }
 
   hid_t cumulative_group = H5Gcreate(file_id, "cumulative_transfer_function",
@@ -311,17 +350,19 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(
     vector<int> response_indices;
     vector<double> response_values;
     response_indices.reserve(response_map.size());
-    response_values.reserve(response_map.size());
+    response_values.reserve(response_map.size() * n_groups_);
 
-    for (const auto& [j_response, value] : response_map) {
+    for (const auto& [j_response, values] : response_map) {
       response_indices.push_back(j_response);
-      response_values.push_back(value);
+      response_values.insert(
+        response_values.end(), values.begin(), values.end());
     }
 
     write_dataset(cell_group, "indices", response_indices);
     write_dataset(cell_group, "values", response_values);
     write_attribute(
       cell_group, "n_nonzero", static_cast<int>(response_map.size()));
+    write_attribute(cell_group, "n_groups", n_groups_);
 
     H5Gclose(cell_group);
   }
@@ -335,6 +376,47 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(
   cumulative_data_sparse_.clear();
   source_counts_.clear();
   particle_to_source_cell_.clear();
+}
+
+std::vector<double> GreenFunctionMesh::make_zero_group_vector() const
+{
+  return std::vector<double>(static_cast<size_t>(n_groups_), 0.0);
+}
+
+int GreenFunctionMesh::determine_group(double energy_eV, int mg_group) const
+{
+  if (n_groups_ <= 1) {
+    return 0;
+  }
+
+  if (mg_group >= 0) {
+    if (mg_group >= n_groups_) {
+      return n_groups_ - 1;
+    }
+    return mg_group;
+  }
+
+  if (!energy_edges_.empty() && energy_eV >= 0.0) {
+    if (energy_eV < energy_edges_.front()) {
+      return 0;
+    }
+    if (energy_eV >= energy_edges_.back()) {
+      return n_groups_ - 1;
+    }
+
+    auto it =
+      std::upper_bound(energy_edges_.begin(), energy_edges_.end(), energy_eV);
+    int idx = static_cast<int>(std::distance(energy_edges_.begin(), it)) - 1;
+    if (idx < 0) {
+      idx = 0;
+    }
+    if (idx >= n_groups_) {
+      idx = n_groups_ - 1;
+    }
+    return idx;
+  }
+
+  return -1;
 }
 
 } // namespace openmc

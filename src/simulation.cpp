@@ -143,6 +143,11 @@ int openmc_simulation_init()
     }
   }
 
+  // Ensure shared mesh grid is created (and info printed) before header
+  if (!simulation::shared_mesh_grid) {
+    simulation::shared_mesh_grid = SharedMeshGrid::create(1.0);
+  }
+
   // Display header
   if (mpi::master) {
     if (settings::run_mode == RunMode::FIXED_SOURCE) {
@@ -331,6 +336,7 @@ vector<int64_t> work_index;
 std::unique_ptr<GreenFunctionMesh> transfer_function_mesh;
 std::unique_ptr<FissionMatrix> fission_matrix;
 std::unique_ptr<FluxMesh> flux_mesh;
+std::shared_ptr<SharedMeshGrid> shared_mesh_grid;
 
 } // namespace simulation
 
@@ -400,16 +406,16 @@ void initialize_batch()
   }
 
   // 创建统一网格（用于裂变矩阵、传递函数和通量分布）
-  std::shared_ptr<SharedMeshGrid> shared_grid;
-  if (!simulation::transfer_function_mesh && !simulation::fission_matrix &&
-      !simulation::flux_mesh) {
+  auto shared_grid = simulation::shared_mesh_grid;
+  if (!shared_grid) {
     shared_grid = SharedMeshGrid::create(1.0); // 1cm 分辨率
+    simulation::shared_mesh_grid = shared_grid;
   }
 
   // Initialize transfer function mesh (传递函数)
   if (!simulation::transfer_function_mesh) {
-    simulation::transfer_function_mesh =
-      std::make_unique<GreenFunctionMesh>(shared_grid, settings::n_batches);
+    simulation::transfer_function_mesh = std::make_unique<GreenFunctionMesh>(
+      shared_grid, settings::n_batches, settings::kinetics_energy_edges);
   }
 
   // Initialize fission matrix (裂变矩阵)
@@ -426,7 +432,8 @@ void initialize_batch()
 
   // Initialize flux mesh (通量分布网格)
   if (!simulation::flux_mesh && settings::flux_mesh_on) {
-    simulation::flux_mesh = std::make_unique<FluxMesh>(shared_grid);
+    simulation::flux_mesh =
+      std::make_unique<FluxMesh>(shared_grid, settings::kinetics_energy_edges);
   }
 
   // Add user tallies to active tallies list

@@ -37,16 +37,16 @@ namespace openmc {
 class GreenFunctionMesh {
 public:
   // 构造函数，初始化传递函数网格
-  explicit GreenFunctionMesh(
-    std::shared_ptr<SharedMeshGrid> grid, int max_batches);
+  explicit GreenFunctionMesh(std::shared_ptr<SharedMeshGrid> grid,
+    int max_batches, std::vector<double> energy_edges = {});
 
   // 记录源粒子的出生位置（建立源粒子ID到源单元的映射）
   void record_source_birth(const Position& r, int64_t source_particle_id);
 
   // 为特定源粒子累积传递函数贡献
   // contribution: 期望裂变中子数 nu_t = (w/k_eff) × w_ufs × (ν̄Σf/Σt)
-  void accumulate(
-    const Position& r, double contribution, int64_t source_particle_id);
+  void accumulate(const Position& r, double contribution,
+    int64_t source_particle_id, double energy_eV = -1.0, int mg_group = -1);
 
   // 开始新batch
   void start_new_batch(int batch_id);
@@ -75,11 +75,11 @@ private:
   // 外层 Key: 源单元索引 i_source (0 到 nx*ny*nz-1)
   // 内层 Key: 响应单元索引 j_response (0 到 nx*ny*nz-1)
   // Value: T(i_source -> j_response) 传递函数值
-  std::unordered_map<int, std::unordered_map<int, double>>
+  std::unordered_map<int, std::unordered_map<int, std::vector<double>>>
     transfer_functions_sparse_;
 
   // 当前batch中每个源单元的传递函数数据（稀疏）
-  std::unordered_map<int, std::unordered_map<int, double>>
+  std::unordered_map<int, std::unordered_map<int, std::vector<double>>>
     current_batch_transfer_data_sparse_;
 
   // 每个源单元产生的源粒子计数 [nx*ny*nz]
@@ -89,7 +89,7 @@ private:
   std::unordered_map<int64_t, int> particle_to_source_cell_;
 
   // 累积所有源单元的传递函数（总的传递函数，稀疏存储）
-  std::unordered_map<int, double> cumulative_data_sparse_;
+  std::unordered_map<int, std::vector<double>> cumulative_data_sparse_;
 
   // 统一网格配置
   std::shared_ptr<SharedMeshGrid> grid_;
@@ -98,11 +98,17 @@ private:
   int current_batch_id_;              // 当前处理的batch ID
   int max_batches_;                   // 最大batch数量
   size_t spatial_size_;               // 统计信息
+  std::vector<double> energy_edges_;
+  int n_groups_ {1};
   std::atomic<uint64_t> dropped_contributions_ {0};
   std::atomic<uint64_t> total_contributions_ {0};
 
   // 线程同步
   mutable std::mutex data_mutex_; // 保护current_batch_particle_data_的访问
+
+  // 分群辅助函数
+  std::vector<double> make_zero_group_vector() const;
+  int determine_group(double energy_eV, int mg_group) const;
 };
 
 } // namespace openmc

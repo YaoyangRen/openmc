@@ -304,7 +304,13 @@ void Particle::event_advance()
   // Accumulate flux mesh (if enabled) - 在所有粒子移动时累积
   if (settings::flux_mesh_on && simulation::flux_mesh) {
     std::array<double, 3> position = {r().x, r().y, r().z};
-    simulation::flux_mesh->accumulate(position, wgt(), distance);
+    double energy_eV = E();
+    int mg_group = -1;
+    if (!settings::run_CE && type() == ParticleType::neutron) {
+      mg_group = g();
+    }
+    simulation::flux_mesh->accumulate(
+      position, wgt(), distance, energy_eV, mg_group);
   }
 
   // Score track-length tallies

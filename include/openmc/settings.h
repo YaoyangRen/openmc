@@ -176,6 +176,8 @@ extern int trigger_batch_interval; //!< Batch interval for triggers
 extern "C" int verbosity;          //!< How verbose to make output
 extern double weight_cutoff;       //!< Weight cutoff for Russian roulette
 extern double weight_survive;      //!< Survival weight after Russian roulette
+extern vector<double>
+  kinetics_energy_edges; //!< Energy group edges for kinetics outputs
 
 } // namespace settings
 

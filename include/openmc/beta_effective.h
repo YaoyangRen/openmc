@@ -16,16 +16,25 @@ struct Position;
 //! 存储单个材料的裂变相关核参数
 //==============================================================================
 struct MaterialNuclearData {
-  double nu_total {0.0};               //!< 总裂变中子产额
-  double nu_prompt {0.0};              //!< 瞬发中子产额
-  std::array<double, 8> nu_delayed {}; //!< 8组缓发中子产额 (Phase 3)
-  double sigma_f {0.0};                //!< 宏观裂变截面 (cm^-1)
-  double chi_prompt {1.0};             //!< 瞬发中子能谱 (归一化)
-  std::array<double, 8> chi_delayed {
-    1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0}; //!< 缓发中子能谱 (Phase 3)
-  int material_id {-1};                      //!< 材料ID
-  std::string material_name;                 //!< 材料名称
-  bool is_fissionable {false};               //!< 是否可裂变
+  // --- 单能群参考值 (保留 Phase 2 兼容性) ---
+  double nu_total {0.0};                //!< 总裂变中子产额(参考能量)
+  double nu_prompt {0.0};               //!< 瞬发中子产额(参考能量)
+  std::array<double, 8> nu_delayed {};  //!< 8组缓发中子产额(参考能量)
+  double sigma_f {0.0};                 //!< 宏观裂变截面(参考能量, cm^-1)
+  double chi_prompt {1.0};              //!< 单群瞬发能谱权重
+  std::array<double, 8> chi_delayed {}; //!< 单群缓发能谱权重
+
+  // --- 多能群扩展数据 (与 flux/adjoint energy grid 对齐) ---
+  std::vector<double> sigma_f_groups;     //!< Σ_f,g (cm^-1)
+  std::vector<double> nu_total_groups;    //!< ν_total,g
+  std::vector<double> nu_prompt_groups;   //!< ν_prompt,g
+  std::vector<double> nu_delayed_groups;  //!< ν_delayed,g,i (flat: g-major)
+  std::vector<double> chi_prompt_groups;  //!< χ_prompt,g
+  std::vector<double> chi_delayed_groups; //!< χ_delayed,g,i (flat)
+
+  int material_id {-1};        //!< 材料ID
+  std::string material_name;   //!< 材料名称
+  bool is_fissionable {false}; //!< 是否可裂变
 };
 
 //==============================================================================
@@ -64,7 +73,7 @@ public:
   explicit BetaEffective(BetaEffMode mode = BetaEffMode::MATERIAL_DEPENDENT,
     int n_sample_points = 27,
     WeightingMode weighting_mode = WeightingMode::REACTION_RATE_WEIGHTED,
-    double ref_energy = 0.0253, double ref_temperature = 293.6)
+    double ref_energy = 2.0e6, double ref_temperature = 293.6)
     : mode_(mode), n_sample_points_(n_sample_points),
       weighting_mode_(weighting_mode), ref_energy_(ref_energy),
       ref_temperature_(ref_temperature)
@@ -160,7 +169,16 @@ private:
   //! 从 HDF5 读取稀疏共轭通量数据
   void read_adjoint_flux_data(const std::string& filename,
     std::unordered_map<int, double>& adjoint_flux_map,
-    std::array<int, 3>& shape, double& pitch) const;
+    std::array<int, 3>& shape, double& pitch);
+
+  //! 校验 (并必要时设置) 通量/共轭通量的能群一致性
+  void validate_group_metadata();
+
+  //! 根据当前能量网格返回能群索引 (落在区间外时夹紧)
+  int group_index_from_energy(double energy_eV) const;
+
+  //! 获取平铺数组中的延迟群索引
+  size_t delayed_offset(int energy_group, int delayed_group) const;
 
   //! 写入结果到 HDF5 文件
   void write_to_file(const std::string& filename) const;
@@ -172,10 +190,24 @@ private:
   double ref_energy_;            //!< 参考中子能量 (eV, Phase 3)
   double ref_temperature_;       //!< 参考温度 (K, Phase 3)
 
+  static constexpr int N_DELAYED_GROUPS = 8;
+
   std::array<double, 8> beta_i_;     //!< 各组 β_i,eff (Phase 3: 8组)
   double beta_total_;                //!< 总 β_eff
   std::array<double, 8> numerators_; //!< 各组分子(诊断用, Phase 3: 8组)
   double denominator_;               //!< 分母(诊断用)
+
+  // 多群通量数据缓存
+  int flux_n_groups_ {1};
+  int adjoint_n_groups_ {1};
+  int n_energy_groups_ {1};
+  std::vector<double> flux_energy_edges_;
+  std::vector<double> adjoint_energy_edges_;
+  std::vector<double> energy_edges_common_;
+  std::unordered_map<int, std::vector<double>> flux_group_map_;
+  std::unordered_map<int, std::vector<double>> adjoint_group_map_;
+  bool flux_has_group_data_ {false};
+  bool adjoint_has_group_data_ {false};
 
   // Phase 2.3: 多点采样统计
   int n_heterogeneous_cells_ {0}; //!< 包含多材料的单元数

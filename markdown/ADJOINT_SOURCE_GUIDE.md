@@ -53,7 +53,7 @@ $$\vec{I^*} = \frac{1}{k} \vec{F^*} \vec{I^*} = \frac{1}{k} \vec{F^T} \vec{I^*}$
 
 #### (1) 均匀分布 (`uniform`)
 
-```
+```text
 I*_i = 1,  ∀i
 ```
 
@@ -63,7 +63,7 @@ I*_i = 1,  ∀i
 
 #### (2) 正向源分布 (`forward`)
 
-```
+```text
 I*_i = S_i / Σ S_i
 ```
 
@@ -73,7 +73,7 @@ I*_i = S_i / Σ S_i
 
 ### 3. Batch级伴随源迭代（新特性）
 
-**在每个batch结束后立即更新伴随源分布**
+#### 在每个batch结束后立即更新伴随源分布
 
 #### 启用方式
 
@@ -216,7 +216,8 @@ fission_matrix.h5
 ├── data_normalized      [double array] - 归一化裂变矩阵
 ├── source_counts        [double array] - 每个单元的源粒子数
 ├── adjoint_source       [double array] - 伴随源分布 I*
-├── k_adjoint_history    [double array] - batch级k_adjoint历史 (可选)
+├── adjoint_residual_history [double array] - batch级 residual (max |ΔI*|, 可选)
+├── k_adjoint_history    [double array] - 旧版 batch级k值记录 (可选)
 │
 └── 属性 (Attributes):
     ├── filetype         = "fission_matrix_sparse"
@@ -224,7 +225,7 @@ fission_matrix.h5
     ├── storage_format   = "COO"
     ├── n_cells          - 总单元数
     ├── nnz              - 非零元素数
-    ├── k_adjoint        - 伴随k值
+    ├── reference_keff   - 归一化使用的主计算keff
     ├── adjoint_iterations - 总迭代次数
     ├── adjoint_converged  - 是否收敛
     ├── batch_adjoint_enabled   - 是否启用batch级迭代 (可选)
@@ -242,7 +243,9 @@ from scipy.sparse import coo_matrix
 with h5py.File('fission_matrix.h5', 'r') as f:
     # 读取伴随源分布
     adjoint_source = f['adjoint_source'][:]
-    k_adjoint = f.attrs['k_adjoint']
+    k_ref = (f.attrs.get('reference_keff')
+             or f.attrs.get('keff_reference')
+             or f.attrs.get('k_adjoint'))
     iterations = f.attrs['adjoint_iterations']
     
     # 读取网格信息
@@ -251,7 +254,7 @@ with h5py.File('fission_matrix.h5', 'r') as f:
     # 重塑为3D数组
     I_star_3d = adjoint_source.reshape(shape)
     
-    print(f"k_adjoint = {k_adjoint:.8f}")
+    print(f"reference keff = {k_ref:.8f}")
     print(f"Iterations = {iterations}")
     print(f"Max importance = {adjoint_source.max():.6e}")
 ```
@@ -289,7 +292,7 @@ python analyze_adjoint_source.py fission_matrix.h5
 
 对于稀疏矩阵 $F$ (COO格式)：
 
-```
+```text
 F[i][j] 存储为 key = i × n_cells + j
 
 计算 F^T × I*:
@@ -373,13 +376,13 @@ compute_adjoint_source("forward", 500, 1e-5);
 
 每50次迭代输出进度：
 
-```
-Iteration   50: k_adj = 1.023456, dk = 3.45e-04
-Iteration  100: k_adj = 1.023489, dk = 8.76e-05
+```text
+Iteration   50: max |ΔI*| = 3.45e-04
+Iteration  100: max |ΔI*| = 8.76e-05
 ...
 Converged at iteration 287
-  Final k_adjoint = 1.02349876
-  Final dk = 9.87e-07
+    Reference keff = 1.02349876
+    Final max |ΔI*| = 9.87e-07
 ```
 
 ---
@@ -396,8 +399,9 @@ for (auto val : adjoint_source_) {
 }
 assert(std::abs(sum - 1.0) < 1e-10);
 
-// 验证k值一致性（正向与伴随）
-assert(std::abs(k_adjoint - k_forward) < 0.01);
+// 验证伴随归一化使用的keff等于主计算keff
+double keff_forward = simulation::keff;
+assert(std::abs(keff_reference_ - keff_forward) < 1e-6);
 ```
 
 ### 与解析解对比
@@ -425,13 +429,13 @@ compute_adjoint_source("uniform", 5000, 1e-6);
 compute_adjoint_source("uniform", 1000, 1e-5);
 ```
 
-### 问题 2: k值异常
+### 问题 2: Residual 长期不下降
 
-**症状**: k_adjoint 与 k_forward 差异很大
+**症状**: max |ΔI*| 在多次迭代后仍停留在 $10^{-3}$ 以上
 
-**原因**: 裂变矩阵统计不充分
+**原因**: 裂变矩阵统计不充分或初始源分布偏差过大
 
-**解决**: 增加批次数或每批次源粒子数
+**解决**: 增加批次数/粒子数，或使用 forward 初始化后重新计算
 
 ### 问题 3: 伴随源为零
 
@@ -462,6 +466,6 @@ if (fission_matrix_sparse_.empty()) {
 
 ---
 
-**文档版本**: v1.0  
-**最后更新**: 2025年11月4日  
+**文档版本**: v1.1  
+**最后更新**: 2025年12月2日  
 **维护者**: RYY

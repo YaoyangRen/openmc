@@ -59,36 +59,54 @@ def read_fission_matrix(filename='fission_matrix.h5'):
         
         # 读取伴随源（如果存在）
         adjoint_source = None
-        k_adjoint = None
+        keff_reference = None
         adjoint_iterations = None
-        k_adjoint_history = None
+        adjoint_history = None
+        adjoint_history_label = None
         batch_adjoint_enabled = False
         adjoint_iter_per_batch = 0
         
         if 'adjoint_source' in f:
             adjoint_source = f['adjoint_source'][:]
-            k_adjoint = f.attrs['k_adjoint']
-            adjoint_iterations = f.attrs['adjoint_iterations']
+            keff_reference = f.attrs.get('reference_keff')
+            if keff_reference is None:
+                keff_reference = f.attrs.get('keff_reference')
+            if keff_reference is None:
+                keff_reference = f.attrs.get('k_adjoint')  # backward compat
+            adjoint_iterations = f.attrs.get('adjoint_iterations')
             
             print(f"\nAdjoint Source Information:")
-            print(f"  k_adjoint = {k_adjoint:.8f}")
-            print(f"  Iterations: {adjoint_iterations}")
+            if keff_reference is not None:
+                print(f"  keff_reference = {keff_reference:.8f}")
+            if adjoint_iterations is not None:
+                print(f"  Iterations: {adjoint_iterations}")
+            else:
+                print("  Iterations: N/A")
             print(f"  Adjoint source available: Yes")
             
             # 读取batch级迭代历史（如果存在）
-            if 'k_adjoint_history' in f:
-                k_adjoint_history = f['k_adjoint_history'][:]
+            if 'adjoint_residual_history' in f:
+                adjoint_history = f['adjoint_residual_history'][:] # type: ignore
+                adjoint_history_label = 'residual'
+            elif 'k_adjoint_history' in f:
+                adjoint_history = f['k_adjoint_history'][:]  # type: ignore[index]
+                adjoint_history_label = 'legacy_k'
                 batch_adjoint_enabled = f.attrs.get('batch_adjoint_enabled', False)
                 adjoint_iter_per_batch = f.attrs.get('adjoint_iter_per_batch', 0)
                 
                 print(f"\nBatch-level Adjoint Iteration:")
                 print(f"  Enabled: {batch_adjoint_enabled}")
                 print(f"  Iterations per batch: {adjoint_iter_per_batch}")
-                print(f"  Number of batches: {len(k_adjoint_history)}")
-                print(f"  k_adjoint evolution:")
-                print(f"    Initial = {k_adjoint_history[0]:.8f}")
-                print(f"    Final   = {k_adjoint_history[-1]:.8f}")
-                print(f"    Change  = {abs(k_adjoint_history[-1] - k_adjoint_history[0]):.3e}")
+                print(f"  Number of batches: {len(adjoint_history)}") # type: ignore
+                if adjoint_history_label == 'residual':
+                    print(f"  Residual evolution (max |ΔI*| per batch):")
+                    print(f"    Initial = {adjoint_history[0]:.3e}")
+                    print(f"    Final   = {adjoint_history[-1]:.3e}")
+                elif adjoint_history_label == 'legacy_k':
+                    print(f"  Legacy k_adjoint evolution:")
+                    print(f"    Initial = {adjoint_history[0]:.8f}")
+                    print(f"    Final   = {adjoint_history[-1]:.8f}")
+                    print(f"    Change  = {abs(adjoint_history[-1] - adjoint_history[0]):.3e}")
         else:
             print(f"\nAdjoint source not computed")
         
@@ -101,14 +119,16 @@ def read_fission_matrix(filename='fission_matrix.h5'):
             'pitch': pitch,
             'source_counts': source_counts,
             'adjoint_source': adjoint_source,
-            'k_adjoint': k_adjoint,
+            'keff_reference': keff_reference,
             'adjoint_iterations': adjoint_iterations,
-            'k_adjoint_history': k_adjoint_history,
+            'adjoint_history': adjoint_history,
+            'adjoint_history_label': adjoint_history_label,
             'batch_adjoint_enabled': batch_adjoint_enabled,
             'adjoint_iter_per_batch': adjoint_iter_per_batch
         }
 
-def compute_adjoint_manually(F, initial_guess='uniform', max_iter=1000, tol=1e-6):
+def compute_adjoint_manually(
+    F, keff, initial_guess='uniform', max_iter=1000, tol=1e-6):
     """
     手动计算伴随源（用于验证C++实现）
     
@@ -145,40 +165,37 @@ def compute_adjoint_manually(F, initial_guess='uniform', max_iter=1000, tol=1e-6
     print(f"  Initial guess: {initial_guess}")
     print(f"  Max iterations: {max_iter}")
     print(f"  Tolerance: {tol:.2e}")
+    print(f"  Reference keff: {keff:.8f}")
     
-    k_old = 1.0
-    
+    max_delta = np.inf
     for iteration in range(max_iter):
         # I_new = F^T × I*
         I_new = F_csr.T.dot(I_star)
         
-        # k = sum(I_new)
-        k = I_new.sum()
+        I_new /= keff
+        sum_new = I_new.sum()
         
-        if k == 0:
-            print(f"Error: k = 0 at iteration {iteration}")
+        if sum_new == 0:
+            print(f"Error: adjoint collapsed to zero at iteration {iteration}")
             break
         
         # 归一化
-        I_star = I_new / k
+        new_vector = I_new / sum_new
+        max_delta = np.max(np.abs(new_vector - I_star))
+        I_star = new_vector
         
         # 检查收敛
-        dk = abs(k - k_old)
-        
         if (iteration + 1) % 50 == 0 or iteration == 0:
-            print(f"  Iteration {iteration+1:4d}: k = {k:.6f}, dk = {dk:.2e}")
+            print(f"  Iteration {iteration+1:4d}: max |ΔI*| = {max_delta:.2e}")
         
-        if dk < tol:
+        if max_delta < tol:
             print(f"\nConverged at iteration {iteration+1}")
-            print(f"  Final k = {k:.8f}")
-            print(f"  Final dk = {dk:.2e}")
-            return I_star, k, iteration + 1
-        
-        k_old = k
+            print(f"  Final max |ΔI*| = {max_delta:.2e}")
+            return I_star, max_delta, iteration + 1
     
     print(f"\nWarning: Maximum iterations reached")
-    print(f"  Final k = {k:.8f}")
-    return I_star, k, max_iter
+    print(f"  Final max |ΔI*| = {max_delta:.2e}")
+    return I_star, max_delta, max_iter
 
 def visualize_adjoint_source(data, slice_axis='z', slice_index=None):
     """
@@ -242,9 +259,15 @@ def visualize_adjoint_source(data, slice_axis='z', slice_index=None):
     axes[1].set_title(f'Log10(Adjoint Source)')
     plt.colorbar(im2, ax=axes[1], label='Log10(Importance)')
     
-    plt.suptitle(f'k_adjoint = {data["k_adjoint"]:.6f}, '
-                 f'Iterations = {data["adjoint_iterations"]}', 
-                 fontsize=14, fontweight='bold')
+    keff_value = data.get('keff_reference')
+    iteration_info = data.get('adjoint_iterations')
+    title_parts = []
+    if keff_value is not None:
+        title_parts.append(f'keff_reference = {keff_value:.6f}')
+    if iteration_info is not None:
+        title_parts.append(f'Iterations = {iteration_info}')
+    title_text = ', '.join(title_parts) if title_parts else 'Adjoint Source'
+    plt.suptitle(title_text, fontsize=14, fontweight='bold')
     plt.tight_layout()
     plt.savefig('adjoint_source_distribution.png', dpi=150, bbox_inches='tight')
     print("\nPlot saved as 'adjoint_source_distribution.png'")
@@ -315,23 +338,23 @@ def analyze_convergence_history(data):
     
     # 这里可以手动重新计算以获得收敛历史
     F = data['F']
+    keff = data.get('keff_reference') or 1.0
     
     print("\nRecomputing adjoint for convergence analysis...")
     
     # 使用均匀初始化
-    I_uniform, k_uniform, iter_uniform = compute_adjoint_manually(
-        F, initial_guess='uniform', max_iter=1000, tol=1e-8
+    I_uniform, res_uniform, iter_uniform = compute_adjoint_manually(
+        F, keff, initial_guess='uniform', max_iter=1000, tol=1e-8
     )
     
     print("\nUsing forward source initialization...")
-    I_forward, k_forward, iter_forward = compute_adjoint_manually(
-        F, initial_guess='forward', max_iter=1000, tol=1e-8
+    I_forward, res_forward, iter_forward = compute_adjoint_manually(
+        F, keff, initial_guess='forward', max_iter=1000, tol=1e-8
     )
     
     print(f"\nComparison:")
-    print(f"  Uniform init: {iter_uniform} iterations, k = {k_uniform:.8f}")
-    print(f"  Forward init: {iter_forward} iterations, k = {k_forward:.8f}")
-    print(f"  Difference in k: {abs(k_uniform - k_forward):.2e}")
+    print(f"  Uniform init: {iter_uniform} iterations, max |ΔI*| = {res_uniform:.2e}")
+    print(f"  Forward init: {iter_forward} iterations, max |ΔI*| = {res_forward:.2e}")
     print(f"  L2 norm of I* difference: {np.linalg.norm(I_uniform - I_forward):.2e}")
 
 def plot_batch_adjoint_convergence(data):
@@ -344,9 +367,10 @@ def plot_batch_adjoint_convergence(data):
         从read_fission_matrix()返回的数据字典
     """
     
-    k_history = data.get('k_adjoint_history')
+    history = data.get('adjoint_history')
+    history_label = data.get('adjoint_history_label')
     
-    if k_history is None:
+    if history is None:
         print("\nNo batch-level adjoint iteration history available.")
         print("To enable, call in C++:")
         print("  fission_matrix->enable_batch_adjoint_iteration(true, 10, 1e-6);")
@@ -354,38 +378,47 @@ def plot_batch_adjoint_convergence(data):
     
     print("\nPlotting batch-level adjoint convergence...")
     
-    n_batches = len(k_history)
+    n_batches = len(history)
     batches = np.arange(1, n_batches + 1)
     
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
     
-    # 绘制k_adjoint随batch的变化
-    ax1.plot(batches, k_history, 'b-o', linewidth=2, markersize=4)
-    ax1.set_xlabel('Batch Number', fontsize=12)
-    ax1.set_ylabel('$k_{adjoint}$', fontsize=12)
-    ax1.set_title('Adjoint Eigenvalue Evolution During Batches', fontsize=14)
-    ax1.grid(True, alpha=0.3)
-    
-    # 添加最终值的水平线
-    final_k = k_history[-1]
-    ax1.axhline(y=final_k, color='r', linestyle='--', alpha=0.5, 
-                label=f'Final: {final_k:.8f}')
-    ax1.legend()
-    
-    # 绘制相对于最终值的相对误差
-    if n_batches > 1:
-        relative_error = np.abs((k_history - final_k) / final_k)
-        ax2.semilogy(batches, relative_error, 'g-o', linewidth=2, markersize=4)
+    if history_label == 'residual':
+        ax1.semilogy(batches, history, 'b-o', linewidth=2, markersize=4)
+        ax1.set_ylabel('max |ΔI*|', fontsize=12)
+        ax1.set_title('Batch-wise Adjoint Residual', fontsize=14)
+        ax1.grid(True, alpha=0.3, which='both')
+
+        ax2.plot(batches, history, 'g-o', linewidth=2, markersize=4)
         ax2.set_xlabel('Batch Number', fontsize=12)
-        ax2.set_ylabel('Relative Error $|k - k_{final}| / k_{final}$', fontsize=12)
-        ax2.set_title('Convergence Rate', fontsize=14)
-        ax2.grid(True, alpha=0.3, which='both')
-        
-        # 添加收敛容差线
-        tolerance = 1e-6
-        ax2.axhline(y=tolerance, color='r', linestyle='--', alpha=0.5,
-                   label=f'Tolerance: {tolerance:.1e}')
-        ax2.legend()
+        ax2.set_ylabel('max |ΔI*|', fontsize=12)
+        ax2.set_title('Residual (Linear Scale)', fontsize=14)
+        ax2.grid(True, alpha=0.3)
+    else:
+        ax1.plot(batches, history, 'b-o', linewidth=2, markersize=4)
+        ax1.set_xlabel('Batch Number', fontsize=12)
+        ax1.set_ylabel('$k_{adjoint}$', fontsize=12)
+        ax1.set_title('Adjoint Eigenvalue (Legacy)', fontsize=14)
+        ax1.grid(True, alpha=0.3)
+
+        final_k = history[-1]
+        ax1.axhline(y=final_k, color='r', linestyle='--', alpha=0.5,
+                    label=f'Final: {final_k:.8f}')
+        ax1.legend()
+
+        if n_batches > 1:
+            relative_error = np.abs((history - final_k) / final_k)
+            ax2.semilogy(
+                batches, relative_error, 'g-o', linewidth=2, markersize=4)
+            ax2.set_xlabel('Batch Number', fontsize=12)
+            ax2.set_ylabel('Relative Error $|k - k_{final}| / k_{final}$', fontsize=12)
+            ax2.set_title('Convergence Rate', fontsize=14)
+            ax2.grid(True, alpha=0.3, which='both')
+
+            tolerance = 1e-6
+            ax2.axhline(y=tolerance, color='r', linestyle='--', alpha=0.5,
+                        label=f'Tolerance: {tolerance:.1e}')
+            ax2.legend()
     
     plt.tight_layout()
     plt.savefig('batch_adjoint_convergence.png', dpi=300, bbox_inches='tight')
@@ -395,20 +428,23 @@ def plot_batch_adjoint_convergence(data):
     # 打印统计信息
     print(f"\nBatch-level Convergence Statistics:")
     print(f"  Number of batches: {n_batches}")
-    print(f"  Initial k_adjoint: {k_history[0]:.8f}")
-    print(f"  Final k_adjoint:   {k_history[-1]:.8f}")
-    print(f"  Total change:      {abs(k_history[-1] - k_history[0]):.3e}")
-    
-    if n_batches > 10:
-        # 计算最后10个batch的稳定性
-        last_10 = k_history[-10:]
-        std_last_10 = np.std(last_10)
-        mean_last_10 = np.mean(last_10)
-        rel_std = std_last_10 / mean_last_10
-        print(f"\nLast 10 batches stability:")
-        print(f"  Mean:     {mean_last_10:.8f}")
-        print(f"  Std dev:  {std_last_10:.3e}")
-        print(f"  Rel std:  {rel_std:.3e}")
+    if history_label == 'residual':
+        print(f"  Initial residual: {history[0]:.3e}")
+        print(f"  Final residual:   {history[-1]:.3e}")
+    else:
+        print(f"  Initial k_adjoint: {history[0]:.8f}")
+        print(f"  Final k_adjoint:   {history[-1]:.8f}")
+        print(f"  Total change:      {abs(history[-1] - history[0]):.3e}")
+
+        if n_batches > 10:
+            last_10 = history[-10:]
+            std_last_10 = np.std(last_10)
+            mean_last_10 = np.mean(last_10)
+            rel_std = std_last_10 / mean_last_10
+            print(f"\nLast 10 batches stability:")
+            print(f"  Mean:     {mean_last_10:.8f}")
+            print(f"  Std dev:  {std_last_10:.3e}")
+            print(f"  Rel std:  {rel_std:.3e}")
 
 # ============================================================================
 # 主程序
@@ -437,7 +473,7 @@ if __name__ == "__main__":
         compare_forward_adjoint(data)
         
         # 绘制batch级迭代收敛历史（如果有）
-        if data.get('k_adjoint_history') is not None:
+        if data.get('adjoint_history') is not None:
             plot_batch_adjoint_convergence(data)
         
         # 分析收敛性（可选）

@@ -1,14 +1,5 @@
 #include "openmc/beta_effective.h"
 
-#include <algorithm>
-#include <chrono>
-#include <cmath>
-#include <functional>
-#include <iomanip>
-#include <iostream>
-#include <numeric>
-#include <vector>
-
 #include "openmc/cell.h"
 #include "openmc/error.h"
 #include "openmc/file_utils.h"
@@ -16,30 +7,44 @@
 #include "openmc/hdf5_interface.h"
 #include "openmc/material.h"
 #include "openmc/nuclide.h"
-#include "openmc/particle_data.h"
 #include "openmc/position.h"
-#include "openmc/reaction_product.h" // Phase 3: EmissionMode 枚举
-#include "openmc/settings.h"
+#include "openmc/reaction_product.h"
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <functional>
+#include <iomanip>
+#include <iostream>
+#include <numeric>
+#include <vector>
 
 namespace openmc {
 
+//------------------------------------------------------------------------------
+// 核心驱动函数：根据网格通量/共轭通量文件完成 β_eff 计算。
+// 算法遵循扰动理论定义：
+//   β_i,eff = ∫ φ*(r,E) χ_d,i(E) ν_d,i(E,r) Σ_f(r,E) φ(r,E) dV dE / 分母
+// 分母使用瞬发量。实现中分别保留 Phase 1（均匀 U-235 参考核数据）与 Phase 2
+// （几何关联、材料相关核数据）的分支，但共享数据读取、网格一致性校验以及
+// 输出流程。
+//------------------------------------------------------------------------------
 void BetaEffective::compute_from_files(const std::string& flux_file,
   const std::string& adjoint_flux_file, const std::string& output_file)
 {
   std::cout << std::string(70, '=') << std::endl;
-  std::cout << "EFFECTIVE DELAYED NEUTRON FRACTION COMPUTATION" << std::endl;
 
-  // 1. 读取正向通量数据
-  std::cout << "\n[1/4] Reading forward flux from: " << flux_file << std::endl;
-
+  // 1. 读取正向通量
+  std::cout << "[1/4] Reading forward flux from: " << flux_file << std::endl;
   if (!file_exists(flux_file)) {
     fatal_error("Flux file not found: " + flux_file +
-                "\nPlease ensure flux_mesh has been computed.");
+                "\nPlease run the forward calculation first.");
   }
 
   std::unordered_map<int, double> flux;
-  std::array<int, 3> flux_shape;
-  double flux_pitch;
+  std::array<int, 3> flux_shape {};
+  double flux_pitch = 0.0;
   read_flux_data(flux_file, flux, flux_shape, flux_pitch);
 
   std::cout << "  Grid: " << flux_shape[0] << " x " << flux_shape[1] << " x "
@@ -47,18 +52,17 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
   std::cout << "  Pitch: " << flux_pitch << " cm" << std::endl;
   std::cout << "  Non-zero cells: " << flux.size() << std::endl;
 
-  // 2. 读取共轭通量数据
+  // 2. 读取共轭通量 (φ*)，后续作为加权函数将所有单元联系在一起
   std::cout << "\n[2/4] Reading adjoint flux from: " << adjoint_flux_file
             << std::endl;
-
   if (!file_exists(adjoint_flux_file)) {
     fatal_error("Adjoint flux file not found: " + adjoint_flux_file +
                 "\nPlease ensure adjoint flux has been computed.");
   }
 
   std::unordered_map<int, double> adjoint_flux;
-  std::array<int, 3> adjoint_shape;
-  double adjoint_pitch;
+  std::array<int, 3> adjoint_shape {};
+  double adjoint_pitch = 0.0;
   read_adjoint_flux_data(
     adjoint_flux_file, adjoint_flux, adjoint_shape, adjoint_pitch);
 
@@ -67,7 +71,8 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
   std::cout << "  Pitch: " << adjoint_pitch << " cm" << std::endl;
   std::cout << "  Non-zero cells: " << adjoint_flux.size() << std::endl;
 
-  // 3. 验证网格一致性
+  // 3. 验证网格一致性：β_eff 依赖逐单元的 φ-φ* 内积，因此两张网格必须完全
+  //    对齐（尺寸、pitch 以及多群能量边界）。
   if (flux_shape != adjoint_shape ||
       std::abs(flux_pitch - adjoint_pitch) > 1e-6) {
     fatal_error(
@@ -84,10 +89,18 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
   grid_shape_ = flux_shape;
   grid_pitch_ = flux_pitch;
 
+  // 校验多群信息，确保输入网格一致
+  validate_group_metadata();
+
+  std::fill(beta_i_.begin(), beta_i_.end(), 0.0);
+  std::fill(numerators_.begin(), numerators_.end(), 0.0);
+  denominator_ = 0.0;
+
   // 计算网格单元体积
   double volume = flux_pitch * flux_pitch * flux_pitch;
 
-  // 根据模式选择计算方法
+  // 根据模式选择计算方法：Phase 1 直接使用常数核数据；Phase 2 需要几何查询
+  // 与材料抽样以提取 Σ_f、ν、χ 等空间分布。
   if (mode_ == BetaEffMode::FIXED_U235) {
     // ===== Phase 1: 固定 U-235 核数据 =====
     std::cout << "\n[3/4] Computing β_eff using FIXED U-235 nuclear data"
@@ -97,7 +110,7 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
     std::cout << "  ν_prompt = " << NU_PROMPT << std::endl;
     std::cout << "  Cell volume = " << volume << " cm³" << std::endl;
 
-    // 计算分母
+    // 计算分母：∫ φ* χ_p ν Σ_f φ dV。Phase 1 不考虑能量依赖，直接使用常数。
     denominator_ = compute_denominator(flux, adjoint_flux, volume);
 
     if (denominator_ <= 0.0) {
@@ -107,7 +120,8 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
     std::cout << "  Denominator = " << std::scientific << std::setprecision(6)
               << denominator_ << std::endl;
 
-    // 对每个缓发群计算分子和 β_i,eff (Phase 3: 8组)
+    // 对每个缓发群计算分子和 β_i,eff (Phase 3: 8组)。在单群近似下仅需
+    // 遍历所有非零网格单元。
     std::cout << "\n  Delayed group contributions:" << std::endl;
     std::cout << "  Group    ν_d,i      Numerator        β_i,eff" << std::endl;
     std::cout << "  " << std::string(55, '-') << std::endl;
@@ -140,7 +154,8 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
     }
     std::cout << "  Cell volume = " << volume << " cm³" << std::endl;
 
-    // 构建单元-材料映射并提取核数据
+    // 构建单元-材料映射并提取核数据：通过几何查询找出每个网格实际包含的
+    // 材料组合，从而得到空间依赖的 Σ_f、ν_t、ν_d、χ。
     build_cell_material_map(flux);
 
     // 计算分母
@@ -153,7 +168,8 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
     std::cout << "  Denominator = " << std::scientific << std::setprecision(6)
               << denominator_ << std::endl;
 
-    // 对每个缓发群计算分子和 β_i,eff
+    // 对每个缓发群计算分子和 β_i,eff。若存在多群数据则逐群折合；否则退化
+    // 为单群形式。
     std::cout << "\n  Delayed group contributions:" << std::endl;
     std::cout << "  Group    Numerator        β_i,eff" << std::endl;
     std::cout << "  " << std::string(50, '-') << std::endl;
@@ -181,6 +197,231 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
   write_to_file(output_file);
 
   std::cout << std::string(70, '=') << std::endl;
+}
+
+//------------------------------------------------------------------------------
+
+void BetaEffective::read_flux_data(const std::string& filename,
+  std::unordered_map<int, double>& flux_map, std::array<int, 3>& shape,
+  double& pitch)
+{
+  hid_t file_id = file_open(filename, 'r');
+
+  flux_group_map_.clear();
+  flux_energy_edges_.clear();
+  flux_has_group_data_ = false;
+  flux_n_groups_ = 1;
+
+  // 读取网格参数
+  std::array<int, 3> grid_shape;
+  read_dataset(file_id, "grid_shape", grid_shape);
+  shape = grid_shape;
+
+  std::array<double, 3> grid_pitch_array;
+  read_dataset(file_id, "grid_pitch", grid_pitch_array);
+  pitch = grid_pitch_array[0]; // 假设各向同性
+
+  // 读取网格左下角坐标 (Phase 2 需要)
+  if (mode_ == BetaEffMode::MATERIAL_DEPENDENT &&
+      object_exists(file_id, "grid_lower_left")) {
+    read_dataset(file_id, "grid_lower_left", grid_lower_left_);
+  }
+
+  if (object_exists(file_id, "n_groups")) {
+    read_dataset(file_id, "n_groups", flux_n_groups_);
+  }
+  if (object_exists(file_id, "energy_edges")) {
+    read_dataset(file_id, "energy_edges", flux_energy_edges_);
+  }
+
+  // 读取稀疏通量数据
+  std::vector<int> cell_indices;
+  std::vector<double> flux_mean;
+  std::vector<double> flux_group_mean;
+
+  read_dataset(file_id, "cell_indices", cell_indices);
+  read_dataset(file_id, "flux_mean", flux_mean);
+
+  if (flux_n_groups_ > 1 && object_exists(file_id, "flux_group_mean")) {
+    read_dataset(file_id, "flux_group_mean", flux_group_mean);
+    size_t expected = static_cast<size_t>(flux_n_groups_) * cell_indices.size();
+    if (flux_group_mean.size() != expected) {
+      fatal_error(
+        "flux_group_mean size mismatch: expected n_groups * non-zero cells");
+    }
+    flux_has_group_data_ = true;
+  }
+
+  // 构建稀疏 map
+  flux_map.clear();
+  for (size_t i = 0; i < cell_indices.size(); ++i) {
+    flux_map[cell_indices[i]] = flux_mean[i];
+
+    if (flux_has_group_data_) {
+      const int cell = cell_indices[i];
+      std::vector<double> groups(flux_n_groups_, 0.0);
+      size_t offset = static_cast<size_t>(i) * flux_n_groups_;
+      for (int g = 0; g < flux_n_groups_; ++g) {
+        groups[g] = flux_group_mean[offset + g];
+      }
+      flux_group_map_[cell] = std::move(groups);
+    }
+  }
+
+  file_close(file_id);
+}
+
+//------------------------------------------------------------------------------
+
+void BetaEffective::read_adjoint_flux_data(const std::string& filename,
+  std::unordered_map<int, double>& adjoint_flux_map, std::array<int, 3>& shape,
+  double& pitch)
+{
+  hid_t file_id = file_open(filename, 'r');
+
+  adjoint_group_map_.clear();
+  adjoint_energy_edges_.clear();
+  adjoint_has_group_data_ = false;
+  adjoint_n_groups_ = 1;
+
+  // 读取网格参数
+  std::array<int, 3> grid_shape;
+  read_dataset(file_id, "shape", grid_shape);
+  shape = grid_shape;
+
+  read_attribute(file_id, "pitch", pitch);
+
+  if (object_exists(file_id, "n_groups")) {
+    read_dataset(file_id, "n_groups", adjoint_n_groups_);
+  }
+  if (object_exists(file_id, "energy_edges")) {
+    read_dataset(file_id, "energy_edges", adjoint_energy_edges_);
+  }
+
+  // 读取稀疏共轭通量数据
+  std::vector<int> cell_indices;
+  std::vector<double> adjoint_flux_values;
+  std::vector<double> adjoint_group_values;
+
+  read_dataset(file_id, "cell_indices", cell_indices);
+  read_dataset(file_id, "adjoint_flux_values", adjoint_flux_values);
+
+  if (adjoint_n_groups_ > 1 &&
+      object_exists(file_id, "adjoint_flux_group_values")) {
+    read_dataset(file_id, "adjoint_flux_group_values", adjoint_group_values);
+    size_t expected =
+      static_cast<size_t>(adjoint_n_groups_) * cell_indices.size();
+    if (adjoint_group_values.size() != expected) {
+      fatal_error("adjoint_flux_group_values size mismatch with n_groups");
+    }
+    adjoint_has_group_data_ = true;
+  }
+
+  // 构建稀疏 map
+  adjoint_flux_map.clear();
+  for (size_t i = 0; i < cell_indices.size(); ++i) {
+    adjoint_flux_map[cell_indices[i]] = adjoint_flux_values[i];
+
+    if (adjoint_has_group_data_) {
+      const int cell = cell_indices[i];
+      std::vector<double> groups(adjoint_n_groups_, 0.0);
+      size_t offset = static_cast<size_t>(i) * adjoint_n_groups_;
+      for (int g = 0; g < adjoint_n_groups_; ++g) {
+        groups[g] = adjoint_group_values[offset + g];
+      }
+      adjoint_group_map_[cell] = std::move(groups);
+    }
+  }
+
+  file_close(file_id);
+}
+
+//------------------------------------------------------------------------------
+
+void BetaEffective::validate_group_metadata()
+{
+  const bool flux_multi = flux_has_group_data_ && flux_n_groups_ > 1;
+  const bool adjoint_multi = adjoint_has_group_data_ && adjoint_n_groups_ > 1;
+
+  if (flux_multi && adjoint_multi) {
+    if (flux_n_groups_ != adjoint_n_groups_) {
+      fatal_error("Flux and adjoint files provide different n_groups; cannot "
+                  "perform multi-group β_eff computation.");
+    }
+
+    n_energy_groups_ = flux_n_groups_;
+    energy_edges_common_.clear();
+
+    if (!flux_energy_edges_.empty() && !adjoint_energy_edges_.empty()) {
+      if (flux_energy_edges_.size() != adjoint_energy_edges_.size()) {
+        fatal_error("Flux and adjoint energy grids have different sizes."
+                    " Please ensure both files share identical edges.");
+      }
+
+      const double tol = 1e-8;
+      for (size_t i = 0; i < flux_energy_edges_.size(); ++i) {
+        double a = flux_energy_edges_[i];
+        double b = adjoint_energy_edges_[i];
+        if (std::abs(a - b) > tol * std::max(1.0, std::abs(a))) {
+          fatal_error("Flux/adjoint energy grid mismatch detected at edge " +
+                      std::to_string(i));
+        }
+      }
+      energy_edges_common_ = flux_energy_edges_;
+    } else if (!flux_energy_edges_.empty()) {
+      energy_edges_common_ = flux_energy_edges_;
+    } else if (!adjoint_energy_edges_.empty()) {
+      energy_edges_common_ = adjoint_energy_edges_;
+    }
+
+    std::cout << "  Multi-group β_eff enabled (" << n_energy_groups_
+              << " energy groups)." << std::endl;
+  } else {
+    if (flux_multi != adjoint_multi) {
+      warning("Only one of flux/adjoint inputs contains group data; falling "
+              "back to single-group β_eff evaluation.");
+    }
+
+    n_energy_groups_ = 1;
+    energy_edges_common_.clear();
+    flux_group_map_.clear();
+    adjoint_group_map_.clear();
+    flux_has_group_data_ = false;
+    adjoint_has_group_data_ = false;
+  }
+}
+
+//------------------------------------------------------------------------------
+
+int BetaEffective::group_index_from_energy(double energy_eV) const
+{
+  if (n_energy_groups_ <= 1 || energy_edges_common_.size() < 2) {
+    return 0;
+  }
+
+  if (energy_eV <= energy_edges_common_.front()) {
+    return 0;
+  }
+  if (energy_eV >= energy_edges_common_.back()) {
+    return n_energy_groups_ - 1;
+  }
+
+  auto it = std::upper_bound(
+    energy_edges_common_.begin(), energy_edges_common_.end(), energy_eV);
+  int idx =
+    static_cast<int>(std::distance(energy_edges_common_.begin(), it)) - 1;
+  if (idx < 0)
+    idx = 0;
+  if (idx >= n_energy_groups_)
+    idx = n_energy_groups_ - 1;
+  return idx;
+}
+
+//------------------------------------------------------------------------------
+
+size_t BetaEffective::delayed_offset(int energy_group, int delayed_group) const
+{
+  return static_cast<size_t>(energy_group) * N_DELAYED_GROUPS + delayed_group;
 }
 
 //------------------------------------------------------------------------------
@@ -236,78 +477,11 @@ double BetaEffective::compute_denominator(
 
 //------------------------------------------------------------------------------
 
-void BetaEffective::read_flux_data(const std::string& filename,
-  std::unordered_map<int, double>& flux_map, std::array<int, 3>& shape,
-  double& pitch)
-{
-  hid_t file_id = file_open(filename, 'r');
-
-  // 读取网格参数
-  std::array<int, 3> grid_shape;
-  read_dataset(file_id, "grid_shape", grid_shape);
-  shape = grid_shape;
-
-  std::array<double, 3> grid_pitch_array;
-  read_dataset(file_id, "grid_pitch", grid_pitch_array);
-  pitch = grid_pitch_array[0]; // 假设各向同性
-
-  // 读取网格左下角坐标 (Phase 2 需要)
-  if (mode_ == BetaEffMode::MATERIAL_DEPENDENT) {
-    read_dataset(file_id, "grid_lower_left", grid_lower_left_);
-  }
-
-  // 读取稀疏通量数据
-  std::vector<int> cell_indices;
-  std::vector<double> flux_mean;
-
-  read_dataset(file_id, "cell_indices", cell_indices);
-  read_dataset(file_id, "flux_mean", flux_mean);
-
-  // 构建稀疏 map
-  flux_map.clear();
-  for (size_t i = 0; i < cell_indices.size(); ++i) {
-    flux_map[cell_indices[i]] = flux_mean[i];
-  }
-
-  file_close(file_id);
-} //------------------------------------------------------------------------------
-
-void BetaEffective::read_adjoint_flux_data(const std::string& filename,
-  std::unordered_map<int, double>& adjoint_flux_map, std::array<int, 3>& shape,
-  double& pitch) const
-{
-  hid_t file_id = file_open(filename, 'r');
-
-  // 读取网格参数
-  std::array<int, 3> grid_shape;
-  read_dataset(file_id, "shape", grid_shape);
-  shape = grid_shape;
-
-  read_attribute(file_id, "pitch", pitch);
-
-  // 读取稀疏共轭通量数据
-  std::vector<int> cell_indices;
-  std::vector<double> adjoint_flux_values;
-
-  read_dataset(file_id, "cell_indices", cell_indices);
-  read_dataset(file_id, "adjoint_flux_values", adjoint_flux_values);
-
-  // 构建稀疏 map
-  adjoint_flux_map.clear();
-  for (size_t i = 0; i < cell_indices.size(); ++i) {
-    adjoint_flux_map[cell_indices[i]] = adjoint_flux_values[i];
-  }
-
-  file_close(file_id);
-}
-
-//------------------------------------------------------------------------------
-
 double BetaEffective::get_beta_i(int group) const
 {
-  if (group < 0 || group >= 6) {
+  if (group < 0 || group >= 8) {
     fatal_error("Invalid delayed group index: " + std::to_string(group) +
-                " (must be 0-5)");
+                " (must be 0-7)");
   }
   return beta_i_[group];
 }
@@ -358,7 +532,10 @@ void BetaEffective::write_to_file(const std::string& filename) const
     nuclear_data_source = "Phase 3 - Dynamic extraction from OpenMC library";
   }
   write_attribute(metadata_group, "nuclear_data_source", nuclear_data_source);
-  write_attribute(metadata_group, "energy_groups", 1); // 单能群
+  write_attribute(metadata_group, "energy_groups", n_energy_groups_);
+  if (!energy_edges_common_.empty()) {
+    write_dataset(metadata_group, "energy_edges", energy_edges_common_);
+  }
   write_attribute(metadata_group, "beta_eff_mode",
     mode_ == BetaEffMode::FIXED_U235 ? "FIXED_U235" : "MATERIAL_DEPENDENT");
 
@@ -464,80 +641,182 @@ void BetaEffective::write_to_file(const std::string& filename) const
 // Phase 2: Material-Dependent Methods
 //==============================================================================
 
+//------------------------------------------------------------------------------
+// 材料感知的缓发分子：
+//   Σ_cell ∫ φ*(r,E) χ_d,i(E,r) ν_d,i(E,r) Σ_f(r,E) φ(r,E) dE × ΔV。
+// 代码重用稀疏网格 map（φ、φ*），若存在单元多群通量则逐群积分，使网格结果
+// 能与 Phase 3 提取的材料核数据混合使用；若无多群信息，则退化为基于均匀核
+// 数据的单群近似。
+//------------------------------------------------------------------------------
 double BetaEffective::compute_delayed_numerator_material(int group,
   const std::unordered_map<int, double>& flux,
   const std::unordered_map<int, double>& adjoint_flux, double volume) const
 {
-  // 收集所有贡献项用于 Kahan 求和
-  std::vector<double> terms;
-  terms.reserve(flux.size());
+  const bool use_multi_group =
+    n_energy_groups_ > 1 && flux_has_group_data_ && adjoint_has_group_data_ &&
+    !flux_group_map_.empty() && !adjoint_group_map_.empty();
 
-  // 遍历所有有正向通量的单元
+  std::vector<double> terms;
+  terms.reserve(use_multi_group ? flux.size() * n_energy_groups_ : flux.size());
+
   for (const auto& [cell_idx, phi] : flux) {
-    // 检查该单元是否也有共轭通量
-    auto it_adj = adjoint_flux.find(cell_idx);
-    if (it_adj == adjoint_flux.end())
+    auto it_adj_total = adjoint_flux.find(cell_idx);
+    if (it_adj_total == adjoint_flux.end())
       continue;
 
-    double phi_star = it_adj->second;
-
-    // 获取该单元的核数据
     auto it_data = cell_nuclear_data_.find(cell_idx);
     if (it_data == cell_nuclear_data_.end() || !it_data->second.is_fissionable)
       continue;
 
     const auto& nuc_data = it_data->second;
 
-    // 使用材料相关核数据: φ*(r) × χ_d,i × ν_d,i(r) × σ_f(r) × φ(r) × V
-    double term = phi_star * nuc_data.chi_delayed[group] *
-                  nuc_data.nu_delayed[group] * nuc_data.sigma_f * phi * volume;
-    terms.push_back(term);
+    if (!use_multi_group) {
+      double phi_star = it_adj_total->second;
+      double term =
+        phi_star * nuc_data.nu_delayed[group] * nuc_data.sigma_f * phi * volume;
+      terms.push_back(term);
+      continue;
+    }
+
+    auto it_flux_groups = flux_group_map_.find(cell_idx);
+    auto it_adj_groups = adjoint_group_map_.find(cell_idx);
+    if (it_flux_groups == flux_group_map_.end() ||
+        it_adj_groups == adjoint_group_map_.end())
+      continue;
+
+    const auto& flux_groups = it_flux_groups->second;
+    const auto& adjoint_groups = it_adj_groups->second;
+    if (flux_groups.size() != static_cast<size_t>(n_energy_groups_) ||
+        adjoint_groups.size() != static_cast<size_t>(n_energy_groups_)) {
+      continue;
+    }
+
+    auto group_value = [&](const std::vector<double>& values, double fallback,
+                         int g) {
+      if (values.size() == static_cast<size_t>(n_energy_groups_)) {
+        return values[g];
+      }
+      return fallback;
+    };
+
+    auto delayed_value = [&](const std::vector<double>& values,
+                           const std::array<double, 8>& fallback, int g) {
+      size_t expected =
+        static_cast<size_t>(n_energy_groups_) * N_DELAYED_GROUPS;
+      if (values.size() == expected) {
+        return values[delayed_offset(g, group)];
+      }
+      return fallback[group];
+    };
+
+    for (int g = 0; g < n_energy_groups_; ++g) {
+      double phi_g = flux_groups[g];
+      double phi_star_g = adjoint_groups[g];
+      if (phi_g == 0.0 || phi_star_g == 0.0)
+        continue;
+
+      double sigma_f_g =
+        group_value(nuc_data.sigma_f_groups, nuc_data.sigma_f, g);
+      double nu_delayed_g =
+        delayed_value(nuc_data.nu_delayed_groups, nuc_data.nu_delayed, g);
+      double chi_delayed_g =
+        delayed_value(nuc_data.chi_delayed_groups, nuc_data.chi_delayed, g);
+
+      double term =
+        phi_star_g * chi_delayed_g * nu_delayed_g * sigma_f_g * phi_g * volume;
+      terms.push_back(term);
+    }
   }
 
-  // 使用 Kahan 求和提高精度
   return kahan_sum(terms);
 }
 
 //------------------------------------------------------------------------------
 
+// 分母与上式互补：
+//   Σ_cell ∫ φ*(r,E) χ_p(E,r) ν_total(E,r) Σ_f(r,E) φ(r,E) dE × ΔV。
+// 保持与分子完全对称，从而无论用户是否提供多群网格，β_i = numerator_i /
+// denominator 都具备一致的含义。
 double BetaEffective::compute_denominator_material(
   const std::unordered_map<int, double>& flux,
   const std::unordered_map<int, double>& adjoint_flux, double volume) const
 {
-  // 收集所有贡献项用于 Kahan 求和
-  std::vector<double> terms;
-  terms.reserve(flux.size());
+  const bool use_multi_group =
+    n_energy_groups_ > 1 && flux_has_group_data_ && adjoint_has_group_data_ &&
+    !flux_group_map_.empty() && !adjoint_group_map_.empty();
 
-  // 遍历所有有正向通量的单元
+  std::vector<double> terms;
+  terms.reserve(use_multi_group ? flux.size() * n_energy_groups_ : flux.size());
+
   for (const auto& [cell_idx, phi] : flux) {
-    // 检查该单元是否也有共轭通量
-    auto it_adj = adjoint_flux.find(cell_idx);
-    if (it_adj == adjoint_flux.end())
+    auto it_adj_total = adjoint_flux.find(cell_idx);
+    if (it_adj_total == adjoint_flux.end())
       continue;
 
-    double phi_star = it_adj->second;
-
-    // 获取该单元的核数据
     auto it_data = cell_nuclear_data_.find(cell_idx);
     if (it_data == cell_nuclear_data_.end() || !it_data->second.is_fissionable)
       continue;
 
     const auto& nuc_data = it_data->second;
 
-    // 使用材料相关核数据: φ*(r) × χ_p × ν(r) × σ_f(r) × φ(r) × V
-    double term = phi_star * nuc_data.chi_prompt * nuc_data.nu_total *
-                  nuc_data.sigma_f * phi * volume;
-    terms.push_back(term);
+    if (!use_multi_group) {
+      double phi_star = it_adj_total->second;
+      double term =
+        phi_star * nuc_data.nu_total * nuc_data.sigma_f * phi * volume;
+      terms.push_back(term);
+      continue;
+    }
+
+    auto it_flux_groups = flux_group_map_.find(cell_idx);
+    auto it_adj_groups = adjoint_group_map_.find(cell_idx);
+    if (it_flux_groups == flux_group_map_.end() ||
+        it_adj_groups == adjoint_group_map_.end())
+      continue;
+
+    const auto& flux_groups = it_flux_groups->second;
+    const auto& adjoint_groups = it_adj_groups->second;
+    if (flux_groups.size() != static_cast<size_t>(n_energy_groups_) ||
+        adjoint_groups.size() != static_cast<size_t>(n_energy_groups_)) {
+      continue;
+    }
+
+    auto group_value = [&](const std::vector<double>& values, double fallback,
+                         int g) {
+      if (values.size() == static_cast<size_t>(n_energy_groups_)) {
+        return values[g];
+      }
+      return fallback;
+    };
+
+    for (int g = 0; g < n_energy_groups_; ++g) {
+      double phi_g = flux_groups[g];
+      double phi_star_g = adjoint_groups[g];
+      if (phi_g == 0.0 || phi_star_g == 0.0)
+        continue;
+
+      double sigma_f_g =
+        group_value(nuc_data.sigma_f_groups, nuc_data.sigma_f, g);
+      double nu_total_g =
+        group_value(nuc_data.nu_total_groups, nuc_data.nu_total, g);
+      double chi_prompt_g =
+        group_value(nuc_data.chi_prompt_groups, nuc_data.chi_prompt, g);
+
+      double term =
+        phi_star_g * chi_prompt_g * nu_total_g * sigma_f_g * phi_g * volume;
+      terms.push_back(term);
+    }
   }
 
-  // 使用 Kahan 求和提高精度
   return kahan_sum(terms);
 }
 
 //------------------------------------------------------------------------------
 // Phase 3: 从 OpenMC 核数据库动态提取核参数
 //------------------------------------------------------------------------------
-
+// 通过遍历 OpenMC 的材料与核素表构建位置相关的核数据。对于每个裂变核素，
+// 计算宏观 Σ_f、ν_total/ν_prompt/ν_delayed 以及（可选）与公共能群一致的 χ
+// 分布。MaterialNuclearData 让后续网格循环无需再次查询物理量即可直接使用。
+//------------------------------------------------------------------------------
 MaterialNuclearData BetaEffective::extract_material_nuclear_data(
   int material_id) const
 {
@@ -571,10 +850,53 @@ MaterialNuclearData BetaEffective::extract_material_nuclear_data(
     return data; // 非裂变材料，返回零值
   }
 
+  const int n_groups = std::max(1, n_energy_groups_);
+  const size_t delayed_group_size =
+    static_cast<size_t>(n_groups) * N_DELAYED_GROUPS;
+
+  std::vector<double> chi_prompt_acc(n_groups, 0.0);
+  std::vector<double> chi_delayed_acc(delayed_group_size, 0.0);
+  bool prompt_sampled = false;
+  std::array<bool, N_DELAYED_GROUPS> delayed_sampled {};
+  delayed_sampled.fill(false);
+
+  data.chi_prompt = 1.0;
+  data.chi_delayed.fill(1.0);
+
   // Phase 3: 使用 OpenMC 核数据库 API 提取能量相关核参数
-  // 参考能量: 0.0253 eV (热中子), 参考温度: 293.6 K
-  const double E_ref = ref_energy_;      // eV (构造函数传入)
-  const double T_ref = ref_temperature_; // K (构造函数传入)
+  // 参考能量与温度由构造函数提供
+  const double E_ref = ref_energy_;      // eV
+  const double T_ref = ref_temperature_; // K (目前仅用于日志)
+
+  auto sample_spectrum = [&](const ReactionProduct& product,
+                           std::vector<double>& spectrum, uint64_t seed_base) {
+    if (product.distribution_.empty())
+      return false;
+
+    uint64_t seed = seed_base;
+    const int n_samples = 5000;
+    for (int s = 0; s < n_samples; ++s) {
+      double E_out = 0.0;
+      double mu = 0.0;
+      product.distribution_[0]->sample(E_ref, E_out, mu, &seed);
+      int g_idx = group_index_from_energy(E_out);
+      if (g_idx >= 0 && g_idx < n_groups) {
+        spectrum[g_idx] += 1.0;
+      }
+    }
+
+    double total = std::accumulate(spectrum.begin(), spectrum.end(), 0.0);
+    if (total <= 0.0) {
+      double uniform = 1.0 / static_cast<double>(spectrum.size());
+      std::fill(spectrum.begin(), spectrum.end(), uniform);
+      return false;
+    }
+
+    for (double& value : spectrum) {
+      value /= total;
+    }
+    return true;
+  };
 
   // 对材料中的每个裂变核素累加核数据
   // 使用原子密度和裂变截面加权平均: ν̄ = Σ(N_i σ_f,i ν_i) / Σ(N_i σ_f,i)
@@ -742,9 +1064,175 @@ MaterialNuclearData BetaEffective::extract_material_nuclear_data(
       }
     }
 
+    // Phase 4: 提取中子能谱权重 —— 单能群版本暂时停用
+    // 原因: 在单群公式里直接乘 χ(E) 概率密度会导致维度不自洽
+    // 多群实现时会使用群常数 χ_g，而非连续能谱的 χ(E_ref)
+
+    // ★ 单能群版本：不提取 χ，避免重复能谱折合
+    /*
+    double chi_prompt_nuc = 1.0;
+    std::array<double, 8> chi_delayed_nuc = {};
+    chi_delayed_nuc.fill(1.0);
+
+    try {
+      if (!nuc->fission_rx_.empty()) {
+        const auto& fission = nuc->fission_rx_[0];
+
+        const int n_samples = 10000;     // 每个能谱的总采样数
+        const double E_incident = 1.0e6; // 1 MeV 入射能量
+
+        // 瞬发中子参考能量: 2.0 MeV (裂变中子特征能量)
+        const double E_ref_prompt = 2.0e6;           // eV
+        const double dE_prompt = E_ref_prompt * 0.5; // ±50% 窗口
+        const double E_low_prompt = E_ref_prompt - dE_prompt;
+        const double E_high_prompt = E_ref_prompt + dE_prompt;
+
+        // 1. 采样瞬发中子能谱
+        for (const auto& product : fission->products_) {
+          if (product.particle_ == ParticleType::neutron &&
+              product.emission_mode_ == ReactionProduct::EmissionMode::prompt) {
+
+            if (!product.distribution_.empty()) {
+              uint64_t seed = 987654321ULL;
+              int count_in_window = 0;
+
+              for (int s = 0; s < n_samples; ++s) {
+                double E_out = 0.0;
+                double mu = 0.0;
+                product.distribution_[0]->sample(E_incident, E_out, mu, &seed);
+
+                if (E_out >= E_low_prompt && E_out <= E_high_prompt) {
+                  count_in_window++;
+                }
+              }
+
+              // 概率密度 = 命中数 / (总采样数 × 窗口宽度)
+              if (count_in_window > 0) {
+                chi_prompt_nuc = static_cast<double>(count_in_window) /
+                                 (n_samples * 2.0 * dE_prompt);
+              } else {
+                // 使用 Maxwell 分布解析估计: χ(E) ∝ √E exp(-E/T)
+                // T_prompt ≈ 1.29 MeV
+                const double T_prompt = 1.29e6;
+                chi_prompt_nuc = 0.484 * std::sqrt(E_ref_prompt) *
+                                 std::exp(-E_ref_prompt / T_prompt);
+              }
+            }
+            break;
+          }
+        }
+
+        // 缓发中子参考能量: 0.5 MeV (缓发中子特征能量)
+        const double E_ref_delayed = 0.5e6;            // eV
+        const double dE_delayed = E_ref_delayed * 0.5; // ±50% 窗口
+        const double E_low_delayed = E_ref_delayed - dE_delayed;
+        const double E_high_delayed = E_ref_delayed + dE_delayed;
+
+        // 2. 采样缓发中子能谱
+        std::vector<const ReactionProduct*> delayed_products;
+        delayed_products.reserve(8);
+
+        for (const auto& product : fission->products_) {
+          if (product.particle_ == ParticleType::neutron &&
+              product.emission_mode_ ==
+                ReactionProduct::EmissionMode::delayed) {
+            delayed_products.push_back(&product);
+          }
+        }
+
+        if (!delayed_products.empty() && delayed_products.size() <= 8) {
+          uint64_t seed = 123456789ULL + i;
+
+          for (size_t g = 0; g < delayed_products.size(); ++g) {
+            const auto* product = delayed_products[g];
+
+            if (product->distribution_.empty())
+              continue;
+
+            int count_in_window = 0;
+
+            for (int s = 0; s < n_samples; ++s) {
+              double E_out = 0.0;
+              double mu = 0.0;
+              product->distribution_[0]->sample(E_incident, E_out, mu, &seed);
+
+              if (E_out >= E_low_delayed && E_out <= E_high_delayed) {
+                count_in_window++;
+              }
+            }
+
+            // 概率密度 = 命中数 / (总采样数 × 窗口宽度)
+            if (count_in_window > 0) {
+              chi_delayed_nuc[g] = static_cast<double>(count_in_window) /
+                                   (n_samples * 2.0 * dE_delayed);
+            } else {
+              // 使用 Maxwell 分布解析估计: χ(E) ∝ √E exp(-E/T)
+              // T_delayed ≈ 0.4 MeV (缓发中子温度更低)
+              const double T_delayed = 0.4e6;
+              chi_delayed_nuc[g] = 0.484 * std::sqrt(E_ref_delayed) *
+                                   std::exp(-E_ref_delayed / T_delayed);
+            }
+          }
+        }
+      }
+    } catch (...) {
+      warning("Failed to extract chi spectrum for " + nuc->name_ +
+              ", using default values");
+      chi_prompt_nuc = 1.0;
+      chi_delayed_nuc.fill(1.0);
+    }
+    */
+
     // 3. 累加加权核数据
     // 宏观裂变截面贡献: N_i × σ_f,i
-    double macro_sigma_f = atom_density * sigma_f_nuc * 1e-24; // barn to cm^2
+    // atom_density 单位: atom/b-cm (OpenMC 标准单位)
+    // sigma_f_nuc 单位: barn
+    // 结果单位: (atom/b-cm) × barn = atom/cm = cm⁻¹ (宏观截面)
+    double macro_sigma_f = atom_density * sigma_f_nuc; // 不需要额外转换！
+
+    if (n_groups > 1 && !energy_edges_common_.empty() &&
+        !nuc->fission_rx_.empty()) {
+      const auto& fission = nuc->fission_rx_[0];
+
+      // 采样瞬发能谱
+      for (const auto& product : fission->products_) {
+        if (product.particle_ == ParticleType::neutron &&
+            product.emission_mode_ == ReactionProduct::EmissionMode::prompt) {
+          std::vector<double> prompt_spectrum(n_groups, 0.0);
+          uint64_t seed = 0x9e3779b97f4a7c15ULL ^
+                          static_cast<uint64_t>(material_id) ^
+                          (static_cast<uint64_t>(nuc_idx) << 16);
+          sample_spectrum(product, prompt_spectrum, seed);
+          for (int g = 0; g < n_groups; ++g) {
+            chi_prompt_acc[g] += macro_sigma_f * prompt_spectrum[g];
+          }
+          prompt_sampled = true;
+          break;
+        }
+      }
+
+      // 采样缓发能谱
+      int delayed_group_idx = 0;
+      for (const auto& product : fission->products_) {
+        if (product.particle_ == ParticleType::neutron &&
+            product.emission_mode_ == ReactionProduct::EmissionMode::delayed) {
+          std::vector<double> delayed_spectrum(n_groups, 0.0);
+          uint64_t seed = 0x6a09e667f3bcc909ULL ^
+                          static_cast<uint64_t>(material_id) ^
+                          (static_cast<uint64_t>(nuc_idx) << 24) ^
+                          static_cast<uint64_t>(delayed_group_idx);
+          sample_spectrum(product, delayed_spectrum, seed);
+          for (int g = 0; g < n_groups; ++g) {
+            chi_delayed_acc[delayed_offset(g, delayed_group_idx)] +=
+              macro_sigma_f * delayed_spectrum[g];
+          }
+          delayed_sampled[delayed_group_idx] = true;
+          delayed_group_idx++;
+          if (delayed_group_idx >= N_DELAYED_GROUPS)
+            break;
+        }
+      }
+    }
 
     total_fission_density += macro_sigma_f;
 
@@ -754,17 +1242,72 @@ MaterialNuclearData BetaEffective::extract_material_nuclear_data(
 
     for (int g = 0; g < 8; ++g) { // Phase 3: 8组
       data.nu_delayed[g] += macro_sigma_f * nu_delayed_nuc[g];
+      // ★ 单能群版本：不累积 chi_delayed
+      // data.chi_delayed[g] += macro_sigma_f * chi_delayed_nuc[g];
     }
+
+    // ★ 单能群版本：不累积 chi_prompt
+    // data.chi_prompt += macro_sigma_f * chi_prompt_nuc;
   }
 
   // 4. 归一化 (除以总裂变密度)
   if (total_fission_density > 0.0) {
     data.nu_total /= total_fission_density;
     data.nu_prompt /= total_fission_density;
+
+    // 归一化中子产额
     for (int g = 0; g < 8; ++g) { // Phase 3: 8组
       data.nu_delayed[g] /= total_fission_density;
     }
+
+    if (prompt_sampled) {
+      for (double& value : chi_prompt_acc) {
+        value /= total_fission_density;
+      }
+    }
+    if (!chi_delayed_acc.empty()) {
+      for (double& value : chi_delayed_acc) {
+        value /= total_fission_density;
+      }
+    }
+
+    // ★ 单能群版本：不归一化 chi_prompt / chi_delayed
+    // data.chi_prompt /= total_fission_density;
+    // for (int g = 0; g < 8; ++g) {
+    //   data.chi_delayed[g] /= total_fission_density;
+    // }
+
+    // 能谱按裂变密度加权，保持 χ_g/χ_{d,ig} 的概率意义
+
     // sigma_f 已经是宏观截面，不需要归一化
+  }
+
+  if (!prompt_sampled || total_fission_density <= 0.0) {
+    double uniform = 1.0 / static_cast<double>(n_groups);
+    std::fill(chi_prompt_acc.begin(), chi_prompt_acc.end(), uniform);
+  }
+
+  for (int d = 0; d < N_DELAYED_GROUPS; ++d) {
+    if (!delayed_sampled[d] || total_fission_density <= 0.0) {
+      double uniform = 1.0 / static_cast<double>(n_groups);
+      for (int g = 0; g < n_groups; ++g) {
+        chi_delayed_acc[delayed_offset(g, d)] = uniform;
+      }
+    }
+  }
+
+  data.chi_prompt_groups = chi_prompt_acc;
+  data.chi_delayed_groups = chi_delayed_acc;
+
+  data.sigma_f_groups.assign(n_groups, data.sigma_f);
+  data.nu_total_groups.assign(n_groups, data.nu_total);
+  data.nu_prompt_groups.assign(n_groups, data.nu_prompt);
+
+  data.nu_delayed_groups.assign(delayed_group_size, 0.0);
+  for (int g = 0; g < n_groups; ++g) {
+    for (int d = 0; d < N_DELAYED_GROUPS; ++d) {
+      data.nu_delayed_groups[delayed_offset(g, d)] = data.nu_delayed[d];
+    }
   }
 
   return data;
@@ -822,7 +1365,7 @@ void BetaEffective::build_cell_material_map(
     auto& local_data = thread_data[thread_id];
     GeometryState geom; // 线程私有几何状态
 
-    // 将 flux map 转换为 vector 以便并行化
+    // 将 flux map 转换为 vector 以便并行化 (读取顺序与稀疏数据一致)
     std::vector<std::pair<int, double>> flux_vec(flux.begin(), flux.end());
 
 #pragma omp for schedule(dynamic, 100)
@@ -839,8 +1382,13 @@ void BetaEffective::build_cell_material_map(
 
       // 多点采样
       std::unordered_map<int, int> material_counts;
-      int valid_samples = 0;
+      int fissionable_hits = 0;     // 裂变材料命中次数
+      int non_fissionable_hits = 0; // 非裂变材料命中次数
+      int void_hits = 0;            // 空白区域命中次数
 
+      // 对每个网格单元执行 1/8/27 点采样来估计材料体积分数（Phase 2.3 核心）。
+      // 采样点越多，异质结构估计越精准，但也需要更多 `exhaustive_find_cell`
+      // 几何查询。
       for (int i = 0; i < n_sample_points_; ++i) {
         Position sample_pos;
 
@@ -868,7 +1416,8 @@ void BetaEffective::build_cell_material_map(
         int material_idx = cell->material(instance);
 
         if (material_idx == MATERIAL_VOID) {
-          continue; // 跳过 void
+          void_hits++; // 统计空白区域
+          continue;
         }
 
         // 验证材料索引
@@ -878,27 +1427,36 @@ void BetaEffective::build_cell_material_map(
         }
 
         const auto& material = model::materials[material_idx];
-        if (!material || !material->fissionable()) {
-          continue; // 跳过非裂变材料
+        if (!material) {
+          void_hits++; // 无效材料视为空白
+          continue;
         }
 
+        if (!material->fissionable()) {
+          non_fissionable_hits++; // 统计非裂变材料(慢化剂、结构等)
+          continue;
+        }
+
+        // 裂变材料: 参与体积分数计算
         int material_id = material->id();
         material_counts[material_id]++;
-        valid_samples++;
+        fissionable_hits++;
       }
 
       // 处理采样结果
-      if (valid_samples == 0) {
-        // 没有有效采样点
-        if (material_counts.empty()) {
+      if (fissionable_hits == 0) {
+        // 没有裂变材料命中
+        if (void_hits > 0 && non_fissionable_hits == 0) {
+          // 纯空白单元
           local_data.void_count++;
         } else {
+          // 仅含非裂变材料的单元
           local_data.non_fissionable_count++;
         }
         continue;
       }
 
-      // 检查是否异质
+      // 检查是否异质(多种裂变材料)
       bool is_heterogeneous = (material_counts.size() > 1);
       if (is_heterogeneous) {
         local_data.heterogeneous_count++;
@@ -920,9 +1478,9 @@ void BetaEffective::build_cell_material_map(
         cell_data = local_data.material_data_cache[mat_id];
         local_data.cell_to_material[cell_idx] = mat_id;
       } else {
-        // 异质单元: 计算加权核数据
+        // 异质单元: 计算加权核数据(仅基于裂变材料)
         cell_data =
-          compute_weighted_nuclear_data(material_counts, valid_samples);
+          compute_weighted_nuclear_data(material_counts, fissionable_hits);
         local_data.cell_to_material[cell_idx] = -1; // 标记为多材料
 
         // 缓存涉及的材料数据
@@ -989,7 +1547,7 @@ void BetaEffective::build_cell_material_map(
   std::cout << "  Geometry query results:" << std::endl;
   std::cout << "    Fissionable cells: " << fissionable_count << std::endl;
   if (n_sample_points_ > 1) {
-    std::cout << "    Heterogeneous cells (multi-material): "
+    std::cout << "    Heterogeneous cells (multi-fissionable): "
               << n_heterogeneous_cells_ << std::endl;
   }
   std::cout << "    Non-fissionable cells: " << non_fissionable_count
@@ -1002,9 +1560,10 @@ void BetaEffective::build_cell_material_map(
   std::cout << "    Unique fissionable materials: " << unique_materials_.size()
             << std::endl;
 
-  // 输出每个材料的分布
+  // 输出每个裂变材料的分布(仅计算裂变区域采样)
   if (!material_hit_counts.empty()) {
-    std::cout << "\n  Material distribution (sample hits):" << std::endl;
+    std::cout << "\n  Fissionable material distribution (sample hits):"
+              << std::endl;
     for (const auto& [mat_id, count] : material_hit_counts) {
       if (material_data_cache.find(mat_id) != material_data_cache.end()) {
         const auto& data = material_data_cache[mat_id];
@@ -1014,6 +1573,9 @@ void BetaEffective::build_cell_material_map(
                   << data.nu_total << ", Σ_f = " << std::scientific
                   << std::setprecision(3) << data.sigma_f << " cm⁻¹"
                   << std::endl;
+
+        // ★ 单能群版本：不再输出 χ 信息
+        // 多群版本实现后会输出每群的 χ_p,g 和 χ_d,ig
       }
     }
   }
@@ -1129,10 +1691,78 @@ Position BetaEffective::sample_cell_point(const Position& lower,
 MaterialNuclearData BetaEffective::compute_weighted_nuclear_data(
   const std::unordered_map<int, int>& material_counts, int total_samples) const
 {
+  // 将异质单元折算为单一“有效”材料。调用者提供每个材料的命中次数，函数
+  // 用体积分数或裂变反应率作为权重对 Σ_f、ν、χ 等量做混合，使后续公式仍可
+  // 使用单一 MaterialNuclearData 接口而无需特殊分支。
   MaterialNuclearData weighted_data;
   weighted_data.material_id = -1; // 标记为多材料单元
   weighted_data.material_name = "mixed";
   weighted_data.is_fissionable = true;
+
+  const int n_groups = std::max(1, n_energy_groups_);
+  const size_t delayed_size = static_cast<size_t>(n_groups) * N_DELAYED_GROUPS;
+
+  std::vector<double> accum_sigma_groups(n_groups, 0.0);
+  std::vector<double> accum_nu_total_groups(n_groups, 0.0);
+  std::vector<double> accum_nu_prompt_groups(n_groups, 0.0);
+  std::vector<double> accum_nu_delayed_groups(delayed_size, 0.0);
+  std::vector<double> accum_chi_prompt(n_groups, 0.0);
+  std::vector<double> accum_chi_delayed(delayed_size, 0.0);
+
+  auto group_value = [&](const std::vector<double>& values, double fallback,
+                       int g) {
+    if (values.size() == static_cast<size_t>(n_groups)) {
+      return values[g];
+    }
+    return fallback;
+  };
+
+  auto delayed_value = [&](const std::vector<double>& values,
+                         const std::array<double, 8>& fallback, int g, int d) {
+    if (values.size() == delayed_size) {
+      return values[delayed_offset(g, d)];
+    }
+    return fallback[d];
+  };
+
+  auto accumulate_group_data = [&](const MaterialNuclearData& mat_data,
+                                 double weight) {
+    for (int g = 0; g < n_groups; ++g) {
+      accum_sigma_groups[g] +=
+        weight * group_value(mat_data.sigma_f_groups, mat_data.sigma_f, g);
+      accum_nu_total_groups[g] +=
+        weight * group_value(mat_data.nu_total_groups, mat_data.nu_total, g);
+      accum_nu_prompt_groups[g] +=
+        weight * group_value(mat_data.nu_prompt_groups, mat_data.nu_prompt, g);
+
+      for (int d = 0; d < N_DELAYED_GROUPS; ++d) {
+        accum_nu_delayed_groups[delayed_offset(g, d)] +=
+          weight *
+          delayed_value(mat_data.nu_delayed_groups, mat_data.nu_delayed, g, d);
+        double chi_delayed_val = delayed_value(
+          mat_data.chi_delayed_groups, mat_data.chi_delayed, g, d);
+        accum_chi_delayed[delayed_offset(g, d)] += weight * chi_delayed_val;
+      }
+
+      double chi_prompt_val =
+        group_value(mat_data.chi_prompt_groups, mat_data.chi_prompt, g);
+      accum_chi_prompt[g] += weight * chi_prompt_val;
+    }
+  };
+
+  auto normalize_distribution = [](std::vector<double>& dist) {
+    if (dist.empty())
+      return;
+    double total = std::accumulate(dist.begin(), dist.end(), 0.0);
+    if (total <= 0.0) {
+      double uniform = 1.0 / static_cast<double>(dist.size());
+      std::fill(dist.begin(), dist.end(), uniform);
+      return;
+    }
+    for (double& val : dist) {
+      val /= total;
+    }
+  };
 
   if (weighting_mode_ == WeightingMode::VOLUME_WEIGHTED) {
     // ===== 体积分数加权 =====
@@ -1150,6 +1780,8 @@ MaterialNuclearData BetaEffective::compute_weighted_nuclear_data(
       for (int g = 0; g < 8; ++g) { // Phase 3: 8组
         weighted_data.nu_delayed[g] += fraction * mat_data.nu_delayed[g];
       }
+
+      accumulate_group_data(mat_data, fraction);
     }
 
   } else {
@@ -1178,6 +1810,8 @@ MaterialNuclearData BetaEffective::compute_weighted_nuclear_data(
       for (int g = 0; g < 8; ++g) { // Phase 3: 8组
         weighted_nu_delayed[g] += fission_contribution * mat_data.nu_delayed[g];
       }
+
+      accumulate_group_data(mat_data, fission_contribution);
     }
 
     // 归一化：除以总裂变密度
@@ -1189,6 +1823,73 @@ MaterialNuclearData BetaEffective::compute_weighted_nuclear_data(
           weighted_nu_delayed[g] / total_fission_density;
       }
       // sigma_f 已经是加权后的宏观截面，不需要归一化
+
+      for (double& value : accum_sigma_groups) {
+        value /= total_fission_density;
+      }
+      for (double& value : accum_nu_total_groups) {
+        value /= total_fission_density;
+      }
+      for (double& value : accum_nu_prompt_groups) {
+        value /= total_fission_density;
+      }
+      for (double& value : accum_nu_delayed_groups) {
+        value /= total_fission_density;
+      }
+      for (double& value : accum_chi_prompt) {
+        value /= total_fission_density;
+      }
+      for (double& value : accum_chi_delayed) {
+        value /= total_fission_density;
+      }
+    }
+  }
+
+  // 规范化 χ 分布
+  normalize_distribution(accum_chi_prompt);
+  for (int d = 0; d < N_DELAYED_GROUPS; ++d) {
+    std::vector<double> delayed_slice(n_groups, 0.0);
+    for (int g = 0; g < n_groups; ++g) {
+      delayed_slice[g] = accum_chi_delayed[delayed_offset(g, d)];
+    }
+    normalize_distribution(delayed_slice);
+    for (int g = 0; g < n_groups; ++g) {
+      accum_chi_delayed[delayed_offset(g, d)] = delayed_slice[g];
+    }
+  }
+
+  weighted_data.sigma_f_groups = accum_sigma_groups;
+  weighted_data.nu_total_groups = accum_nu_total_groups;
+  weighted_data.nu_prompt_groups = accum_nu_prompt_groups;
+  weighted_data.nu_delayed_groups = accum_nu_delayed_groups;
+  weighted_data.chi_prompt_groups = accum_chi_prompt;
+  weighted_data.chi_delayed_groups = accum_chi_delayed;
+
+  auto ensure_group_values = [&](std::vector<double>& target, double fallback) {
+    if (target.empty())
+      return;
+    bool all_zero = std::all_of(target.begin(), target.end(),
+      [](double v) { return std::abs(v) < 1e-16; });
+    if (all_zero) {
+      std::fill(target.begin(), target.end(), fallback);
+    }
+  };
+
+  ensure_group_values(weighted_data.sigma_f_groups, weighted_data.sigma_f);
+  ensure_group_values(weighted_data.nu_total_groups, weighted_data.nu_total);
+  ensure_group_values(weighted_data.nu_prompt_groups, weighted_data.nu_prompt);
+
+  if (!weighted_data.nu_delayed_groups.empty()) {
+    bool delayed_zero = std::all_of(weighted_data.nu_delayed_groups.begin(),
+      weighted_data.nu_delayed_groups.end(),
+      [](double v) { return std::abs(v) < 1e-16; });
+    if (delayed_zero) {
+      for (int g = 0; g < n_groups; ++g) {
+        for (int d = 0; d < N_DELAYED_GROUPS; ++d) {
+          weighted_data.nu_delayed_groups[delayed_offset(g, d)] =
+            weighted_data.nu_delayed[d];
+        }
+      }
     }
   }
 

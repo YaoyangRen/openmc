@@ -5,6 +5,7 @@
 #include <iomanip>
 #include <iostream>
 #include <numeric>
+#include <utility>
 
 #include "openmc/error.h"
 #include "openmc/file_utils.h"
@@ -37,6 +38,20 @@ void AdjointFlux::compute_from_files(const std::string& transfer_function_file,
   read_dataset(tf_file, "shape", shape_);
   read_attribute(tf_file, "pitch", pitch_);
 
+  int tf_n_groups = 1;
+  vector<double> tf_energy_edges;
+  if (object_exists(tf_file, "n_groups")) {
+    read_dataset(tf_file, "n_groups", tf_n_groups);
+  }
+  if (object_exists(tf_file, "energy_edges")) {
+    read_dataset(tf_file, "energy_edges", tf_energy_edges);
+  }
+  if (!tf_energy_edges.empty() &&
+      static_cast<int>(tf_energy_edges.size()) - 1 != tf_n_groups) {
+    fatal_error("AdjointFlux: n_groups does not match energy_edges length in "
+                "transfer function file.");
+  }
+
   n_cells_ = static_cast<size_t>(shape_[0]) * shape_[1] * shape_[2];
 
   std::cout << "  Grid: " << shape_[0] << " x " << shape_[1] << " x "
@@ -50,7 +65,8 @@ void AdjointFlux::compute_from_files(const std::string& transfer_function_file,
   std::cout << "  Source cells: " << source_cell_indices.size() << std::endl;
 
   // 读取传递函数（稀疏格式）
-  std::unordered_map<int, std::unordered_map<int, double>> transfer_functions;
+  std::unordered_map<int, std::unordered_map<int, vector<double>>>
+    transfer_functions;
 
   hid_t tf_group = H5Gopen(tf_file, "transfer_functions", H5P_DEFAULT);
 
@@ -66,9 +82,29 @@ void AdjointFlux::compute_from_files(const std::string& transfer_function_file,
       read_dataset(cell_group, "indices", indices);
       read_dataset(cell_group, "values", values);
 
-      // 构建稀疏 map
+      size_t entry_count = indices.size();
+      size_t expected = static_cast<size_t>(tf_n_groups) * entry_count;
+      if (tf_n_groups == 1 && values.size() == entry_count) {
+        expected = entry_count;
+      }
+
+      if (values.size() != expected) {
+        fatal_error("AdjointFlux: transfer function values dataset has an "
+                    "unexpected length.");
+      }
+
+      // 构建稀疏 map（按能群存储）
       for (size_t k = 0; k < indices.size(); ++k) {
-        transfer_functions[i_source][indices[k]] = values[k];
+        vector<double> group_values(static_cast<size_t>(tf_n_groups), 0.0);
+        if (tf_n_groups == 1 && values.size() == entry_count) {
+          group_values[0] = values[k];
+        } else {
+          for (int g = 0; g < tf_n_groups; ++g) {
+            size_t offset = static_cast<size_t>(k) * tf_n_groups + g;
+            group_values[g] = values[offset];
+          }
+        }
+        transfer_functions[i_source][indices[k]] = std::move(group_values);
       }
 
       total_tf_entries += indices.size();
@@ -104,16 +140,26 @@ void AdjointFlux::compute_from_files(const std::string& transfer_function_file,
   vector<double> adjoint_source;
   read_dataset(fm_file, "adjoint_source", adjoint_source);
 
-  double k_adjoint = 0.0;
-  if (attribute_exists(fm_file, "k_adjoint")) {
-    read_attribute(fm_file, "k_adjoint", k_adjoint);
+  double keff_reference = 0.0;
+  if (attribute_exists(fm_file, "keff_reference")) {
+    read_attribute(fm_file, "keff_reference", keff_reference);
+  }
+
+  int adjoint_iterations = 0;
+  if (attribute_exists(fm_file, "adjoint_iterations")) {
+    read_attribute(fm_file, "adjoint_iterations", adjoint_iterations);
   }
 
   file_close(fm_file);
 
   std::cout << "  Adjoint source cells: " << adjoint_source.size() << std::endl;
-  std::cout << "  k_adjoint: " << std::fixed << std::setprecision(6)
-            << k_adjoint << std::endl;
+  if (keff_reference > 0.0) {
+    std::cout << "  Reference keff: " << std::fixed << std::setprecision(6)
+              << keff_reference << std::endl;
+  }
+  if (adjoint_iterations > 0) {
+    std::cout << "  Adjoint iterations: " << adjoint_iterations << std::endl;
+  }
 
   // 验证网格一致性
   if (adjoint_source.size() != n_cells_) {
@@ -126,8 +172,8 @@ void AdjointFlux::compute_from_files(const std::string& transfer_function_file,
   std::cout << "\nComputing adjoint flux: Φ†(r) = Σ_i T(i→r) × S†(i)"
             << std::endl;
 
-  compute_from_memory(
-    transfer_functions, adjoint_source, shape_, origin_, pitch_);
+  compute_from_memory(transfer_functions, adjoint_source, shape_, origin_,
+    pitch_, tf_n_groups, std::move(tf_energy_edges));
 
   // 4. 写入输出文件
   write_to_file(output_file);
@@ -136,15 +182,31 @@ void AdjointFlux::compute_from_files(const std::string& transfer_function_file,
 }
 
 void AdjointFlux::compute_from_memory(
-  const std::unordered_map<int, std::unordered_map<int, double>>&
+  const std::unordered_map<int, std::unordered_map<int, vector<double>>>&
     transfer_functions,
   const vector<double>& adjoint_source, const std::array<int, 3>& shape,
-  const std::array<double, 3>& origin, double pitch)
+  const std::array<double, 3>& origin, double pitch, int n_groups,
+  vector<double> energy_edges)
 {
   shape_ = shape;
   origin_ = origin;
   pitch_ = pitch;
   n_cells_ = static_cast<size_t>(shape[0]) * shape[1] * shape[2];
+  n_groups_ = n_groups > 0 ? n_groups : 1;
+  energy_edges_ = std::move(energy_edges);
+  if (n_groups_ > 1) {
+    if (energy_edges_.size() != static_cast<size_t>(n_groups_ + 1)) {
+      fatal_error("AdjointFlux: energy_edges must have n_groups + 1 entries.");
+    }
+    if (!std::is_sorted(energy_edges_.begin(), energy_edges_.end())) {
+      fatal_error("AdjointFlux: energy_edges must be sorted ascending.");
+    }
+  } else {
+    n_groups_ = 1;
+    energy_edges_.clear();
+  }
+
+  group_total_flux_.assign(static_cast<size_t>(n_groups_), 0.0);
 
   // 清空之前的结果
   adjoint_flux_sparse_.clear();
@@ -163,20 +225,34 @@ void AdjointFlux::compute_from_memory(
     }
 
     // 对该源单元的所有响应位置进行累加
-    for (const auto& [j_response, T_value] : response_map) {
-      // Φ†(j) += T(i -> j) × S†(i)
-      adjoint_flux_sparse_[j_response] += T_value * importance;
+    for (const auto& [j_response, T_values] : response_map) {
+      auto& flux_vector = adjoint_flux_sparse_[j_response];
+      if (flux_vector.empty()) {
+        flux_vector = make_zero_group_vector();
+      }
+      for (int g = 0; g < n_groups_; ++g) {
+        double contribution = T_values[g] * importance;
+        flux_vector[g] += contribution;
+      }
     }
   }
 
   // 计算统计信息
-  nonzero_cells_ = adjoint_flux_sparse_.size();
   max_flux_ = 0.0;
   total_flux_ = 0.0;
+  nonzero_cells_ = 0;
 
-  for (const auto& [j, flux] : adjoint_flux_sparse_) {
-    max_flux_ = std::max(max_flux_, flux);
-    total_flux_ += flux;
+  for (const auto& [j, flux_vector] : adjoint_flux_sparse_) {
+    double cell_total = 0.0;
+    for (int g = 0; g < n_groups_; ++g) {
+      group_total_flux_[g] += flux_vector[g];
+      cell_total += flux_vector[g];
+    }
+    if (cell_total > 0.0) {
+      ++nonzero_cells_;
+    }
+    max_flux_ = std::max(max_flux_, cell_total);
+    total_flux_ += cell_total;
   }
 
   // 输出统计信息
@@ -191,15 +267,54 @@ void AdjointFlux::compute_from_memory(
   std::cout << "  Mean (nonzero): "
             << (nonzero_cells_ > 0 ? total_flux_ / nonzero_cells_ : 0.0)
             << std::endl;
+
+  if (n_groups_ > 1 && !group_total_flux_.empty()) {
+    std::cout << "  Group totals:" << std::endl;
+    for (int g = 0; g < n_groups_; ++g) {
+      double fraction =
+        total_flux_ > 0.0 ? group_total_flux_[g] / total_flux_ : 0.0;
+      if (!energy_edges_.empty() &&
+          static_cast<int>(energy_edges_.size()) == n_groups_ + 1) {
+        std::cout << "    G" << std::setw(2) << g << " [" << std::scientific
+                  << std::setprecision(3) << energy_edges_[g] << ", "
+                  << energy_edges_[g + 1] << ") eV: " << group_total_flux_[g]
+                  << " (" << std::fixed << std::setprecision(2)
+                  << fraction * 100.0 << "%)" << std::endl;
+      } else {
+        std::cout << "    G" << std::setw(2) << g << ": " << std::scientific
+                  << std::setprecision(6) << group_total_flux_[g] << " ("
+                  << std::fixed << std::setprecision(2) << fraction * 100.0
+                  << "%)" << std::endl;
+      }
+    }
+    std::cout << std::defaultfloat << std::setprecision(6);
+  }
 }
 
 vector<double> AdjointFlux::get_adjoint_flux_dense() const
 {
   vector<double> dense(n_cells_, 0.0);
 
-  for (const auto& [j, flux] : adjoint_flux_sparse_) {
+  for (const auto& [j, flux_vector] : adjoint_flux_sparse_) {
     if (j >= 0 && j < static_cast<int>(n_cells_)) {
-      dense[j] = flux;
+      dense[j] = std::accumulate(flux_vector.begin(), flux_vector.end(), 0.0);
+    }
+  }
+
+  return dense;
+}
+
+vector<double> AdjointFlux::get_adjoint_flux_group_dense() const
+{
+  vector<double> dense(static_cast<size_t>(n_groups_) * n_cells_, 0.0);
+
+  for (const auto& [j, flux_vector] : adjoint_flux_sparse_) {
+    if (j < 0 || j >= static_cast<int>(n_cells_))
+      continue;
+
+    for (int g = 0; g < n_groups_; ++g) {
+      size_t idx = static_cast<size_t>(g) * n_cells_ + j;
+      dense[idx] = flux_vector[g];
     }
   }
 
@@ -234,6 +349,10 @@ void AdjointFlux::write_to_file(const std::string& filename)
   write_dataset(file_id, "origin", origin_);
   write_dataset(file_id, "shape", shape_);
   write_attribute(file_id, "n_cells", static_cast<int>(n_cells_));
+  write_dataset(file_id, "n_groups", n_groups_);
+  if (!energy_edges_.empty()) {
+    write_dataset(file_id, "energy_edges", energy_edges_);
+  }
 
   // 写入统计信息
   write_attribute(file_id, "nonzero_cells", static_cast<int>(nonzero_cells_));
@@ -242,16 +361,22 @@ void AdjointFlux::write_to_file(const std::string& filename)
   write_attribute(
     file_id, "density_percent", 100.0 * nonzero_cells_ / n_cells_);
 
-  // 写入稀疏格式的共轭通量数据
+  // 写入稀疏格式的共轭通量数据（包含分群信息）
   vector<int> indices;
-  vector<double> values;
+  vector<double> total_values;
+  vector<double> group_values;
 
   indices.reserve(adjoint_flux_sparse_.size());
-  values.reserve(adjoint_flux_sparse_.size());
+  total_values.reserve(adjoint_flux_sparse_.size());
+  group_values.reserve(
+    adjoint_flux_sparse_.size() * static_cast<size_t>(n_groups_));
 
-  for (const auto& [j, flux] : adjoint_flux_sparse_) {
+  for (const auto& [j, flux_vector] : adjoint_flux_sparse_) {
     indices.push_back(j);
-    values.push_back(flux);
+    double total = std::accumulate(flux_vector.begin(), flux_vector.end(), 0.0);
+    total_values.push_back(total);
+    group_values.insert(
+      group_values.end(), flux_vector.begin(), flux_vector.end());
   }
 
   // 按索引排序
@@ -261,18 +386,34 @@ void AdjointFlux::write_to_file(const std::string& filename)
     [&indices](size_t a, size_t b) { return indices[a] < indices[b]; });
 
   vector<int> sorted_indices(indices.size());
-  vector<double> sorted_values(values.size());
+  vector<double> sorted_values(total_values.size());
   for (size_t i = 0; i < sort_indices.size(); ++i) {
     sorted_indices[i] = indices[sort_indices[i]];
-    sorted_values[i] = values[sort_indices[i]];
+    sorted_values[i] = total_values[sort_indices[i]];
   }
 
   write_dataset(file_id, "cell_indices", sorted_indices);
   write_dataset(file_id, "adjoint_flux_values", sorted_values);
 
+  // 写入按索引对应的分群数据
+  vector<double> sorted_group_values(group_values.size());
+  for (size_t i = 0; i < sort_indices.size(); ++i) {
+    size_t src_offset = sort_indices[i] * static_cast<size_t>(n_groups_);
+    size_t dst_offset = i * static_cast<size_t>(n_groups_);
+    std::copy_n(group_values.begin() + src_offset, n_groups_,
+      sorted_group_values.begin() + dst_offset);
+  }
+  write_dataset(file_id, "adjoint_flux_group_values", sorted_group_values);
+
   // 也写入稠密格式（可选，用于可视化）
   auto dense_flux = get_adjoint_flux_dense();
   write_dataset(file_id, "adjoint_flux_dense", dense_flux);
+  auto dense_group_flux = get_adjoint_flux_group_dense();
+  write_dataset(file_id, "adjoint_flux_group_dense", dense_group_flux);
+
+  if (!group_total_flux_.empty()) {
+    write_dataset(file_id, "group_total_flux", group_total_flux_);
+  }
 
   file_close(file_id);
 
@@ -281,6 +422,11 @@ void AdjointFlux::write_to_file(const std::string& filename)
   std::cout << "  File size estimate: "
             << (adjoint_flux_sparse_.size() * 12 + n_cells_ * 8) / (1024 * 1024)
             << " MB" << std::endl;
+}
+
+std::vector<double> AdjointFlux::make_zero_group_vector() const
+{
+  return std::vector<double>(static_cast<size_t>(n_groups_), 0.0);
 }
 
 } // namespace openmc

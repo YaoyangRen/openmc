@@ -46,19 +46,21 @@ public:
   // origin: 网格原点
   // pitch: 网格分辨率
   void compute_from_memory(
-    const std::unordered_map<int, std::unordered_map<int, double>>&
+    const std::unordered_map<int, std::unordered_map<int, vector<double>>>&
       transfer_functions,
     const vector<double>& adjoint_source, const std::array<int, 3>& shape,
-    const std::array<double, 3>& origin, double pitch);
+    const std::array<double, 3>& origin, double pitch, int n_groups = 1,
+    vector<double> energy_edges = {});
 
   // 获取计算结果（稀疏格式）
-  const std::unordered_map<int, double>& get_adjoint_flux_sparse() const
+  const std::unordered_map<int, vector<double>>& get_adjoint_flux_sparse() const
   {
     return adjoint_flux_sparse_;
   }
 
   // 获取计算结果（稠密格式）
   vector<double> get_adjoint_flux_dense() const;
+  vector<double> get_adjoint_flux_group_dense() const;
 
   // 写入 HDF5 文件
   void write_to_file(const std::string& filename = "adjoint_flux.h5");
@@ -67,6 +69,8 @@ public:
   const std::array<int, 3>& shape() const { return shape_; }
   const std::array<double, 3>& origin() const { return origin_; }
   double pitch() const { return pitch_; }
+  int n_groups() const { return n_groups_; }
+  const vector<double>& energy_edges() const { return energy_edges_; }
 
   // 获取统计信息
   size_t get_nonzero_count() const { return adjoint_flux_sparse_.size(); }
@@ -76,18 +80,23 @@ public:
 private:
   // 共轭通量数据（稀疏存储）
   // Key: 单元索引 j, Value: Φ†(j)
-  std::unordered_map<int, double> adjoint_flux_sparse_;
+  std::unordered_map<int, vector<double>> adjoint_flux_sparse_;
 
   // 网格参数
   std::array<int, 3> shape_ {0, 0, 0};
   std::array<double, 3> origin_ {0.0, 0.0, 0.0};
   double pitch_ {0.0};
   size_t n_cells_ {0};
+  int n_groups_ {1};
+  vector<double> energy_edges_;
+  vector<double> group_total_flux_;
 
   // 统计信息
   double max_flux_ {0.0};
   double total_flux_ {0.0};
   size_t nonzero_cells_ {0};
+
+  std::vector<double> make_zero_group_vector() const;
 };
 
 } // namespace openmc

@@ -16,6 +16,8 @@
 
 namespace openmc {
 
+class SharedMeshGrid;
+
 constexpr int STATUS_EXIT_NORMAL {0};
 constexpr int STATUS_EXIT_MAX_BATCH {1};
 constexpr int STATUS_EXIT_ON_TRIGGER {2};
@@ -60,6 +62,8 @@ extern std::unique_ptr<FissionMatrix>
 
 extern std::unique_ptr<FluxMesh>
   flux_mesh; // Flux distribution mesh (通量分布网格)
+
+extern std::shared_ptr<SharedMeshGrid> shared_mesh_grid;
 
 } // namespace simulation
 

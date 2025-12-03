@@ -1,6 +1,7 @@
 #include "openmc/settings.h"
 #include "openmc/random_ray/flat_source_domain.h"
 
+#include <algorithm>
 #include <cmath>  // for ceil, pow
 #include <limits> // for numeric_limits
 #include <string>
@@ -144,6 +145,7 @@ int trigger_batch_interval {1};
 int verbosity {7};
 double weight_cutoff {0.25};
 double weight_survive {1.0};
+vector<double> kinetics_energy_edges;
 
 } // namespace settings
 
@@ -710,6 +712,22 @@ void read_settings_xml(pugi::xml_node root)
     }
   }
 
+  // Kinetics energy metadata for beta-effective workflows
+  if (check_for_node(root, "kinetics_energy_edges")) {
+    auto edges = get_node_array<double>(root, "kinetics_energy_edges");
+    if (edges.size() < 2) {
+      fatal_error(
+        "kinetics_energy_edges requires at least two energy boundaries.");
+    }
+    if (!std::is_sorted(edges.begin(), edges.end())) {
+      fatal_error(
+        "kinetics_energy_edges values must be sorted in ascending order.");
+    }
+    kinetics_energy_edges.assign(edges.begin(), edges.end());
+  } else {
+    kinetics_energy_edges.clear();
+  }
+
   // Particle trace
   if (check_for_node(root, "trace")) {
     auto temp = get_node_array<int64_t>(root, "trace");
@@ -1198,6 +1216,7 @@ void free_memory_settings()
   settings::sourcepoint_batch.clear();
   settings::source_write_surf_id.clear();
   settings::res_scat_nuclides.clear();
+  settings::kinetics_energy_edges.clear();
 }
 
 //==============================================================================
