@@ -640,10 +640,7 @@ void finalize_batch()
     // 计算有效缓发中子份额 β_eff
     if (simulation::flux_mesh && settings::flux_mesh_on) {
       try {
-        // Phase 2: 使用材料相关核数据
-        openmc::BetaEffective beta_calc(
-          openmc::BetaEffMode::MATERIAL_DEPENDENT);
-        // FIXED_U235 MATERIAL_DEPENDENT
+        openmc::BetaEffective beta_calc;
         beta_calc.compute_from_files(
           "flux_mesh.h5", "adjoint_flux.h5", "beta_eff.h5");
 
@@ -653,12 +650,6 @@ void finalize_batch()
       }
     }
   }
-
-  // // RYY ADD: 在最后一个batch输出随机粒子的源追踪信息
-  // if (simulation::current_batch == settings::n_batches &&
-  //     settings::run_mode == RunMode::EIGENVALUE) {
-  //   output_random_particle_source_info();
-  // }
 }
 
 void initialize_generation()

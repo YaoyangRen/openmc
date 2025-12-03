@@ -26,9 +26,7 @@ namespace openmc {
 // 核心驱动函数：根据网格通量/共轭通量文件完成 β_eff 计算。
 // 算法遵循扰动理论定义：
 //   β_i,eff = ∫ φ*(r,E) χ_d,i(E) ν_d,i(E,r) Σ_f(r,E) φ(r,E) dV dE / 分母
-// 分母使用瞬发量。实现中分别保留 Phase 1（均匀 U-235 参考核数据）与 Phase 2
-// （几何关联、材料相关核数据）的分支，但共享数据读取、网格一致性校验以及
-// 输出流程。
+// 分母使用瞬发量。实现直接采用材料相关核数据路径。
 //------------------------------------------------------------------------------
 void BetaEffective::compute_from_files(const std::string& flux_file,
   const std::string& adjoint_flux_file, const std::string& output_file)
@@ -99,90 +97,49 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
   // 计算网格单元体积
   double volume = flux_pitch * flux_pitch * flux_pitch;
 
-  // 根据模式选择计算方法：Phase 1 直接使用常数核数据；Phase 2 需要几何查询
-  // 与材料抽样以提取 Σ_f、ν、χ 等空间分布。
-  if (mode_ == BetaEffMode::FIXED_U235) {
-    // ===== Phase 1: 固定 U-235 核数据 =====
-    std::cout << "\n[3/4] Computing β_eff using FIXED U-235 nuclear data"
-              << std::endl;
-    std::cout << "  Mode: Phase 1 (FIXED_U235)" << std::endl;
-    std::cout << "  ν_total = " << NU_TOTAL << std::endl;
-    std::cout << "  ν_prompt = " << NU_PROMPT << std::endl;
-    std::cout << "  Cell volume = " << volume << " cm³" << std::endl;
-
-    // 计算分母：∫ φ* χ_p ν Σ_f φ dV。Phase 1 不考虑能量依赖，直接使用常数。
-    denominator_ = compute_denominator(flux, adjoint_flux, volume);
-
-    if (denominator_ <= 0.0) {
-      fatal_error("Denominator is zero or negative! Cannot compute β_eff.");
-    }
-
-    std::cout << "  Denominator = " << std::scientific << std::setprecision(6)
-              << denominator_ << std::endl;
-
-    // 对每个缓发群计算分子和 β_i,eff (Phase 3: 8组)。在单群近似下仅需
-    // 遍历所有非零网格单元。
-    std::cout << "\n  Delayed group contributions:" << std::endl;
-    std::cout << "  Group    ν_d,i      Numerator        β_i,eff" << std::endl;
-    std::cout << "  " << std::string(55, '-') << std::endl;
-
-    for (int i = 0; i < 8; ++i) {
-      numerators_[i] = compute_delayed_numerator(i, flux, adjoint_flux, volume);
-      beta_i_[i] = numerators_[i] / denominator_;
-
-      std::cout << "    " << (i + 1) << "    " << std::scientific
-                << std::setprecision(6) << NU_DELAYED[i] << "   "
-                << numerators_[i] << "   " << beta_i_[i] << std::endl;
-    }
-
+  std::cout << "\n[3/4] Computing β_eff using MATERIAL-DEPENDENT nuclear data"
+            << std::endl;
+  if (n_sample_points_ == 1) {
+    std::cout << "  Mode: Phase 2.2 (Single-point geometry query)" << std::endl;
   } else {
-    // ===== Phase 2: 材料相关核数据 =====
-    std::cout << "\n[3/4] Computing β_eff using MATERIAL-DEPENDENT nuclear data"
+    std::cout << "  Mode: Phase 2.3 (Multi-point sampling)" << std::endl;
+    std::cout << "  Sample points per cell: " << n_sample_points_ << std::endl;
+    std::cout << "  Weighting mode: "
+              << (weighting_mode_ == WeightingMode::VOLUME_WEIGHTED
+                     ? "Volume-weighted"
+                     : "Reaction-rate weighted")
               << std::endl;
-    if (n_sample_points_ == 1) {
-      std::cout << "  Mode: Phase 2.2 (Single-point geometry query)"
-                << std::endl;
-    } else {
-      std::cout << "  Mode: Phase 2.3 (Multi-point sampling)" << std::endl;
-      std::cout << "  Sample points per cell: " << n_sample_points_
-                << std::endl;
-      std::cout << "  Weighting mode: "
-                << (weighting_mode_ == WeightingMode::VOLUME_WEIGHTED
-                       ? "Volume-weighted"
-                       : "Reaction-rate weighted")
-                << std::endl;
-    }
-    std::cout << "  Cell volume = " << volume << " cm³" << std::endl;
+  }
+  std::cout << "  Cell volume = " << volume << " cm³" << std::endl;
 
-    // 构建单元-材料映射并提取核数据：通过几何查询找出每个网格实际包含的
-    // 材料组合，从而得到空间依赖的 Σ_f、ν_t、ν_d、χ。
-    build_cell_material_map(flux);
+  // 构建单元-材料映射并提取核数据：通过几何查询找出每个网格实际包含的
+  // 材料组合，从而得到空间依赖的 Σ_f、ν_t、ν_d、χ。
+  build_cell_material_map(flux);
 
-    // 计算分母
-    denominator_ = compute_denominator_material(flux, adjoint_flux, volume);
+  // 计算分母
+  denominator_ = compute_denominator_material(flux, adjoint_flux, volume);
 
-    if (denominator_ <= 0.0) {
-      fatal_error("Denominator is zero or negative! Cannot compute β_eff.");
-    }
+  if (denominator_ <= 0.0) {
+    fatal_error("Denominator is zero or negative! Cannot compute β_eff.");
+  }
 
-    std::cout << "  Denominator = " << std::scientific << std::setprecision(6)
-              << denominator_ << std::endl;
+  std::cout << "  Denominator = " << std::scientific << std::setprecision(6)
+            << denominator_ << std::endl;
 
-    // 对每个缓发群计算分子和 β_i,eff。若存在多群数据则逐群折合；否则退化
-    // 为单群形式。
-    std::cout << "\n  Delayed group contributions:" << std::endl;
-    std::cout << "  Group    Numerator        β_i,eff" << std::endl;
-    std::cout << "  " << std::string(50, '-') << std::endl;
+  // 对每个缓发群计算分子和 β_i,eff。若存在多群数据则逐群折合；否则退化
+  // 为单群形式。
+  std::cout << "\n  Delayed group contributions:" << std::endl;
+  std::cout << "  Group    Numerator        β_i,eff" << std::endl;
+  std::cout << "  " << std::string(50, '-') << std::endl;
 
-    for (int i = 0; i < 8; ++i) {
-      numerators_[i] =
-        compute_delayed_numerator_material(i, flux, adjoint_flux, volume);
-      beta_i_[i] = numerators_[i] / denominator_;
+  for (int i = 0; i < 8; ++i) {
+    numerators_[i] =
+      compute_delayed_numerator_material(i, flux, adjoint_flux, volume);
+    beta_i_[i] = numerators_[i] / denominator_;
 
-      std::cout << "    " << (i + 1) << "    " << std::scientific
-                << std::setprecision(6) << numerators_[i] << "   " << beta_i_[i]
-                << std::endl;
-    }
+    std::cout << "    " << (i + 1) << "    " << std::scientific
+              << std::setprecision(6) << numerators_[i] << "   " << beta_i_[i]
+              << std::endl;
   }
 
   // 6. 计算总 β_eff
@@ -221,9 +178,8 @@ void BetaEffective::read_flux_data(const std::string& filename,
   read_dataset(file_id, "grid_pitch", grid_pitch_array);
   pitch = grid_pitch_array[0]; // 假设各向同性
 
-  // 读取网格左下角坐标 (Phase 2 需要)
-  if (mode_ == BetaEffMode::MATERIAL_DEPENDENT &&
-      object_exists(file_id, "grid_lower_left")) {
+  // 读取网格左下角坐标
+  if (object_exists(file_id, "grid_lower_left")) {
     read_dataset(file_id, "grid_lower_left", grid_lower_left_);
   }
 
@@ -426,57 +382,6 @@ size_t BetaEffective::delayed_offset(int energy_group, int delayed_group) const
 
 //------------------------------------------------------------------------------
 
-double BetaEffective::compute_delayed_numerator(int group,
-  const std::unordered_map<int, double>& flux,
-  const std::unordered_map<int, double>& adjoint_flux, double volume) const
-{
-  double sum = 0.0;
-
-  // 遍历所有有正向通量的单元
-  for (const auto& [cell_idx, phi] : flux) {
-    // 检查该单元是否也有共轭通量
-    auto it_adj = adjoint_flux.find(cell_idx);
-    if (it_adj == adjoint_flux.end())
-      continue;
-
-    double phi_star = it_adj->second;
-
-    // 单能量公式: φ*(r) × χ_d,i × ν_d,i × σ_f × φ(r) × V
-    // 使用固定核数据
-    sum += phi_star * CHI_DELAYED[group] * NU_DELAYED[group] * SIGMA_F * phi *
-           volume;
-  }
-
-  return sum;
-}
-
-//------------------------------------------------------------------------------
-
-double BetaEffective::compute_denominator(
-  const std::unordered_map<int, double>& flux,
-  const std::unordered_map<int, double>& adjoint_flux, double volume) const
-{
-  double sum = 0.0;
-
-  // 遍历所有有正向通量的单元
-  for (const auto& [cell_idx, phi] : flux) {
-    // 检查该单元是否也有共轭通量
-    auto it_adj = adjoint_flux.find(cell_idx);
-    if (it_adj == adjoint_flux.end())
-      continue;
-
-    double phi_star = it_adj->second;
-
-    // 单能量公式: φ*(r) × χ_p × ν × σ_f × φ(r) × V
-    // 使用固定核数据
-    sum += phi_star * CHI_PROMPT * NU_TOTAL * SIGMA_F * phi * volume;
-  }
-
-  return sum;
-}
-
-//------------------------------------------------------------------------------
-
 double BetaEffective::get_beta_i(int group) const
 {
   if (group < 0 || group >= 8) {
@@ -525,19 +430,14 @@ void BetaEffective::write_to_file(const std::string& filename) const
     metadata_group, "computation_time", static_cast<int64_t>(timestamp));
 
   // 额外的元数据
-  std::string nuclear_data_source;
-  if (mode_ == BetaEffMode::FIXED_U235) {
-    nuclear_data_source = "U-235 thermal (Phase 1 - Fixed)";
-  } else {
-    nuclear_data_source = "Phase 3 - Dynamic extraction from OpenMC library";
-  }
+  std::string nuclear_data_source =
+    "Phase 3 - Dynamic extraction from OpenMC library";
   write_attribute(metadata_group, "nuclear_data_source", nuclear_data_source);
   write_attribute(metadata_group, "energy_groups", n_energy_groups_);
   if (!energy_edges_common_.empty()) {
     write_dataset(metadata_group, "energy_edges", energy_edges_common_);
   }
-  write_attribute(metadata_group, "beta_eff_mode",
-    mode_ == BetaEffMode::FIXED_U235 ? "FIXED_U235" : "MATERIAL_DEPENDENT");
+  write_attribute(metadata_group, "beta_eff_mode", "MATERIAL_DEPENDENT");
 
   // Phase 3: 添加参考能量和温度
   write_attribute(metadata_group, "ref_energy_ev", ref_energy_);
@@ -565,52 +465,34 @@ void BetaEffective::write_to_file(const std::string& filename) const
   write_attribute(diag_group, "normalization_factor",
     grid_pitch_ * grid_pitch_ * grid_pitch_);
 
-  // 理论值对比 (仅 Phase 1)
-  if (mode_ == BetaEffMode::FIXED_U235) {
-    double sum_nu_delayed =
-      std::accumulate(NU_DELAYED.begin(), NU_DELAYED.end(), 0.0);
-    double beta_theoretical = sum_nu_delayed / NU_TOTAL;
-    write_attribute(diag_group, "beta_theoretical", beta_theoretical);
+  // 输出材料信息
+  std::vector<int> material_ids;
+  std::vector<double> material_nu_total;
+  std::vector<double> material_sigma_f;
+  std::vector<int> material_cell_counts; // Phase 2.2: 每个材料的单元数
 
-    double relative_diff =
-      std::abs(beta_total_ - beta_theoretical) / beta_theoretical * 100.0;
-    write_attribute(diag_group, "relative_difference_percent", relative_diff);
+  // 统计材料分布
+  std::unordered_map<int, int> mat_counts;
+  for (const auto& [cell_idx, mat_id] : cell_to_material_) {
+    mat_counts[mat_id]++;
+  }
 
-    // 核数据参数
-    write_attribute(diag_group, "nu_total", NU_TOTAL);
-    write_attribute(diag_group, "nu_prompt", NU_PROMPT);
-    std::vector<double> nu_delayed_vec(NU_DELAYED.begin(), NU_DELAYED.end());
-    write_dataset(diag_group, "nu_delayed", nu_delayed_vec);
-  } else {
-    // Phase 2: 输出材料信息
-    std::vector<int> material_ids;
-    std::vector<double> material_nu_total;
-    std::vector<double> material_sigma_f;
-    std::vector<int> material_cell_counts; // Phase 2.2: 每个材料的单元数
+  for (const auto& mat_data : unique_materials_) {
+    material_ids.push_back(mat_data.material_id);
+    material_nu_total.push_back(mat_data.nu_total);
+    material_sigma_f.push_back(mat_data.sigma_f);
+    material_cell_counts.push_back(mat_counts[mat_data.material_id]);
+  }
 
-    // 统计材料分布
-    std::unordered_map<int, int> mat_counts;
-    for (const auto& [cell_idx, mat_id] : cell_to_material_) {
-      mat_counts[mat_id]++;
-    }
-
-    for (const auto& mat_data : unique_materials_) {
-      material_ids.push_back(mat_data.material_id);
-      material_nu_total.push_back(mat_data.nu_total);
-      material_sigma_f.push_back(mat_data.sigma_f);
-      material_cell_counts.push_back(mat_counts[mat_data.material_id]);
-    }
-
-    if (!material_ids.empty()) {
-      write_dataset(diag_group, "material_ids", material_ids);
-      write_dataset(diag_group, "material_nu_total", material_nu_total);
-      write_dataset(diag_group, "material_sigma_f", material_sigma_f);
-      write_dataset(diag_group, "material_cell_counts", material_cell_counts);
-      write_attribute(diag_group, "n_unique_materials",
-        static_cast<int>(material_ids.size()));
-      write_attribute(diag_group, "total_fissionable_cells",
-        static_cast<int>(cell_to_material_.size()));
-    }
+  if (!material_ids.empty()) {
+    write_dataset(diag_group, "material_ids", material_ids);
+    write_dataset(diag_group, "material_nu_total", material_nu_total);
+    write_dataset(diag_group, "material_sigma_f", material_sigma_f);
+    write_dataset(diag_group, "material_cell_counts", material_cell_counts);
+    write_attribute(
+      diag_group, "n_unique_materials", static_cast<int>(material_ids.size()));
+    write_attribute(diag_group, "total_fissionable_cells",
+      static_cast<int>(cell_to_material_.size()));
   }
 
   H5Gclose(diag_group);
@@ -618,24 +500,10 @@ void BetaEffective::write_to_file(const std::string& filename) const
 
   std::cout << "  Results written successfully" << std::endl;
 
-  if (mode_ == BetaEffMode::FIXED_U235) {
-    double sum_nu_delayed =
-      std::accumulate(NU_DELAYED.begin(), NU_DELAYED.end(), 0.0);
-    double beta_theoretical = sum_nu_delayed / NU_TOTAL;
-    double relative_diff =
-      std::abs(beta_total_ - beta_theoretical) / beta_theoretical * 100.0;
-
-    std::cout << "  Theoretical β = " << std::fixed << std::setprecision(5)
-              << beta_theoretical << std::endl;
-    std::cout << "  Computed β_eff = " << beta_total_ << std::endl;
-    std::cout << "  Relative difference = " << std::setprecision(2)
-              << relative_diff << "%" << std::endl;
-  } else {
-    std::cout << "  β_eff = " << std::fixed << std::setprecision(5)
-              << beta_total_ << std::endl;
-    std::cout << "  Based on " << unique_materials_.size()
-              << " fissionable material(s)" << std::endl;
-  }
+  std::cout << "  β_eff = " << std::fixed << std::setprecision(5) << beta_total_
+            << std::endl;
+  std::cout << "  Based on " << unique_materials_.size()
+            << " fissionable material(s)" << std::endl;
 }
 //==============================================================================
 // Phase 2: Material-Dependent Methods

@@ -108,7 +108,6 @@ enum class WeightingMode {
 
 ```cpp
 explicit BetaEffective(
-    BetaEffMode mode = BetaEffMode::MATERIAL_DEPENDENT,
     int n_sample_points = 8,  // Phase 2.3: 采样点数
     WeightingMode weighting_mode = WeightingMode::REACTION_RATE_WEIGHTED
 );
@@ -233,18 +232,16 @@ nu_eff = weighted_nu / total_fission_density
 
 ```cpp
 // Phase 2.2 单点模式 (兼容旧版本)
-BetaEffective beta_calc_single(BetaEffMode::MATERIAL_DEPENDENT, 1);
+BetaEffective beta_calc_single(1);
 
 // Phase 2.3 多点 - 体积加权
 BetaEffective beta_calc_volume(
-    BetaEffMode::MATERIAL_DEPENDENT,
     8,  // 8 点采样
     WeightingMode::VOLUME_WEIGHTED
 );
 
 // Phase 2.3 多点 - 反应率加权 (推荐)
 BetaEffective beta_calc_reaction(
-    BetaEffMode::MATERIAL_DEPENDENT,
     8,  // 8 点采样
     WeightingMode::REACTION_RATE_WEIGHTED
 );
@@ -466,7 +463,7 @@ mingw32-make -j24
 
 ```cpp
 TEST_CASE("Multi-point sampling - homogeneous cell") {
-    BetaEffective beta(BetaEffMode::MATERIAL_DEPENDENT, 8);
+    BetaEffective beta(8);
     
     // 创建单一材料网格
     // ...

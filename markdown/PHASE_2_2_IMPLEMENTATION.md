@@ -394,7 +394,7 @@ with h5py.File('beta_eff.h5', 'r') as f:
 
 ```cpp
 // 1. 创建 BetaEffective 对象 (Phase 2.2 模式)
-BetaEffective beta_calc(BetaEffMode::MATERIAL_DEPENDENT);
+BetaEffective beta_calc; // 默认启用材料相关模式
 
 // 2. 从文件计算 β_eff
 beta_calc.compute_from_files(

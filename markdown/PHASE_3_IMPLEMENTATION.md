@@ -45,12 +45,11 @@ struct MaterialNuclearData {
 class BetaEffective {
 public:
   explicit BetaEffective(
-    BetaEffMode mode = BetaEffMode::MATERIAL_DEPENDENT,
     int n_sample_points = 27,
     WeightingMode weighting_mode = WeightingMode::REACTION_RATE_WEIGHTED,
     double ref_energy = 0.0253,      // Phase 3: 参考能量 (eV)
     double ref_temperature = 293.6)  // Phase 3: 参考温度 (K)
-    : mode_(mode), n_sample_points_(n_sample_points),
+    : n_sample_points_(n_sample_points),
       weighting_mode_(weighting_mode), ref_energy_(ref_energy),
       ref_temperature_(ref_temperature)
   {}
@@ -247,7 +246,6 @@ Phase 3 可自动提取以下裂变核素的核数据:
 
 // 创建 Phase 3 计算对象
 BetaEffective beta_calc(
-  BetaEffMode::MATERIAL_DEPENDENT,  // 材料相关模式
   27,                                // 27 点采样
   WeightingMode::REACTION_RATE_WEIGHTED,  // 反应率加权
   0.0253,                            // 热中子能量 (eV)
@@ -277,7 +275,6 @@ for (int i = 0; i < 8; ++i) {
 ```cpp
 // 快中子能谱 (100 keV)
 BetaEffective beta_calc_fast(
-  BetaEffMode::MATERIAL_DEPENDENT,
   27,
   WeightingMode::REACTION_RATE_WEIGHTED,
   1e5,    // 100 keV = 100000 eV

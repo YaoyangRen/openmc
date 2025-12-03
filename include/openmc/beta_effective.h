@@ -38,14 +38,6 @@ struct MaterialNuclearData {
 };
 
 //==============================================================================
-//! β_eff 计算模式枚举
-//==============================================================================
-enum class BetaEffMode {
-  FIXED_U235,        //!< Phase 1: 固定 U-235 核数据
-  MATERIAL_DEPENDENT //!< Phase 2: 材料相关核数据
-};
-
-//==============================================================================
 //! 多点采样加权模式枚举 (Phase 2.3)
 //==============================================================================
 enum class WeightingMode {
@@ -65,18 +57,15 @@ enum class WeightingMode {
 class BetaEffective {
 public:
   //! 构造函数
-  //! \param mode 计算模式 (FIXED_U235 或 MATERIAL_DEPENDENT)
-  //! \param n_sample_points 每个网格单元的采样点数 (Phase 2.3: 1, 8, 或 27)
-  //! \param weighting_mode 多材料加权模式 (Phase 2.3)
-  //! \param ref_energy 参考中子能量 (eV, Phase 3)
-  //! \param ref_temperature 参考温度 (K, Phase 3)
-  explicit BetaEffective(BetaEffMode mode = BetaEffMode::MATERIAL_DEPENDENT,
-    int n_sample_points = 27,
+  //! \param n_sample_points 每个网格单元的采样点数 (1, 8, 或 27)
+  //! \param weighting_mode 多材料加权模式
+  //! \param ref_energy 参考中子能量 (eV)
+  //! \param ref_temperature 参考温度 (K)
+  explicit BetaEffective(int n_sample_points = 27,
     WeightingMode weighting_mode = WeightingMode::REACTION_RATE_WEIGHTED,
     double ref_energy = 2.0e6, double ref_temperature = 293.6)
-    : mode_(mode), n_sample_points_(n_sample_points),
-      weighting_mode_(weighting_mode), ref_energy_(ref_energy),
-      ref_temperature_(ref_temperature)
+    : n_sample_points_(n_sample_points), weighting_mode_(weighting_mode),
+      ref_energy_(ref_energy), ref_temperature_(ref_temperature)
   {}
 
   //! 从 HDF5 文件计算 β_eff
@@ -87,7 +76,7 @@ public:
     const std::string& adjoint_flux_file, const std::string& output_file);
 
   //! 获取特定缓发群的 β_i,eff
-  //! \param group 缓发群索引 (0-7, Phase 3)
+  //! \param group 缓发群索引 (0-7)
   double get_beta_i(int group) const;
 
   //! 获取总 β_eff
@@ -97,38 +86,25 @@ public:
   const std::array<double, 8>& get_all_beta_i() const { return beta_i_; }
 
 private:
-  //! 计算缓发中子贡献的分子 (Phase 1)
-  //! \param group 缓发群索引 (0-7, Phase 3)
-  //! \param flux 正向通量 (稀疏格式)
-  //! \param adjoint_flux 共轭通量 (稀疏格式)
-  //! \param volume 网格单元体积
-  double compute_delayed_numerator(int group,
-    const std::unordered_map<int, double>& flux,
-    const std::unordered_map<int, double>& adjoint_flux, double volume) const;
-
-  //! 计算总中子贡献的分母 (Phase 1)
-  double compute_denominator(const std::unordered_map<int, double>& flux,
-    const std::unordered_map<int, double>& adjoint_flux, double volume) const;
-
-  //! 计算缓发中子贡献的分子 (Phase 2: 材料相关)
+  //! 计算缓发中子贡献的分子
   double compute_delayed_numerator_material(int group,
     const std::unordered_map<int, double>& flux,
     const std::unordered_map<int, double>& adjoint_flux, double volume) const;
 
-  //! 计算总中子贡献的分母 (Phase 2: 材料相关)
+  //! 计算总中子贡献的分母
   double compute_denominator_material(
     const std::unordered_map<int, double>& flux,
     const std::unordered_map<int, double>& adjoint_flux, double volume) const;
 
-  //! 从材料库提取核数据 (Phase 2)
+  //! 从材料库提取核数据
   //! \param material_id OpenMC 材料 ID
   MaterialNuclearData extract_material_nuclear_data(int material_id) const;
 
-  //! 构建单元-材料映射 (Phase 2.2/2.3)
+  //! 构建单元-材料映射
   //! 通过几何查询确定每个网格单元的实际材料
   void build_cell_material_map(const std::unordered_map<int, double>& flux);
 
-  //! 生成规则网格采样位置 (Phase 2.3)
+  //! 生成规则网格采样位置
   //! \param lower 单元左下角坐标
   //! \param upper 单元右上角坐标
   //! \param point_idx 采样点索引 (0-7 for 8点, 0-26 for 27点)
@@ -136,7 +112,7 @@ private:
   Position sample_cell_point(const Position& lower, const Position& upper,
     int point_idx, int n_points) const;
 
-  //! 计算多材料单元的加权核数据 (Phase 2.3)
+  //! 计算多材料单元的加权核数据
   //! \param material_counts 材料 -> 命中次数的映射
   //! \param total_samples 总采样点数
   MaterialNuclearData compute_weighted_nuclear_data(
@@ -184,18 +160,17 @@ private:
   void write_to_file(const std::string& filename) const;
 
   // ========== 数据成员 ==========
-  BetaEffMode mode_;             //!< 计算模式
-  int n_sample_points_;          //!< 每个网格单元的采样点数 (Phase 2.3)
-  WeightingMode weighting_mode_; //!< 多材料加权模式 (Phase 2.3)
-  double ref_energy_;            //!< 参考中子能量 (eV, Phase 3)
-  double ref_temperature_;       //!< 参考温度 (K, Phase 3)
+  int n_sample_points_;          //!< 每个网格单元的采样点数
+  WeightingMode weighting_mode_; //!< 多材料加权模式
+  double ref_energy_;            //!< 参考中子能量 (eV)
+  double ref_temperature_;       //!< 参考温度 (K)
 
   static constexpr int N_DELAYED_GROUPS = 8;
 
-  std::array<double, 8> beta_i_;     //!< 各组 β_i,eff (Phase 3: 8组)
+  std::array<double, 8> beta_i_;     //!< 各组 β_i,eff
   double beta_total_;                //!< 总 β_eff
-  std::array<double, 8> numerators_; //!< 各组分子(诊断用, Phase 3: 8组)
-  double denominator_;               //!< 分母(诊断用)
+  std::array<double, 8> numerators_; //!< 各组分子
+  double denominator_;               //!< 分母
 
   // 多群通量数据缓存
   int flux_n_groups_ {1};
@@ -222,20 +197,6 @@ private:
     cell_nuclear_data_;                               //!< 单元核数据映射
   std::unordered_map<int, int> cell_to_material_;     //!< 单元到材料ID的映射
   std::vector<MaterialNuclearData> unique_materials_; //!< 唯一材料列表(诊断用)
-
-  // Phase 1: 使用 U-235 热中子裂变的固定核数据
-  static constexpr double NU_TOTAL = 2.43;  //!< 总中子产额
-  static constexpr double NU_PROMPT = 2.42; //!< 瞬发中子产额
-  static constexpr double CHI_PROMPT = 1.0; //!< 瞬发中子谱(归一化)
-  static constexpr double SIGMA_F = 1.0;    //!< 相对裂变截面(归一化)
-
-  //! U-235 的 6 组缓发中子参数
-  static constexpr std::array<double, 6> NU_DELAYED = {
-    0.000215, 0.001424, 0.001274, 0.002568, 0.000748, 0.000273};
-
-  //! 各组缓发中子谱(简化假设为相同)
-  static constexpr std::array<double, 6> CHI_DELAYED = {
-    1.0, 1.0, 1.0, 1.0, 1.0, 1.0};
 };
 
 } // namespace openmc
