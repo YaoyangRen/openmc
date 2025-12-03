@@ -126,8 +126,8 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
   std::cout << "  Denominator = " << std::scientific << std::setprecision(6)
             << denominator_ << std::endl;
 
-  // 对每个缓发群计算分子和 β_i,eff。若存在多群数据则逐群折合；否则退化
-  // 为单群形式。
+  // 对每个缓发群计算分子和
+  // β_i,eff。若存在多群数据则逐群折合；否则退化为单群形式。
   std::cout << "\n  Delayed group contributions:" << std::endl;
   std::cout << "  Group    Numerator        β_i,eff" << std::endl;
   std::cout << "  " << std::string(50, '-') << std::endl;
@@ -506,14 +506,14 @@ void BetaEffective::write_to_file(const std::string& filename) const
             << " fissionable material(s)" << std::endl;
 }
 //==============================================================================
-// Phase 2: Material-Dependent Methods
+// Material-Dependent Methods
 //==============================================================================
 
 //------------------------------------------------------------------------------
 // 材料感知的缓发分子：
 //   Σ_cell ∫ φ*(r,E) χ_d,i(E,r) ν_d,i(E,r) Σ_f(r,E) φ(r,E) dE × ΔV。
 // 代码重用稀疏网格 map（φ、φ*），若存在单元多群通量则逐群积分，使网格结果
-// 能与 Phase 3 提取的材料核数据混合使用；若无多群信息，则退化为基于均匀核
+// 能与提取的材料核数据混合使用；若无多群信息，则退化为基于均匀核
 // 数据的单群近似。
 //------------------------------------------------------------------------------
 double BetaEffective::compute_delayed_numerator_material(int group,
@@ -679,7 +679,7 @@ double BetaEffective::compute_denominator_material(
 }
 
 //------------------------------------------------------------------------------
-// Phase 3: 从 OpenMC 核数据库动态提取核参数
+// 从 OpenMC 核数据库动态提取核参数
 //------------------------------------------------------------------------------
 // 通过遍历 OpenMC 的材料与核素表构建位置相关的核数据。对于每个裂变核素，
 // 计算宏观 Σ_f、ν_total/ν_prompt/ν_delayed 以及（可选）与公共能群一致的 χ
@@ -731,40 +731,10 @@ MaterialNuclearData BetaEffective::extract_material_nuclear_data(
   data.chi_prompt = 1.0;
   data.chi_delayed.fill(1.0);
 
-  // Phase 3: 使用 OpenMC 核数据库 API 提取能量相关核参数
+  // 使用 OpenMC 核数据库 API 提取能量相关核参数
   // 参考能量与温度由构造函数提供
-  const double E_ref = ref_energy_;      // eV
-  const double T_ref = ref_temperature_; // K (目前仅用于日志)
-
-  auto sample_spectrum = [&](const ReactionProduct& product,
-                           std::vector<double>& spectrum, uint64_t seed_base) {
-    if (product.distribution_.empty())
-      return false;
-
-    uint64_t seed = seed_base;
-    const int n_samples = 5000;
-    for (int s = 0; s < n_samples; ++s) {
-      double E_out = 0.0;
-      double mu = 0.0;
-      product.distribution_[0]->sample(E_ref, E_out, mu, &seed);
-      int g_idx = group_index_from_energy(E_out);
-      if (g_idx >= 0 && g_idx < n_groups) {
-        spectrum[g_idx] += 1.0;
-      }
-    }
-
-    double total = std::accumulate(spectrum.begin(), spectrum.end(), 0.0);
-    if (total <= 0.0) {
-      double uniform = 1.0 / static_cast<double>(spectrum.size());
-      std::fill(spectrum.begin(), spectrum.end(), uniform);
-      return false;
-    }
-
-    for (double& value : spectrum) {
-      value /= total;
-    }
-    return true;
-  };
+  const double E_ref = ref_energy_;      // 参考能量 eV
+  const double T_ref = ref_temperature_; // 参考温度 K (目前仅用于日志)
 
   // 对材料中的每个裂变核素累加核数据
   // 使用原子密度和裂变截面加权平均: ν̄ = Σ(N_i σ_f,i ν_i) / Σ(N_i σ_f,i)
@@ -799,11 +769,15 @@ MaterialNuclearData BetaEffective::extract_material_nuclear_data(
     if (!nuc->fissionable_)
       continue;
 
-    // Phase 3: 从 OpenMC 核数据库提取参数
+    //==========================================================================
     // 1. 获取裂变截面 σ_f(E, T)
     // 使用 collapse_rate() 方法: 在单能量点计算截面
     // collapse_rate(MT, temperature, energy, flux) -> 返回反应率
     // MT=18 代表裂变反应
+    // atom_density 单位: atom/b-cm (OpenMC 标准单位)
+    // sigma_f_nuc 单位: barn
+    // 宏观裂变截面贡献: N_i × σ_f,i
+    // 结果单位: (atom/b-cm) × barn = atom/cm = cm⁻¹ (宏观截面)
 
     double sigma_f_nuc = 0.0; // 微观裂变截面 (barns)
 
@@ -841,14 +815,16 @@ MaterialNuclearData BetaEffective::extract_material_nuclear_data(
         sigma_f_nuc = 584.4; // 默认使用 U-235
       }
     }
+    double macro_sigma_f = atom_density * sigma_f_nuc; // 宏观截面
 
+    //==========================================================================
     // 2. 获取中子产额 ν(E)
     // 使用 Nuclide::nu(E, mode, group) 方法
     // EmissionMode: prompt (瞬发), delayed (缓发), total (总和)
 
     double nu_total_nuc = 0.0;
     double nu_prompt_nuc = 0.0;
-    std::array<double, 8> nu_delayed_nuc = {}; // Phase 3: 8组
+    std::array<double, 8> nu_delayed_nuc = {}; // 8组缓发中子产额
 
     try {
       // 获取总中子产额
@@ -858,7 +834,7 @@ MaterialNuclearData BetaEffective::extract_material_nuclear_data(
       nu_prompt_nuc = nuc->nu(E_ref, ReactionProduct::EmissionMode::prompt, 0);
 
       // 获取缓发中子产额
-      // Phase 3 改进: 直接访问 products_ 数组，检查粒子类型和发射模式
+      // 直接访问 products_ 数组，检查粒子类型和发射模式
       // products_[0] = 瞬发中子
       // products_[1..N] = 可能是缓发中子、光子等其他产物
 
@@ -932,131 +908,40 @@ MaterialNuclearData BetaEffective::extract_material_nuclear_data(
       }
     }
 
-    // Phase 4: 提取中子能谱权重 —— 单能群版本暂时停用
-    // 原因: 在单群公式里直接乘 χ(E) 概率密度会导致维度不自洽
-    // 多群实现时会使用群常数 χ_g，而非连续能谱的 χ(E_ref)
+    //==========================================================================
+    // 3. 获取瞬发、缓发能谱
 
-    // ★ 单能群版本：不提取 χ，避免重复能谱折合
-    /*
-    double chi_prompt_nuc = 1.0;
-    std::array<double, 8> chi_delayed_nuc = {};
-    chi_delayed_nuc.fill(1.0);
+    // 通过蒙特卡罗抽样生成能群化能谱，失败时回退为均匀分布以保持归一化
+    auto sample_spectrum = [&](const ReactionProduct& product,
+                             std::vector<double>& spectrum,
+                             uint64_t seed_base) {
+      if (product.distribution_.empty())
+        return false;
 
-    try {
-      if (!nuc->fission_rx_.empty()) {
-        const auto& fission = nuc->fission_rx_[0];
-
-        const int n_samples = 10000;     // 每个能谱的总采样数
-        const double E_incident = 1.0e6; // 1 MeV 入射能量
-
-        // 瞬发中子参考能量: 2.0 MeV (裂变中子特征能量)
-        const double E_ref_prompt = 2.0e6;           // eV
-        const double dE_prompt = E_ref_prompt * 0.5; // ±50% 窗口
-        const double E_low_prompt = E_ref_prompt - dE_prompt;
-        const double E_high_prompt = E_ref_prompt + dE_prompt;
-
-        // 1. 采样瞬发中子能谱
-        for (const auto& product : fission->products_) {
-          if (product.particle_ == ParticleType::neutron &&
-              product.emission_mode_ == ReactionProduct::EmissionMode::prompt) {
-
-            if (!product.distribution_.empty()) {
-              uint64_t seed = 987654321ULL;
-              int count_in_window = 0;
-
-              for (int s = 0; s < n_samples; ++s) {
-                double E_out = 0.0;
-                double mu = 0.0;
-                product.distribution_[0]->sample(E_incident, E_out, mu, &seed);
-
-                if (E_out >= E_low_prompt && E_out <= E_high_prompt) {
-                  count_in_window++;
-                }
-              }
-
-              // 概率密度 = 命中数 / (总采样数 × 窗口宽度)
-              if (count_in_window > 0) {
-                chi_prompt_nuc = static_cast<double>(count_in_window) /
-                                 (n_samples * 2.0 * dE_prompt);
-              } else {
-                // 使用 Maxwell 分布解析估计: χ(E) ∝ √E exp(-E/T)
-                // T_prompt ≈ 1.29 MeV
-                const double T_prompt = 1.29e6;
-                chi_prompt_nuc = 0.484 * std::sqrt(E_ref_prompt) *
-                                 std::exp(-E_ref_prompt / T_prompt);
-              }
-            }
-            break;
-          }
-        }
-
-        // 缓发中子参考能量: 0.5 MeV (缓发中子特征能量)
-        const double E_ref_delayed = 0.5e6;            // eV
-        const double dE_delayed = E_ref_delayed * 0.5; // ±50% 窗口
-        const double E_low_delayed = E_ref_delayed - dE_delayed;
-        const double E_high_delayed = E_ref_delayed + dE_delayed;
-
-        // 2. 采样缓发中子能谱
-        std::vector<const ReactionProduct*> delayed_products;
-        delayed_products.reserve(8);
-
-        for (const auto& product : fission->products_) {
-          if (product.particle_ == ParticleType::neutron &&
-              product.emission_mode_ ==
-                ReactionProduct::EmissionMode::delayed) {
-            delayed_products.push_back(&product);
-          }
-        }
-
-        if (!delayed_products.empty() && delayed_products.size() <= 8) {
-          uint64_t seed = 123456789ULL + i;
-
-          for (size_t g = 0; g < delayed_products.size(); ++g) {
-            const auto* product = delayed_products[g];
-
-            if (product->distribution_.empty())
-              continue;
-
-            int count_in_window = 0;
-
-            for (int s = 0; s < n_samples; ++s) {
-              double E_out = 0.0;
-              double mu = 0.0;
-              product->distribution_[0]->sample(E_incident, E_out, mu, &seed);
-
-              if (E_out >= E_low_delayed && E_out <= E_high_delayed) {
-                count_in_window++;
-              }
-            }
-
-            // 概率密度 = 命中数 / (总采样数 × 窗口宽度)
-            if (count_in_window > 0) {
-              chi_delayed_nuc[g] = static_cast<double>(count_in_window) /
-                                   (n_samples * 2.0 * dE_delayed);
-            } else {
-              // 使用 Maxwell 分布解析估计: χ(E) ∝ √E exp(-E/T)
-              // T_delayed ≈ 0.4 MeV (缓发中子温度更低)
-              const double T_delayed = 0.4e6;
-              chi_delayed_nuc[g] = 0.484 * std::sqrt(E_ref_delayed) *
-                                   std::exp(-E_ref_delayed / T_delayed);
-            }
-          }
+      uint64_t seed = seed_base;
+      const int n_samples = 5000;
+      for (int s = 0; s < n_samples; ++s) {
+        double E_out = 0.0;
+        double mu = 0.0;
+        product.distribution_[0]->sample(E_ref, E_out, mu, &seed);
+        int g_idx = group_index_from_energy(E_out);
+        if (g_idx >= 0 && g_idx < n_groups) {
+          spectrum[g_idx] += 1.0;
         }
       }
-    } catch (...) {
-      warning("Failed to extract chi spectrum for " + nuc->name_ +
-              ", using default values");
-      chi_prompt_nuc = 1.0;
-      chi_delayed_nuc.fill(1.0);
-    }
-    */
 
-    // 3. 累加加权核数据
-    // 宏观裂变截面贡献: N_i × σ_f,i
-    // atom_density 单位: atom/b-cm (OpenMC 标准单位)
-    // sigma_f_nuc 单位: barn
-    // 结果单位: (atom/b-cm) × barn = atom/cm = cm⁻¹ (宏观截面)
-    double macro_sigma_f = atom_density * sigma_f_nuc; // 不需要额外转换！
+      double total = std::accumulate(spectrum.begin(), spectrum.end(), 0.0);
+      if (total <= 0.0) {
+        double uniform = 1.0 / static_cast<double>(spectrum.size());
+        std::fill(spectrum.begin(), spectrum.end(), uniform);
+        return false;
+      }
+
+      for (double& value : spectrum) {
+        value /= total;
+      }
+      return true;
+    };
 
     if (n_groups > 1 && !energy_edges_common_.empty() &&
         !nuc->fission_rx_.empty()) {
@@ -1108,23 +993,19 @@ MaterialNuclearData BetaEffective::extract_material_nuclear_data(
     data.nu_total += macro_sigma_f * nu_total_nuc;
     data.nu_prompt += macro_sigma_f * nu_prompt_nuc;
 
-    for (int g = 0; g < 8; ++g) { // Phase 3: 8组
+    for (int g = 0; g < 8; ++g) {
       data.nu_delayed[g] += macro_sigma_f * nu_delayed_nuc[g];
-      // ★ 单能群版本：不累积 chi_delayed
-      // data.chi_delayed[g] += macro_sigma_f * chi_delayed_nuc[g];
     }
-
-    // ★ 单能群版本：不累积 chi_prompt
-    // data.chi_prompt += macro_sigma_f * chi_prompt_nuc;
   }
 
+  //==========================================================================
   // 4. 归一化 (除以总裂变密度)
   if (total_fission_density > 0.0) {
     data.nu_total /= total_fission_density;
     data.nu_prompt /= total_fission_density;
 
     // 归一化中子产额
-    for (int g = 0; g < 8; ++g) { // Phase 3: 8组
+    for (int g = 0; g < 8; ++g) {
       data.nu_delayed[g] /= total_fission_density;
     }
 
@@ -1138,23 +1019,20 @@ MaterialNuclearData BetaEffective::extract_material_nuclear_data(
         value /= total_fission_density;
       }
     }
-
-    // ★ 单能群版本：不归一化 chi_prompt / chi_delayed
-    // data.chi_prompt /= total_fission_density;
-    // for (int g = 0; g < 8; ++g) {
-    //   data.chi_delayed[g] /= total_fission_density;
-    // }
-
     // 能谱按裂变密度加权，保持 χ_g/χ_{d,ig} 的概率意义
-
     // sigma_f 已经是宏观截面，不需要归一化
   }
 
+  // 整理数据用于β_eff计算
+
+  // 若瞬发或某个缓发群在采样过程中没有得到有效结果（或整个材料无裂变贡献），
+  // 就把该能谱设为各群均匀分布，避免 χ 数据缺失。
   if (!prompt_sampled || total_fission_density <= 0.0) {
     double uniform = 1.0 / static_cast<double>(n_groups);
     std::fill(chi_prompt_acc.begin(), chi_prompt_acc.end(), uniform);
   }
 
+  // 写入数据
   for (int d = 0; d < N_DELAYED_GROUPS; ++d) {
     if (!delayed_sampled[d] || total_fission_density <= 0.0) {
       double uniform = 1.0 / static_cast<double>(n_groups);
@@ -1254,7 +1132,7 @@ void BetaEffective::build_cell_material_map(
       int non_fissionable_hits = 0; // 非裂变材料命中次数
       int void_hits = 0;            // 空白区域命中次数
 
-      // 对每个网格单元执行 1/8/27 点采样来估计材料体积分数（Phase 2.3 核心）。
+      // 对每个网格单元执行 1/8/27 点采样来估计材料体积分数。
       // 采样点越多，异质结构估计越精准，但也需要更多 `exhaustive_find_cell`
       // 几何查询。
       for (int i = 0; i < n_sample_points_; ++i) {
@@ -1441,9 +1319,6 @@ void BetaEffective::build_cell_material_map(
                   << data.nu_total << ", Σ_f = " << std::scientific
                   << std::setprecision(3) << data.sigma_f << " cm⁻¹"
                   << std::endl;
-
-        // ★ 单能群版本：不再输出 χ 信息
-        // 多群版本实现后会输出每群的 χ_p,g 和 χ_d,ig
       }
     }
   }
@@ -1772,7 +1647,6 @@ double BetaEffective::kahan_sum(const std::vector<double>& values) const
     return 0.0;
 
   // Kahan 求和算法（补偿求和）
-  // 参考: Kahan, W. (1965). "Further remarks on reducing truncation errors"
   double sum = 0.0;
   double compensation = 0.0; // 累积的舍入误差补偿
 

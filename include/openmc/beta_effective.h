@@ -102,6 +102,10 @@ private:
 
   //! 构建单元-材料映射
   //! 通过几何查询确定每个网格单元的实际材料
+  //! 把稀疏网格上的每个非零单元映射到其真实几何材料组成，
+  //! 并预先提取/混合好材料核数据（Σ_f、ν_total/ν_delayed、χ 等）。
+  //! 这样计算分子/分母时就能直接查 cell_nuclear_data_，避免在 β_eff
+  //! 主循环里重复几何查找或核数据提取。
   void build_cell_material_map(const std::unordered_map<int, double>& flux);
 
   //! 生成规则网格采样位置

@@ -38,7 +38,7 @@ public:
   // max_iterations: 最大迭代次数
   // tolerance: 收敛容差
   void compute_adjoint_source(const std::string& initial_guess = "uniform",
-    int max_iterations = 1, double tolerance = 1.0e-6);
+    int max_iterations = 1000, double tolerance = 1.0e-6);
 
   // 启用/禁用每个batch后的伴随源迭代
   // enable: 是否启用batch级伴随源迭代

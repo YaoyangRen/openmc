@@ -595,7 +595,7 @@ void finalize_batch()
               << std::endl;
 
     // 计算伴随源分布（使用累积的FM）
-    simulation::fission_matrix->compute_batch_adjoint();
+    simulation::fission_matrix->compute_adjoint_source();
 
     // 输出到文件
     simulation::fission_matrix->finalize("fission_matrix.h5");
