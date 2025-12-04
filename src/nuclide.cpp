@@ -1078,6 +1078,37 @@ double Nuclide::collapse_rate(int MT, double temperature,
   }
 }
 
+double Nuclide::collapse_rate_weighted(int MT, double temperature,
+  span<const double> energy, span<const double> flux,
+  const std::function<double(double)>& weight_fn) const
+{
+  assert(MT > 0);
+  assert(energy.size() > 0);
+  assert(energy.size() == flux.size() + 1);
+
+  int i_rx = reaction_index_[MT];
+  if (i_rx < 0)
+    return 0.0;
+  const auto& rx = reactions_[i_rx];
+
+  int64_t i_temp;
+  double f;
+  std::tie(i_temp, f) = this->find_temperature(temperature);
+
+  const auto& grid_low = grid_[i_temp].energy;
+  double rr_low = rx->collapse_rate_weighted(
+    i_temp, energy, flux, grid_low, weight_fn);
+
+  if (f > 0.0) {
+    const auto& grid_high = grid_[i_temp + 1].energy;
+    double rr_high = rx->collapse_rate_weighted(
+      i_temp + 1, energy, flux, grid_high, weight_fn);
+    return rr_low + f * (rr_high - rr_low);
+  }
+
+  return rr_low;
+}
+
 //==============================================================================
 // Non-member functions
 //==============================================================================

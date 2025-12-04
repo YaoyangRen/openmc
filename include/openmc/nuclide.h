@@ -4,6 +4,7 @@
 #ifndef OPENMC_NUCLIDE_H
 #define OPENMC_NUCLIDE_H
 
+#include <functional>
 #include <unordered_map>
 #include <utility> // for pair
 
@@ -83,6 +84,11 @@ public:
   //! \return Reaction rate
   double collapse_rate(int MT, double temperature, span<const double> energy,
     span<const double> flux) const;
+
+  //! Generalized reaction rate with an energy-dependent multiplier
+  double collapse_rate_weighted(int MT, double temperature,
+    span<const double> energy, span<const double> flux,
+    const std::function<double(double)>& weight_fn) const;
 
   //============================================================================
   // Data members

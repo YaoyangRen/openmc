@@ -4,6 +4,7 @@
 #ifndef OPENMC_REACTION_H
 #define OPENMC_REACTION_H
 
+#include <functional>
 #include <string>
 
 #include "hdf5.h"
@@ -51,6 +52,11 @@ public:
   //! \return Reaction rate
   double collapse_rate(int64_t i_temp, span<const double> energy,
     span<const double> flux, const vector<double>& grid) const;
+
+  //! \\brief Generalized collapse integral with an energy-dependent multiplier
+  double collapse_rate_weighted(int64_t i_temp, span<const double> energy,
+    span<const double> flux, const vector<double>& grid,
+    const std::function<double(double)>& weight_fn) const;
 
   //! Cross section at a single temperature
   struct TemperatureXS {

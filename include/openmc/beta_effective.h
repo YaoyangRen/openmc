@@ -154,6 +154,9 @@ private:
   //! 校验 (并必要时设置) 通量/共轭通量的能群一致性
   void validate_group_metadata();
 
+  //! 根据正向通量文件构建能谱折算权重
+  void initialize_flux_spectrum_weights();
+
   //! 根据当前能量网格返回能群索引 (落在区间外时夹紧)
   int group_index_from_energy(double energy_eV) const;
 
@@ -187,6 +190,7 @@ private:
   std::unordered_map<int, std::vector<double>> adjoint_group_map_;
   bool flux_has_group_data_ {false};
   bool adjoint_has_group_data_ {false};
+  std::vector<double> flux_collapse_weights_; //!< 归一化通量权重(按能群)
 
   // Phase 2.3: 多点采样统计
   int n_heterogeneous_cells_ {0}; //!< 包含多材料的单元数

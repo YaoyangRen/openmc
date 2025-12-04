@@ -116,6 +116,15 @@ double Reaction::xs(const NuclideMicroXS& micro) const
 double Reaction::collapse_rate(int64_t i_temp, span<const double> energy,
   span<const double> flux, const vector<double>& grid) const
 {
+  auto unit_weight = [](double) { return 1.0; };
+  return collapse_rate_weighted(i_temp, energy, flux, grid, unit_weight);
+}
+
+double Reaction::collapse_rate_weighted(int64_t i_temp,
+  span<const double> energy, span<const double> flux,
+  const vector<double>& grid,
+  const std::function<double(double)>& weight_fn) const
+{
   // Find index corresponding to first energy
   const auto& xs = xs_[i_temp].value;
   int i_low = lower_bound_index(grid.cbegin(), grid.cend(), energy.front());
@@ -146,7 +155,6 @@ double Reaction::collapse_rate(int64_t i_temp, span<const double> energy,
 
     // Loop over energy grid points within [E_group_low, E_group_high]
     for (; i_low <= i_high; ++i_low) {
-      // Determine bounding grid energies and cross sections
       double E_l = grid[i_low];
       double E_r = grid[i_low + 1];
       if (E_l == E_r)
@@ -155,24 +163,24 @@ double Reaction::collapse_rate(int64_t i_temp, span<const double> energy,
       double xs_l = xs[i_low - i_threshold];
       double xs_r = xs[i_low + 1 - i_threshold];
 
-      // Determine actual energies
       double E_low = std::max(E_group_low, E_l);
       double E_high = std::min(E_group_high, E_r);
 
-      // Determine average cross section across segment
       double m = (xs_r - xs_l) / (E_r - E_l);
       double xs_low = xs_l + m * (E_low - E_l);
       double xs_high = xs_l + m * (E_high - E_l);
       double xs_avg = 0.5 * (xs_low + xs_high);
 
-      // Add contribution from segment
+      double weight_low = weight_fn ? weight_fn(E_low) : 1.0;
+      double weight_high = weight_fn ? weight_fn(E_high) : 1.0;
+      double weight_avg = 0.5 * (weight_low + weight_high);
+
       double dE = (E_high - E_low);
-      xs_flux_sum += flux_per_eV * xs_avg * dE;
+      xs_flux_sum += flux_per_eV * xs_avg * weight_avg * dE;
     }
 
     i_low = i_high;
 
-    // Check for end of energy grid
     if (i_low + 1 == grid.size())
       break;
   }

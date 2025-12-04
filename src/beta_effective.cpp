@@ -17,6 +17,7 @@
 #include <functional>
 #include <iomanip>
 #include <iostream>
+#include <mutex>
 #include <numeric>
 #include <vector>
 
@@ -89,6 +90,7 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
 
   // 校验多群信息，确保输入网格一致
   validate_group_metadata();
+  initialize_flux_spectrum_weights();
 
   std::fill(beta_i_.begin(), beta_i_.end(), 0.0);
   std::fill(numerators_.begin(), numerators_.end(), 0.0);
@@ -299,51 +301,94 @@ void BetaEffective::validate_group_metadata()
   const bool flux_multi = flux_has_group_data_ && flux_n_groups_ > 1;
   const bool adjoint_multi = adjoint_has_group_data_ && adjoint_n_groups_ > 1;
 
-  if (flux_multi && adjoint_multi) {
-    if (flux_n_groups_ != adjoint_n_groups_) {
-      fatal_error("Flux and adjoint files provide different n_groups; cannot "
-                  "perform multi-group β_eff computation.");
+  if (!flux_multi || !adjoint_multi) {
+    fatal_error(
+      "Multi-group β_eff now requires both flux and adjoint HDF5 files to "
+      "provide matching group-resolved spectra."
+      " Please regenerate the inputs with multi-group tallies enabled.");
+  }
+
+  if (flux_n_groups_ != adjoint_n_groups_) {
+    fatal_error("Flux and adjoint files provide different n_groups; cannot "
+                "perform multi-group β_eff computation.");
+  }
+
+  n_energy_groups_ = flux_n_groups_;
+  energy_edges_common_.clear();
+
+  if (!flux_energy_edges_.empty() && !adjoint_energy_edges_.empty()) {
+    if (flux_energy_edges_.size() != adjoint_energy_edges_.size()) {
+      fatal_error("Flux and adjoint energy grids have different sizes."
+                  " Please ensure both files share identical edges.");
     }
 
-    n_energy_groups_ = flux_n_groups_;
-    energy_edges_common_.clear();
-
-    if (!flux_energy_edges_.empty() && !adjoint_energy_edges_.empty()) {
-      if (flux_energy_edges_.size() != adjoint_energy_edges_.size()) {
-        fatal_error("Flux and adjoint energy grids have different sizes."
-                    " Please ensure both files share identical edges.");
+    const double tol = 1e-8;
+    for (size_t i = 0; i < flux_energy_edges_.size(); ++i) {
+      double a = flux_energy_edges_[i];
+      double b = adjoint_energy_edges_[i];
+      if (std::abs(a - b) > tol * std::max(1.0, std::abs(a))) {
+        fatal_error("Flux/adjoint energy grid mismatch detected at edge " +
+                    std::to_string(i));
       }
-
-      const double tol = 1e-8;
-      for (size_t i = 0; i < flux_energy_edges_.size(); ++i) {
-        double a = flux_energy_edges_[i];
-        double b = adjoint_energy_edges_[i];
-        if (std::abs(a - b) > tol * std::max(1.0, std::abs(a))) {
-          fatal_error("Flux/adjoint energy grid mismatch detected at edge " +
-                      std::to_string(i));
-        }
-      }
-      energy_edges_common_ = flux_energy_edges_;
-    } else if (!flux_energy_edges_.empty()) {
-      energy_edges_common_ = flux_energy_edges_;
-    } else if (!adjoint_energy_edges_.empty()) {
-      energy_edges_common_ = adjoint_energy_edges_;
     }
+    energy_edges_common_ = flux_energy_edges_;
+  } else if (!flux_energy_edges_.empty()) {
+    energy_edges_common_ = flux_energy_edges_;
+  } else if (!adjoint_energy_edges_.empty()) {
+    energy_edges_common_ = adjoint_energy_edges_;
+  }
 
-    std::cout << "  Multi-group β_eff enabled (" << n_energy_groups_
-              << " energy groups)." << std::endl;
+  if (flux_group_map_.empty() || adjoint_group_map_.empty()) {
+    fatal_error("Flux/adjoint inputs declare multi-group data but contain no "
+                "group spectra; ensure tallies were written correctly.");
+  }
+
+  std::cout << "  Multi-group β_eff enabled (" << n_energy_groups_
+            << " energy groups)." << std::endl;
+  std::cout << "  Flux groups detected: " << flux_group_map_.size()
+            << ", adjoint groups detected: " << adjoint_group_map_.size()
+            << std::endl;
+}
+
+//------------------------------------------------------------------------------
+
+void BetaEffective::initialize_flux_spectrum_weights()
+{
+  if (n_energy_groups_ <= 1 || !flux_has_group_data_) {
+    flux_collapse_weights_.assign(1, 1.0);
+    return;
+  }
+
+  flux_collapse_weights_.assign(n_energy_groups_, 0.0);
+
+  for (const auto& [cell_idx, spectrum] : flux_group_map_) {
+    if (spectrum.size() != static_cast<size_t>(n_energy_groups_))
+      continue;
+
+    for (int g = 0; g < n_energy_groups_; ++g) {
+      double value = spectrum[g];
+      if (value > 0.0 && std::isfinite(value)) {
+        flux_collapse_weights_[g] += value;
+      }
+    }
+  }
+
+  double total = std::accumulate(
+    flux_collapse_weights_.begin(), flux_collapse_weights_.end(), 0.0);
+
+  if (total <= 0.0) {
+    double uniform = 1.0 / static_cast<double>(n_energy_groups_);
+    std::fill(
+      flux_collapse_weights_.begin(), flux_collapse_weights_.end(), uniform);
+    std::cout
+      << "  Flux spectrum not available; using uniform collapse weights."
+      << std::endl;
   } else {
-    if (flux_multi != adjoint_multi) {
-      warning("Only one of flux/adjoint inputs contains group data; falling "
-              "back to single-group β_eff evaluation.");
+    for (double& value : flux_collapse_weights_) {
+      value /= total;
     }
-
-    n_energy_groups_ = 1;
-    energy_edges_common_.clear();
-    flux_group_map_.clear();
-    adjoint_group_map_.clear();
-    flux_has_group_data_ = false;
-    adjoint_has_group_data_ = false;
+    std::cout << "  Flux-weighted collapse enabled using spectrum from "
+              << flux_group_map_.size() << " mesh cells." << std::endl;
   }
 }
 
@@ -524,6 +569,13 @@ double BetaEffective::compute_delayed_numerator_material(int group,
     n_energy_groups_ > 1 && flux_has_group_data_ && adjoint_has_group_data_ &&
     !flux_group_map_.empty() && !adjoint_group_map_.empty();
 
+  static bool notified = false;
+  if (!notified) {
+    std::cout << "  [debug] use_multi_group = "
+              << (use_multi_group ? "true" : "false") << std::endl;
+    notified = true;
+  }
+
   std::vector<double> terms;
   terms.reserve(use_multi_group ? flux.size() * n_energy_groups_ : flux.size());
 
@@ -559,23 +611,15 @@ double BetaEffective::compute_delayed_numerator_material(int group,
       continue;
     }
 
-    auto group_value = [&](const std::vector<double>& values, double fallback,
-                         int g) {
-      if (values.size() == static_cast<size_t>(n_energy_groups_)) {
-        return values[g];
-      }
-      return fallback;
-    };
-
-    auto delayed_value = [&](const std::vector<double>& values,
-                           const std::array<double, 8>& fallback, int g) {
-      size_t expected =
-        static_cast<size_t>(n_energy_groups_) * N_DELAYED_GROUPS;
-      if (values.size() == expected) {
-        return values[delayed_offset(g, group)];
-      }
-      return fallback[group];
-    };
+    if (nuc_data.sigma_f_groups.size() !=
+          static_cast<size_t>(n_energy_groups_) ||
+        nuc_data.nu_delayed_groups.size() !=
+          static_cast<size_t>(n_energy_groups_) * N_DELAYED_GROUPS ||
+        nuc_data.chi_delayed_groups.size() !=
+          static_cast<size_t>(n_energy_groups_) * N_DELAYED_GROUPS) {
+      fatal_error("Material " + nuc_data.material_name +
+                  " missing multi-group delayed data.");
+    }
 
     for (int g = 0; g < n_energy_groups_; ++g) {
       double phi_g = flux_groups[g];
@@ -583,12 +627,11 @@ double BetaEffective::compute_delayed_numerator_material(int group,
       if (phi_g == 0.0 || phi_star_g == 0.0)
         continue;
 
-      double sigma_f_g =
-        group_value(nuc_data.sigma_f_groups, nuc_data.sigma_f, g);
+      double sigma_f_g = nuc_data.sigma_f_groups[g];
       double nu_delayed_g =
-        delayed_value(nuc_data.nu_delayed_groups, nuc_data.nu_delayed, g);
+        nuc_data.nu_delayed_groups[delayed_offset(g, group)];
       double chi_delayed_g =
-        delayed_value(nuc_data.chi_delayed_groups, nuc_data.chi_delayed, g);
+        nuc_data.chi_delayed_groups[delayed_offset(g, group)];
 
       double term =
         phi_star_g * chi_delayed_g * nu_delayed_g * sigma_f_g * phi_g * volume;
@@ -609,12 +652,8 @@ double BetaEffective::compute_denominator_material(
   const std::unordered_map<int, double>& flux,
   const std::unordered_map<int, double>& adjoint_flux, double volume) const
 {
-  const bool use_multi_group =
-    n_energy_groups_ > 1 && flux_has_group_data_ && adjoint_has_group_data_ &&
-    !flux_group_map_.empty() && !adjoint_group_map_.empty();
-
   std::vector<double> terms;
-  terms.reserve(use_multi_group ? flux.size() * n_energy_groups_ : flux.size());
+  terms.reserve(flux.size() * n_energy_groups_);
 
   for (const auto& [cell_idx, phi] : flux) {
     auto it_adj_total = adjoint_flux.find(cell_idx);
@@ -627,14 +666,6 @@ double BetaEffective::compute_denominator_material(
 
     const auto& nuc_data = it_data->second;
 
-    if (!use_multi_group) {
-      double phi_star = it_adj_total->second;
-      double term =
-        phi_star * nuc_data.nu_total * nuc_data.sigma_f * phi * volume;
-      terms.push_back(term);
-      continue;
-    }
-
     auto it_flux_groups = flux_group_map_.find(cell_idx);
     auto it_adj_groups = adjoint_group_map_.find(cell_idx);
     if (it_flux_groups == flux_group_map_.end() ||
@@ -645,16 +676,19 @@ double BetaEffective::compute_denominator_material(
     const auto& adjoint_groups = it_adj_groups->second;
     if (flux_groups.size() != static_cast<size_t>(n_energy_groups_) ||
         adjoint_groups.size() != static_cast<size_t>(n_energy_groups_)) {
-      continue;
+      fatal_error("Cell " + std::to_string(cell_idx) +
+                  " is missing multi-group flux data.");
     }
 
-    auto group_value = [&](const std::vector<double>& values, double fallback,
-                         int g) {
-      if (values.size() == static_cast<size_t>(n_energy_groups_)) {
-        return values[g];
-      }
-      return fallback;
-    };
+    if (nuc_data.sigma_f_groups.size() !=
+          static_cast<size_t>(n_energy_groups_) ||
+        nuc_data.nu_total_groups.size() !=
+          static_cast<size_t>(n_energy_groups_) ||
+        nuc_data.chi_prompt_groups.size() !=
+          static_cast<size_t>(n_energy_groups_)) {
+      fatal_error("Material " + nuc_data.material_name +
+                  " missing multi-group nuclear data.");
+    }
 
     for (int g = 0; g < n_energy_groups_; ++g) {
       double phi_g = flux_groups[g];
@@ -662,12 +696,9 @@ double BetaEffective::compute_denominator_material(
       if (phi_g == 0.0 || phi_star_g == 0.0)
         continue;
 
-      double sigma_f_g =
-        group_value(nuc_data.sigma_f_groups, nuc_data.sigma_f, g);
-      double nu_total_g =
-        group_value(nuc_data.nu_total_groups, nuc_data.nu_total, g);
-      double chi_prompt_g =
-        group_value(nuc_data.chi_prompt_groups, nuc_data.chi_prompt, g);
+      double sigma_f_g = nuc_data.sigma_f_groups[g];
+      double nu_total_g = nuc_data.nu_total_groups[g];
+      double chi_prompt_g = nuc_data.chi_prompt_groups[g];
 
       double term =
         phi_star_g * chi_prompt_g * nu_total_g * sigma_f_g * phi_g * volume;
@@ -718,9 +749,23 @@ MaterialNuclearData BetaEffective::extract_material_nuclear_data(
     return data; // 非裂变材料，返回零值
   }
 
-  const int n_groups = std::max(1, n_energy_groups_);
+  const int n_groups = n_energy_groups_;
+  if (n_groups <= 1) {
+    fatal_error("Material data extraction requires multi-group inputs.");
+  }
   const size_t delayed_group_size =
     static_cast<size_t>(n_groups) * N_DELAYED_GROUPS;
+
+  if (energy_edges_common_.size() != static_cast<size_t>(n_groups + 1)) {
+    fatal_error("Multi-group β_eff requires a shared energy grid with "
+                "n_groups + 1 edges.");
+  }
+
+  std::vector<double> collapse_weights(
+    n_groups, 1.0 / static_cast<double>(n_groups));
+  if (flux_collapse_weights_.size() == static_cast<size_t>(n_groups)) {
+    collapse_weights = flux_collapse_weights_;
+  }
 
   std::vector<double> chi_prompt_acc(n_groups, 0.0);
   std::vector<double> chi_delayed_acc(delayed_group_size, 0.0);
@@ -739,6 +784,18 @@ MaterialNuclearData BetaEffective::extract_material_nuclear_data(
   // 对材料中的每个裂变核素累加核数据
   // 使用原子密度和裂变截面加权平均: ν̄ = Σ(N_i σ_f,i ν_i) / Σ(N_i σ_f,i)
   double total_fission_density = 0.0; // Σ(N_i × σ_f,i)
+  std::vector<double> sigma_f_group_sum(n_groups, 0.0);
+  std::vector<double> fission_density_group_sum(n_groups, 0.0);
+  std::vector<double> nu_total_group_accum(n_groups, 0.0);
+  std::vector<double> nu_prompt_group_accum(n_groups, 0.0);
+  std::vector<double> nu_delayed_group_accum(delayed_group_size, 0.0);
+  std::vector<double> nu_total_nuc_groups(n_groups, 0.0);
+  std::vector<double> nu_prompt_nuc_groups(n_groups, 0.0);
+  std::vector<std::array<double, N_DELAYED_GROUPS>> nu_delayed_nuc_groups(
+    n_groups);
+  for (int g = 0; g < n_groups; ++g) {
+    nu_delayed_nuc_groups[g].fill(0.0);
+  }
 
   auto nuclides = mat->nuclides();
   auto densities = mat->densities();
@@ -769,143 +826,107 @@ MaterialNuclearData BetaEffective::extract_material_nuclear_data(
     if (!nuc->fissionable_)
       continue;
 
-    //==========================================================================
-    // 1. 获取裂变截面 σ_f(E, T)
-    // 使用 collapse_rate() 方法: 在单能量点计算截面
-    // collapse_rate(MT, temperature, energy, flux) -> 返回反应率
-    // MT=18 代表裂变反应
-    // atom_density 单位: atom/b-cm (OpenMC 标准单位)
-    // sigma_f_nuc 单位: barn
-    // 宏观裂变截面贡献: N_i × σ_f,i
-    // 结果单位: (atom/b-cm) × barn = atom/cm = cm⁻¹ (宏观截面)
-
-    double sigma_f_nuc = 0.0; // 微观裂变截面 (barns)
-
-    try {
-      // 方法: 使用 collapse_rate 计算单能群截面
-      // 注意: energy.size() 必须等于 flux.size() + 1 (能量边界)
-      // 对于单能群，需要 2 个能量边界和 1 个通量权重
-      // 使用窄能群近似单能量点: [E_ref - δE, E_ref + δE]
-      const double dE = E_ref * 0.001; // 0.1% 能量宽度
-      std::vector<double> energy_grid = {E_ref - dE, E_ref + dE}; // 2 个边界
-      std::vector<double> flux_weight = {1.0}; // 1 个能群的通量权重
-
-      // collapse_rate 参数: (MT, temperature [K], energy [eV], flux)
-      const int MT_FISSION = 18;
-
-      // 直接使用参考温度 T_ref (K)
-      sigma_f_nuc =
-        nuc->collapse_rate(MT_FISSION, T_ref, energy_grid, flux_weight);
-
-    } catch (...) {
-      // 如果 collapse_rate 失败，尝试备用方法
-      warning("Failed to extract cross section for " + nuc->name_ +
-              ", using fallback method");
-
-      // 备用方法: 直接查表 (需要能量网格索引)
-      // 这里使用热中子典型值作为后备
-      std::string nuc_name = nuc->name_;
-      if (nuc_name.find("U235") != std::string::npos) {
-        sigma_f_nuc = 584.4; // barns at 0.0253 eV
-      } else if (nuc_name.find("Pu239") != std::string::npos) {
-        sigma_f_nuc = 747.4;
-      } else if (nuc_name.find("Pu241") != std::string::npos) {
-        sigma_f_nuc = 1009.0;
-      } else {
-        sigma_f_nuc = 584.4; // 默认使用 U-235
-      }
-    }
-    double macro_sigma_f = atom_density * sigma_f_nuc; // 宏观截面
+    std::string nuc_name = nuc->name_;
+    const int MT_FISSION = 18;
 
     //==========================================================================
-    // 2. 获取中子产额 ν(E)
-    // 使用 Nuclide::nu(E, mode, group) 方法
-    // EmissionMode: prompt (瞬发), delayed (缓发), total (总和)
-
-    double nu_total_nuc = 0.0;
-    double nu_prompt_nuc = 0.0;
-    std::array<double, 8> nu_delayed_nuc = {}; // 8组缓发中子产额
-
-    try {
-      // 获取总中子产额
-      nu_total_nuc = nuc->nu(E_ref, ReactionProduct::EmissionMode::total, 0);
-
-      // 获取瞬发中子产额
-      nu_prompt_nuc = nuc->nu(E_ref, ReactionProduct::EmissionMode::prompt, 0);
-
-      // 获取缓发中子产额
-      // 直接访问 products_ 数组，检查粒子类型和发射模式
-      // products_[0] = 瞬发中子
-      // products_[1..N] = 可能是缓发中子、光子等其他产物
-
-      // 先获取总缓发产额用于验证
-      double nu_delayed_total =
-        nuc->nu(E_ref, ReactionProduct::EmissionMode::delayed, 0);
-
-      if (nu_delayed_total < 1e-10) {
-        // 没有缓发中子数据
-        nu_delayed_nuc.fill(0.0);
-      } else {
-        // 遍历裂变反应的产物，只提取缓发中子
-        if (!nuc->fission_rx_.empty()) {
-          const auto& fission = nuc->fission_rx_[0];
-          int delayed_group_idx = 0; // 缓发群索引 (0-7)
-
-          for (int i = 1;
-            i < fission->products_.size() && delayed_group_idx < 8; ++i) {
-            const auto& product = fission->products_[i];
-
-            // 检查是否是中子且是缓发发射
-            if (product.particle_ == ParticleType::neutron &&
-                product.emission_mode_ ==
-                  ReactionProduct::EmissionMode::delayed) {
-
-              // 提取该组的中子产额
-              double nu_d = (*product.yield_)(E_ref);
-              nu_delayed_nuc[delayed_group_idx] = nu_d;
-              delayed_group_idx++;
-            }
-          }
-
-          // 剩余组设为0
-          for (int g = delayed_group_idx; g < 8; ++g) {
-            nu_delayed_nuc[g] = 0.0;
-          }
-        } else {
-          // 没有裂变反应数据
-          nu_delayed_nuc.fill(0.0);
+    // 1 & 2. 统一能群折合的 Σ_f 与 ν
+    std::vector<double> sigma_f_nuc_groups(n_groups, 0.0);
+    std::vector<double> macro_sigma_groups(n_groups, 0.0);
+    std::array<const Function1D*, N_DELAYED_GROUPS> delayed_yield_funcs {};
+    delayed_yield_funcs.fill(nullptr);
+    if (!nuc->fission_rx_.empty()) {
+      const auto* fission_rx = nuc->fission_rx_[0];
+      int delayed_group_idx = 0;
+      for (int i_prod = 1; i_prod < fission_rx->products_.size() &&
+                           delayed_group_idx < N_DELAYED_GROUPS;
+        ++i_prod) {
+        const auto& product = fission_rx->products_[i_prod];
+        if (product.particle_ == ParticleType::neutron &&
+            product.emission_mode_ == ReactionProduct::EmissionMode::delayed) {
+          delayed_yield_funcs[delayed_group_idx] = product.yield_.get();
+          delayed_group_idx++;
         }
       }
+    }
 
-    } catch (...) {
-      // 如果 nu() 方法失败，使用备用硬编码数据
-      warning(
-        "Failed to extract nu for " + nuc->name_ + ", using fallback data");
+    std::vector<double> group_flux(n_groups, 0.0);
+    static std::once_flag collapse_log_flag;
+    std::call_once(collapse_log_flag, [&]() {
+      std::cout << "  [debug] Using collapse_rate_weighted for material "
+                << data.material_name << std::endl;
+    });
+    auto collapse_sigma_group = [&](int g) {
+      std::fill(group_flux.begin(), group_flux.end(), 0.0);
+      group_flux[g] = 1.0;
+      return nuc->collapse_rate(
+        MT_FISSION, T_ref, energy_edges_common_, group_flux);
+    };
+    auto collapse_sigma_weighted = [&](int g,
+                                     const std::function<double(double)>& fn) {
+      std::fill(group_flux.begin(), group_flux.end(), 0.0);
+      group_flux[g] = 1.0;
+      return nuc->collapse_rate_weighted(
+        MT_FISSION, T_ref, energy_edges_common_, group_flux, fn);
+    };
 
-      std::string nuc_name = nuc->name_;
-      if (nuc_name.find("U235") != std::string::npos) {
-        nu_total_nuc = 2.43;
-        nu_prompt_nuc = 2.42;
-        // U-235 典型6组数据，第7-8组为0
-        nu_delayed_nuc = {
-          0.000215, 0.001424, 0.001274, 0.002568, 0.000748, 0.000273, 0.0, 0.0};
-      } else if (nuc_name.find("Pu239") != std::string::npos) {
-        nu_total_nuc = 2.88;
-        nu_prompt_nuc = 2.86;
-        nu_delayed_nuc = {
-          0.000065, 0.000539, 0.000425, 0.000799, 0.000277, 0.000091, 0.0, 0.0};
-      } else if (nuc_name.find("Pu241") != std::string::npos) {
-        nu_total_nuc = 2.93;
-        nu_prompt_nuc = 2.91;
-        nu_delayed_nuc = {
-          0.000066, 0.000496, 0.000471, 0.000869, 0.000259, 0.000079, 0.0, 0.0};
-      } else {
-        // 默认使用 U-235
-        nu_total_nuc = 2.43;
-        nu_prompt_nuc = 2.42;
-        nu_delayed_nuc = {
-          0.000215, 0.001424, 0.001274, 0.002568, 0.000748, 0.000273, 0.0, 0.0};
+    std::function<double(double)> nu_total_weight = [&](double E) {
+      return nuc->nu(E, ReactionProduct::EmissionMode::total, 0);
+    };
+    std::function<double(double)> nu_prompt_weight = [&](double E) {
+      return nuc->nu(E, ReactionProduct::EmissionMode::prompt, 0);
+    };
+
+    std::array<std::function<double(double)>, N_DELAYED_GROUPS>
+      delayed_weight_fns;
+    for (int d = 0; d < N_DELAYED_GROUPS; ++d) {
+      const Function1D* yield_fn = delayed_yield_funcs[d];
+      delayed_weight_fns[d] = [yield_fn](double E) -> double {
+        if (!yield_fn)
+          return 0.0;
+        double val = (*yield_fn)(E);
+        return val > 0.0 ? val : 0.0;
+      };
+    }
+
+    for (int g = 0; g < n_groups; ++g) {
+      double sigma_avg = 0.0;
+      try {
+        sigma_avg = collapse_sigma_group(g);
+      } catch (...) {
+        sigma_avg = 0.0;
       }
+      sigma_avg = std::max(0.0, sigma_avg);
+      sigma_f_nuc_groups[g] = sigma_avg;
+
+      if (sigma_avg > 0.0) {
+        double nu_total_weighted = collapse_sigma_weighted(g, nu_total_weight);
+        nu_total_nuc_groups[g] = nu_total_weighted / sigma_avg;
+
+        double nu_prompt_weighted =
+          collapse_sigma_weighted(g, nu_prompt_weight);
+        nu_prompt_nuc_groups[g] = nu_prompt_weighted / sigma_avg;
+
+        for (int d = 0; d < N_DELAYED_GROUPS; ++d) {
+          double nu_delayed_weighted =
+            collapse_sigma_weighted(g, delayed_weight_fns[d]);
+          nu_delayed_nuc_groups[g][d] = nu_delayed_weighted / sigma_avg;
+        }
+      } else {
+        nu_total_nuc_groups[g] = 0.0;
+        nu_prompt_nuc_groups[g] = 0.0;
+        for (int d = 0; d < N_DELAYED_GROUPS; ++d) {
+          nu_delayed_nuc_groups[g][d] = 0.0;
+        }
+      }
+    }
+
+    double macro_sigma_f = 0.0;
+    for (int g = 0; g < n_groups; ++g) {
+      macro_sigma_groups[g] = atom_density * sigma_f_nuc_groups[g];
+      sigma_f_group_sum[g] += macro_sigma_groups[g];
+      fission_density_group_sum[g] += macro_sigma_groups[g];
+      macro_sigma_f += macro_sigma_groups[g];
     }
 
     //==========================================================================
@@ -990,25 +1011,25 @@ MaterialNuclearData BetaEffective::extract_material_nuclear_data(
     total_fission_density += macro_sigma_f;
 
     data.sigma_f += macro_sigma_f;
-    data.nu_total += macro_sigma_f * nu_total_nuc;
-    data.nu_prompt += macro_sigma_f * nu_prompt_nuc;
 
-    for (int g = 0; g < 8; ++g) {
-      data.nu_delayed[g] += macro_sigma_f * nu_delayed_nuc[g];
+    for (int g = 0; g < n_groups; ++g) {
+      double macro_sigma = macro_sigma_groups[g];
+      if (macro_sigma <= 0.0)
+        continue;
+
+      nu_total_group_accum[g] += macro_sigma * nu_total_nuc_groups[g];
+      nu_prompt_group_accum[g] += macro_sigma * nu_prompt_nuc_groups[g];
+
+      for (int d = 0; d < N_DELAYED_GROUPS; ++d) {
+        nu_delayed_group_accum[delayed_offset(g, d)] +=
+          macro_sigma * nu_delayed_nuc_groups[g][d];
+      }
     }
   }
 
   //==========================================================================
   // 4. 归一化 (除以总裂变密度)
   if (total_fission_density > 0.0) {
-    data.nu_total /= total_fission_density;
-    data.nu_prompt /= total_fission_density;
-
-    // 归一化中子产额
-    for (int g = 0; g < 8; ++g) {
-      data.nu_delayed[g] /= total_fission_density;
-    }
-
     if (prompt_sampled) {
       for (double& value : chi_prompt_acc) {
         value /= total_fission_density;
@@ -1045,15 +1066,52 @@ MaterialNuclearData BetaEffective::extract_material_nuclear_data(
   data.chi_prompt_groups = chi_prompt_acc;
   data.chi_delayed_groups = chi_delayed_acc;
 
-  data.sigma_f_groups.assign(n_groups, data.sigma_f);
-  data.nu_total_groups.assign(n_groups, data.nu_total);
-  data.nu_prompt_groups.assign(n_groups, data.nu_prompt);
+  data.sigma_f_groups = sigma_f_group_sum;
+  data.nu_total_groups.assign(n_groups, 0.0);
+  data.nu_prompt_groups.assign(n_groups, 0.0);
+  data.nu_delayed_groups = nu_delayed_group_accum;
 
-  data.nu_delayed_groups.assign(delayed_group_size, 0.0);
   for (int g = 0; g < n_groups; ++g) {
-    for (int d = 0; d < N_DELAYED_GROUPS; ++d) {
-      data.nu_delayed_groups[delayed_offset(g, d)] = data.nu_delayed[d];
+    double denom = fission_density_group_sum[g];
+    if (denom > 0.0) {
+      data.nu_total_groups[g] = nu_total_group_accum[g] / denom;
+      data.nu_prompt_groups[g] = nu_prompt_group_accum[g] / denom;
+      for (int d = 0; d < N_DELAYED_GROUPS; ++d) {
+        data.nu_delayed_groups[delayed_offset(g, d)] /= denom;
+      }
     }
+  }
+
+  auto flux_weighted_average = [&](const std::vector<double>& per_group) {
+    double used_weight = 0.0;
+    double accum = 0.0;
+    for (int g = 0; g < n_groups; ++g) {
+      double weight = collapse_weights[g];
+      if (weight <= 0.0)
+        continue;
+      if (fission_density_group_sum[g] <= 0.0)
+        continue;
+      accum += weight * per_group[g];
+      used_weight += weight;
+    }
+    if (used_weight > 0.0) {
+      return accum / used_weight;
+    }
+    if (!per_group.empty()) {
+      return per_group.front();
+    }
+    return 0.0;
+  };
+
+  data.nu_total = flux_weighted_average(data.nu_total_groups);
+  data.nu_prompt = flux_weighted_average(data.nu_prompt_groups);
+
+  for (int d = 0; d < N_DELAYED_GROUPS; ++d) {
+    std::vector<double> delayed_slice(n_groups, 0.0);
+    for (int g = 0; g < n_groups; ++g) {
+      delayed_slice[g] = data.nu_delayed_groups[delayed_offset(g, d)];
+    }
+    data.nu_delayed[d] = flux_weighted_average(delayed_slice);
   }
 
   return data;
