@@ -92,6 +92,67 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
   validate_group_metadata();
   initialize_flux_spectrum_weights();
 
+  //============================这段代码用于调试=================================
+  // 调试输出：基于核数据的材料 β_i（不含通量和共轭通量权重）
+  // 用户可以根据材料 id 调整此处参数，用于与 MCNP 的材料 β_i 对比。
+  // 这里只打印一次，不影响后续 β_eff 计算。
+  int debug_material_id = 1; // TODO: 根据模型实际材料 id 修改
+  try {
+    auto debug_data = extract_material_nuclear_data(debug_material_id);
+    if (debug_data.is_fissionable && !debug_data.sigma_f_groups.empty() &&
+        !debug_data.nu_total_groups.empty() &&
+        !debug_data.nu_delayed_groups.empty()) {
+      const int G = static_cast<int>(debug_data.sigma_f_groups.size());
+      const int I = N_DELAYED_GROUPS;
+
+      std::vector<double> num(I, 0.0);
+      double den = 0.0;
+
+      for (int g = 0; g < G; ++g) {
+        double SigmaF = debug_data.sigma_f_groups[g];
+        double nu_tot = debug_data.nu_total_groups[g];
+        if (SigmaF <= 0.0)
+          continue;
+
+        den += nu_tot * SigmaF;
+
+        for (int i = 0; i < I; ++i) {
+          int off = delayed_offset(g, i);
+          if (off >= 0 &&
+              off < static_cast<int>(debug_data.nu_delayed_groups.size())) {
+            double nu_d = debug_data.nu_delayed_groups[off];
+            num[i] += nu_d * SigmaF;
+          }
+        }
+      }
+
+      std::cout << "\n[DEBUG] Library-based beta_i for material "
+                << debug_data.material_name << " (id=" << debug_material_id
+                << ")" << std::endl;
+      double beta_sum = 0.0;
+      for (int i = 0; i < I; ++i) {
+        double beta_i = (den > 0.0) ? num[i] / den : 0.0;
+        beta_sum += beta_i;
+        std::cout << "  group " << (i + 1)
+                  << ": beta_i = " << std::setprecision(8) << beta_i
+                  << std::endl;
+      }
+      std::cout << "  total beta = " << std::setprecision(8) << beta_sum << "\n"
+                << std::endl;
+    } else {
+      std::cout << "\n[DEBUG] Material id " << debug_material_id
+                << " is non-fissionable or missing group data; "
+                << "skip library beta_i debug.\n";
+    }
+  } catch (const std::exception& e) {
+    std::cout
+      << "\n[DEBUG] Failed to compute library-based beta_i for material "
+      << debug_material_id << ": " << e.what() << "\n";
+  }
+//=============================================================================
+
+
+
   std::fill(beta_i_.begin(), beta_i_.end(), 0.0);
   std::fill(numerators_.begin(), numerators_.end(), 0.0);
   denominator_ = 0.0;
