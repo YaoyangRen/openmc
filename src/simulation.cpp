@@ -422,12 +422,6 @@ void initialize_batch()
   if (!simulation::fission_matrix) {
     simulation::fission_matrix =
       std::make_unique<FissionMatrix>(shared_grid, settings::n_batches);
-
-    // 启用batch级伴随源迭代（每个batch执行10次迭代）
-    simulation::fission_matrix->enable_batch_adjoint_iteration(true, // 启用
-      10,    // 每batch迭代10次
-      1.0e-6 // 收敛容差
-    );
   }
 
   // Initialize flux mesh (通量分布网格)
@@ -462,7 +456,7 @@ void initialize_batch()
   //   }
   // }
 
-  // 选项 3: 仅在非活跃代运行裂变矩阵（当前激活）✓
+  // 选项 3: 仅在非活跃代运行裂变矩阵
   // if (settings::clutch_on &&
   //     simulation::current_batch <= settings::n_inactive) {
   //   if (simulation::fission_matrix) {
@@ -470,7 +464,7 @@ void initialize_batch()
   //   }
   // }
 
-  // 选项 4: 裂变矩阵仅在非活跃代运行（独立于clutch_on）
+  // 选项 4: 裂变矩阵仅在非活跃代运行
   if (simulation::fission_matrix &&
       simulation::current_batch <= settings::n_inactive) {
     simulation::fission_matrix->start_new_batch(simulation::current_batch);
@@ -595,7 +589,9 @@ void finalize_batch()
               << std::endl;
 
     // 计算伴随源分布（使用累积的FM）
-    simulation::fission_matrix->compute_adjoint_source();
+    simulation::fission_matrix->compute_adjoint_source(
+      settings::adjoint_initial_guess, settings::adjoint_max_iterations,
+      settings::adjoint_tolerance);
 
     // 输出到文件
     simulation::fission_matrix->finalize("fission_matrix.h5");

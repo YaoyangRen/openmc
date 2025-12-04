@@ -177,7 +177,13 @@ extern "C" int verbosity;          //!< How verbose to make output
 extern double weight_cutoff;       //!< Weight cutoff for Russian roulette
 extern double weight_survive;      //!< Survival weight after Russian roulette
 extern vector<double>
-  kinetics_energy_edges; //!< Energy group edges for kinetics outputs
+  kinetics_energy_edges; //!< Energy group edges for kinetics outputs ryy add
+
+// Adjoint source controls ryy add
+extern std::string
+  adjoint_initial_guess; //!< Initial guess for adjoint source iterations
+extern int adjoint_max_iterations; //!< Max iterations for adjoint solver
+extern double adjoint_tolerance;   //!< Convergence tolerance for adjoint solver
 
 } // namespace settings
 

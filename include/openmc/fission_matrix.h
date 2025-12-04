@@ -38,19 +38,7 @@ public:
   // max_iterations: 最大迭代次数
   // tolerance: 收敛容差
   void compute_adjoint_source(const std::string& initial_guess = "uniform",
-    int max_iterations = 1000, double tolerance = 1.0e-6);
-
-  // 启用/禁用每个batch后的伴随源迭代
-  // enable: 是否启用batch级伴随源迭代
-  // iterations_per_batch: 每个batch执行的迭代次数
-  // tolerance: 收敛容差
-  // start_batch: 从哪个batch开始统计（默认从第5个batch开始）
-  void enable_batch_adjoint_iteration(bool enable = true,
-    int iterations_per_batch = 10, double tolerance = 1.0e-6,
-    int start_batch = 5);
-
-  // 计算伴随源分布（用于最后一个非活跃batch）
-  void compute_batch_adjoint();
+    int max_iterations = 1, double tolerance = 1.0e-6);
 
   // 访问伴随源计算结果
   bool is_adjoint_computed() const { return adjoint_computed_; }

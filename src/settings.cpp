@@ -147,6 +147,10 @@ double weight_cutoff {0.25};
 double weight_survive {1.0};
 vector<double> kinetics_energy_edges;
 
+std::string adjoint_initial_guess {"uniform"};
+int adjoint_max_iterations {1};
+double adjoint_tolerance {1.0e-6};
+
 } // namespace settings
 
 //==============================================================================
@@ -1201,6 +1205,37 @@ void read_settings_xml(pugi::xml_node root)
     if (check_for_node(ww_checkpoints, "surface")) {
       weight_window_checkpoint_surface =
         get_node_value_bool(ww_checkpoints, "surface");
+    }
+  }
+
+  // Adjoint source iteration controls
+  if (check_for_node(root, "adjoint_source")) {
+    xml_node adj_node = root.child("adjoint_source");
+
+    if (check_for_node(adj_node, "initial_guess")) {
+      std::string guess = get_node_value(adj_node, "initial_guess");
+      to_lower(guess);
+      if (guess != "uniform" && guess != "forward") {
+        fatal_error(
+          "<adjoint_source>/<initial_guess> must be 'uniform' or 'forward'.");
+      }
+      adjoint_initial_guess = guess;
+    }
+
+    if (check_for_node(adj_node, "max_iterations")) {
+      int value = std::stoi(get_node_value(adj_node, "max_iterations"));
+      if (value <= 0) {
+        fatal_error("<adjoint_source>/<max_iterations> must be positive.");
+      }
+      adjoint_max_iterations = value;
+    }
+
+    if (check_for_node(adj_node, "tolerance")) {
+      double value = std::stod(get_node_value(adj_node, "tolerance"));
+      if (value <= 0.0) {
+        fatal_error("<adjoint_source>/<tolerance> must be positive.");
+      }
+      adjoint_tolerance = value;
     }
   }
 

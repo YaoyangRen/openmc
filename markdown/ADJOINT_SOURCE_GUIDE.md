@@ -162,6 +162,20 @@ fission_matrix->compute_adjoint_source(
 fission_matrix->finalize("fission_matrix.h5");
 ```
 
+### 方法3: 在 settings.xml 中统一配置迭代参数
+
+对于运行主程序时自动触发的 `simulation::fission_matrix->compute_adjoint_source()` 调用，可以在 `settings.xml` 添加一个 `<adjoint_source>` 区块，集中配置初始猜测、最大迭代次数以及收敛判据：
+
+```xml
+<adjoint_source>
+    <initial_guess>forward</initial_guess>   <!-- uniform 或 forward -->
+    <max_iterations>1000</max_iterations>    <!-- 正整数 -->
+    <tolerance>1.0e-6</tolerance>            <!-- 正实数 -->
+</adjoint_source>
+```
+
+不写该区块时默认使用 `uniform / 1 / 1e-6`。该配置同样会作用于 inactive 代结束时自动执行的伴随源迭代，确保批量跑批与手动调用采用一致的收敛参数。
+
 ### 完整示例
 
 ```cpp

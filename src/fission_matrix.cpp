@@ -123,81 +123,6 @@ void FissionMatrix::start_new_batch(int batch_id)
   source_birth_cells_.clear();
 }
 
-void FissionMatrix::compute_batch_adjoint()
-{
-  // 只在调用时计算一次伴随源（用于最后一个非活跃batch）
-  if (!enable_batch_adjoint_ || fission_matrix_sparse_.empty()) {
-    return;
-  }
-
-  std::lock_guard<std::mutex> lock(data_mutex_);
-
-  // 归一化累积的FM矩阵 F_norm[i][j] = F[i][j] / source_counts[i]
-  std::unordered_map<size_t, double> normalized_fm;
-  for (const auto& [key, value] : fission_matrix_sparse_) {
-    size_t row = key / grid_->n_cells();
-    double source_total = source_counts_[row];
-    if (source_total > 0.0) {
-      normalized_fm[key] = value / source_total;
-    }
-  }
-
-  // 单次计算: I_new = (1/keff) × F^T × I*
-  if (!normalized_fm.empty()) {
-    vector<double> I_new(grid_->n_cells(), 0.0);
-
-    for (const auto& [key, F_ij] : normalized_fm) {
-      size_t i = key / grid_->n_cells(); // 源单元（行）
-      size_t j = key % grid_->n_cells(); // 裂变单元（列）
-      I_new[j] += F_ij * adjoint_source_[i];
-    }
-
-    const double keff = reference_keff();
-    const double inv_keff = 1.0 / keff;
-    for (auto& value : I_new) {
-      value *= inv_keff;
-    }
-
-    double sum_new = std::accumulate(I_new.begin(), I_new.end(), 0.0);
-    if (sum_new > 0.0) {
-      const double inv_sum = 1.0 / sum_new;
-      double max_delta = 0.0;
-      for (size_t i = 0; i < grid_->n_cells(); ++i) {
-        double new_val = I_new[i] * inv_sum;
-        max_delta = std::max(max_delta, std::abs(new_val - adjoint_source_[i]));
-        adjoint_source_[i] = new_val;
-      }
-
-      keff_reference_ = keff;
-      adjoint_computed_ = true;
-      adjoint_iterations_ = 1;
-
-      std::cout << "\nAdjoint source computed using keff = " << std::fixed
-                << std::setprecision(6) << keff << std::endl;
-      std::cout << "  Max |ΔI*| = " << std::scientific << std::setprecision(2)
-                << max_delta << std::endl;
-    } else {
-      std::cout << "\nWarning: adjoint source sum is zero after keff scaling"
-                << std::endl;
-    }
-  }
-}
-void FissionMatrix::enable_batch_adjoint_iteration(
-  bool enable, int iterations_per_batch, double tolerance, int start_batch)
-{
-  enable_batch_adjoint_ = enable;
-  adjoint_max_iter_per_batch_ = iterations_per_batch;
-  adjoint_tolerance_ = tolerance;
-  adjoint_start_batch_ = start_batch;
-
-  if (enable) {
-    // 初始化伴随源为均匀分布
-    double norm = static_cast<double>(grid_->n_cells());
-    for (size_t i = 0; i < grid_->n_cells(); ++i) {
-      adjoint_source_[i] = 1.0 / norm;
-    }
-  }
-}
 
 void FissionMatrix::compute_adjoint_source(
   const std::string& initial_guess, int max_iterations, double tolerance)
@@ -383,7 +308,7 @@ void FissionMatrix::perform_adjoint_iteration(
     return;
   }
 
-  // 归一化裂变矩阵（临时存储�?
+  // 归一化裂变矩阵
   std::unordered_map<size_t, double> normalized_matrix;
   for (const auto& [key, value] : matrix_to_use) {
     size_t row = key / grid_->n_cells();
