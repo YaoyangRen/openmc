@@ -149,9 +149,7 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
       << "\n[DEBUG] Failed to compute library-based beta_i for material "
       << debug_material_id << ": " << e.what() << "\n";
   }
-//=============================================================================
-
-
+  //=============================================================================
 
   std::fill(beta_i_.begin(), beta_i_.end(), 0.0);
   std::fill(numerators_.begin(), numerators_.end(), 0.0);
