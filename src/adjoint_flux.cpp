@@ -343,11 +343,12 @@ void AdjointFlux::write_to_file(const std::string& filename)
   write_attribute(file_id, "description",
     "Adjoint flux computed from transfer function and adjoint source");
   write_attribute(file_id, "storage_format", "sparse");
-  write_attribute(file_id, "pitch", pitch_);
 
-  // 写入网格信息
+  // 写入网格信息（仅保留统一字段）
   write_dataset(file_id, "origin", origin_);
-  write_dataset(file_id, "shape", shape_);
+  write_dataset(file_id, "grid_shape", shape_);
+  std::array<double, 3> grid_pitch_array {pitch_, pitch_, pitch_};
+  write_dataset(file_id, "grid_pitch", grid_pitch_array);
   write_attribute(file_id, "n_cells", static_cast<int>(n_cells_));
   write_dataset(file_id, "n_groups", n_groups_);
   if (!energy_edges_.empty()) {
@@ -393,7 +394,8 @@ void AdjointFlux::write_to_file(const std::string& filename)
   }
 
   write_dataset(file_id, "cell_indices", sorted_indices);
-  write_dataset(file_id, "adjoint_flux_values", sorted_values);
+  // 统一字段名：仅写 flux_mean/flux_group_mean
+  write_dataset(file_id, "flux_mean", sorted_values);
 
   // 写入按索引对应的分群数据
   vector<double> sorted_group_values(group_values.size());
@@ -403,7 +405,7 @@ void AdjointFlux::write_to_file(const std::string& filename)
     std::copy_n(group_values.begin() + src_offset, n_groups_,
       sorted_group_values.begin() + dst_offset);
   }
-  write_dataset(file_id, "adjoint_flux_group_values", sorted_group_values);
+  write_dataset(file_id, "flux_group_mean", sorted_group_values);
 
   // 也写入稠密格式（可选，用于可视化）
   auto dense_flux = get_adjoint_flux_dense();

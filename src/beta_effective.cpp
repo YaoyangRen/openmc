@@ -303,10 +303,20 @@ void BetaEffective::read_adjoint_flux_data(const std::string& filename,
 
   // 读取网格参数
   std::array<int, 3> grid_shape;
-  read_dataset(file_id, "shape", grid_shape);
+  if (object_exists(file_id, "grid_shape")) {
+    read_dataset(file_id, "grid_shape", grid_shape);
+  } else {
+    read_dataset(file_id, "shape", grid_shape);
+  }
   shape = grid_shape;
 
-  read_attribute(file_id, "pitch", pitch);
+  if (object_exists(file_id, "grid_pitch")) {
+    std::array<double, 3> grid_pitch_array;
+    read_dataset(file_id, "grid_pitch", grid_pitch_array);
+    pitch = grid_pitch_array[0];
+  } else {
+    read_attribute(file_id, "pitch", pitch);
+  }
 
   if (object_exists(file_id, "n_groups")) {
     read_dataset(file_id, "n_groups", adjoint_n_groups_);
@@ -321,11 +331,21 @@ void BetaEffective::read_adjoint_flux_data(const std::string& filename,
   std::vector<double> adjoint_group_values;
 
   read_dataset(file_id, "cell_indices", cell_indices);
-  read_dataset(file_id, "adjoint_flux_values", adjoint_flux_values);
+  if (object_exists(file_id, "adjoint_flux_values")) {
+    read_dataset(file_id, "adjoint_flux_values", adjoint_flux_values);
+  } else {
+    read_dataset(file_id, "flux_mean", adjoint_flux_values);
+  }
 
-  if (adjoint_n_groups_ > 1 &&
-      object_exists(file_id, "adjoint_flux_group_values")) {
-    read_dataset(file_id, "adjoint_flux_group_values", adjoint_group_values);
+  if (adjoint_n_groups_ > 1) {
+    if (object_exists(file_id, "adjoint_flux_group_values")) {
+      read_dataset(file_id, "adjoint_flux_group_values", adjoint_group_values);
+    } else if (object_exists(file_id, "flux_group_mean")) {
+      read_dataset(file_id, "flux_group_mean", adjoint_group_values);
+    }
+  }
+
+  if (!adjoint_group_values.empty()) {
     size_t expected =
       static_cast<size_t>(adjoint_n_groups_) * cell_indices.size();
     if (adjoint_group_values.size() != expected) {
