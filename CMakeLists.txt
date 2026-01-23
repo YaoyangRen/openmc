@@ -453,6 +453,7 @@ list(APPEND libopenmc_SOURCES
   src/flux_mesh.cpp
   src/adjoint_flux.cpp
   src/beta_effective.cpp
+  src/material_nuclear_data.cpp
 )
 
 # Add bundled external dependencies

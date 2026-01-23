@@ -1,6 +1,8 @@
 #ifndef OPENMC_BETA_EFFECTIVE_H
 #define OPENMC_BETA_EFFECTIVE_H
 
+#include "openmc/material_nuclear_data.h"
+
 #include <array>
 #include <string>
 #include <unordered_map>
@@ -10,32 +12,6 @@ namespace openmc {
 
 // Forward declarations
 struct Position;
-
-//==============================================================================
-//! 材料核数据结构 (Phase 2 -> Phase 3)
-//! 存储单个材料的裂变相关核参数
-//==============================================================================
-struct MaterialNuclearData {
-  // --- 单能群参考值 (保留 Phase 2 兼容性) ---
-  double nu_total {0.0};                //!< 总裂变中子产额(参考能量)
-  double nu_prompt {0.0};               //!< 瞬发中子产额(参考能量)
-  std::array<double, 8> nu_delayed {};  //!< 8组缓发中子产额(参考能量)
-  double sigma_f {0.0};                 //!< 宏观裂变截面(参考能量, cm^-1)
-  double chi_prompt {1.0};              //!< 单群瞬发能谱权重
-  std::array<double, 8> chi_delayed {}; //!< 单群缓发能谱权重
-
-  // --- 多能群扩展数据 (与 flux/adjoint energy grid 对齐) ---
-  std::vector<double> sigma_f_groups;     //!< Σ_f,g (cm^-1)
-  std::vector<double> nu_total_groups;    //!< ν_total,g
-  std::vector<double> nu_prompt_groups;   //!< ν_prompt,g
-  std::vector<double> nu_delayed_groups;  //!< ν_delayed,g,i (flat: g-major)
-  std::vector<double> chi_prompt_groups;  //!< χ_prompt,g
-  std::vector<double> chi_delayed_groups; //!< χ_delayed,g,i (flat)
-
-  int material_id {-1};        //!< 材料ID
-  std::string material_name;   //!< 材料名称
-  bool is_fissionable {false}; //!< 是否可裂变
-};
 
 //==============================================================================
 //! 多点采样加权模式枚举 (Phase 2.3)
@@ -83,7 +59,7 @@ public:
   double get_beta_total() const { return beta_total_; }
 
   //! 获取所有缓发群的 β_i,eff
-  const std::array<double, 8>& get_all_beta_i() const { return beta_i_; }
+  const std::array<double, N_DELAYED_GROUPS>& get_all_beta_i() const { return beta_i_; }
 
 private:
   //! 计算缓发中子贡献的分子
@@ -155,6 +131,7 @@ private:
   void validate_group_metadata();
 
   //! 根据正向通量文件构建能谱折算权重
+  //! 对所有cell累加各能群通量，归一化后作为后续求解发射谱的权重
   void initialize_flux_spectrum_weights();
 
   //! 根据当前能量网格返回能群索引 (落在区间外时夹紧)
@@ -172,12 +149,12 @@ private:
   double ref_energy_;            //!< 参考中子能量 (eV)
   double ref_temperature_;       //!< 参考温度 (K)
 
-  static constexpr int N_DELAYED_GROUPS = 8;
+  // 使用 material_nuclear_data.h 中定义的 N_DELAYED_GROUPS = 8
 
-  std::array<double, 8> beta_i_;     //!< 各组 β_i,eff
-  double beta_total_;                //!< 总 β_eff
-  std::array<double, 8> numerators_; //!< 各组分子
-  double denominator_;               //!< 分母
+  std::array<double, N_DELAYED_GROUPS> beta_i_;     //!< 各组 β_i,eff
+  double beta_total_;                               //!< 总 β_eff
+  std::array<double, N_DELAYED_GROUPS> numerators_; //!< 各组分子
+  double denominator_;                              //!< 分母
 
   // 多群通量数据缓存
   int flux_n_groups_ {1};

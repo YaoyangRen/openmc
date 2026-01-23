@@ -6,6 +6,7 @@
 #include "openmc/geometry.h"
 #include "openmc/hdf5_interface.h"
 #include "openmc/material.h"
+#include "openmc/material_nuclear_data.h"
 #include "openmc/nuclide.h"
 #include "openmc/position.h"
 #include "openmc/reaction_product.h"
@@ -734,22 +735,41 @@ double BetaEffective::compute_denominator_material(
   std::vector<double> terms;
   terms.reserve(flux.size() * n_energy_groups_);
 
+  // 调试统计
+  int cells_with_adjoint = 0;
+  int cells_with_nuc_data = 0;
+  int cells_with_flux_groups = 0;
+  int cells_with_adj_groups = 0;
+  int cells_with_valid_nuc_groups = 0;
+  int total_terms_added = 0;
+  double sum_phi = 0.0, sum_phi_star = 0.0, sum_sigma_f = 0.0;
+  double sum_nu = 0.0, sum_chi = 0.0, sum_terms = 0.0;
+  int first_sample_cell = -1;
+
   for (const auto& [cell_idx, phi] : flux) {
     auto it_adj_total = adjoint_flux.find(cell_idx);
     if (it_adj_total == adjoint_flux.end())
       continue;
+    cells_with_adjoint++;
 
     auto it_data = cell_nuclear_data_.find(cell_idx);
     if (it_data == cell_nuclear_data_.end() || !it_data->second.is_fissionable)
       continue;
+    cells_with_nuc_data++;
 
     const auto& nuc_data = it_data->second;
 
     auto it_flux_groups = flux_group_map_.find(cell_idx);
     auto it_adj_groups = adjoint_group_map_.find(cell_idx);
-    if (it_flux_groups == flux_group_map_.end() ||
-        it_adj_groups == adjoint_group_map_.end())
+    if (it_flux_groups == flux_group_map_.end()) {
       continue;
+    }
+    cells_with_flux_groups++;
+
+    if (it_adj_groups == adjoint_group_map_.end()) {
+      continue;
+    }
+    cells_with_adj_groups++;
 
     const auto& flux_groups = it_flux_groups->second;
     const auto& adjoint_groups = it_adj_groups->second;
@@ -768,6 +788,22 @@ double BetaEffective::compute_denominator_material(
       fatal_error("Material " + nuc_data.material_name +
                   " missing multi-group nuclear data.");
     }
+    cells_with_valid_nuc_groups++;
+
+    // 记录第一个有效单元的详细数据用于调试
+    if (first_sample_cell < 0) {
+      first_sample_cell = cell_idx;
+      std::cout << "  [DEBUG] First valid cell " << cell_idx << " details:\n";
+      std::cout << "    Material: " << nuc_data.material_name << "\n";
+      std::cout << "    Group data (g, phi, phi*, sigma_f, nu, chi):\n";
+      for (int g = 0; g < std::min(n_energy_groups_, 10); ++g) {
+        std::cout << "      G" << g << ": phi=" << flux_groups[g]
+                  << ", phi*=" << adjoint_groups[g]
+                  << ", sigma_f=" << nuc_data.sigma_f_groups[g]
+                  << ", nu=" << nuc_data.nu_total_groups[g]
+                  << ", chi=" << nuc_data.chi_prompt_groups[g] << "\n";
+      }
+    }
 
     for (int g = 0; g < n_energy_groups_; ++g) {
       double phi_g = flux_groups[g];
@@ -779,10 +815,66 @@ double BetaEffective::compute_denominator_material(
       double nu_total_g = nuc_data.nu_total_groups[g];
       double chi_prompt_g = nuc_data.chi_prompt_groups[g];
 
+      // 累加用于诊断
+      sum_phi += phi_g;
+      sum_phi_star += phi_star_g;
+      sum_sigma_f += sigma_f_g;
+      sum_nu += nu_total_g;
+      sum_chi += chi_prompt_g;
+
       double term =
         phi_star_g * chi_prompt_g * nu_total_g * sigma_f_g * phi_g * volume;
+      sum_terms += term;
       terms.push_back(term);
+      total_terms_added++;
     }
+  }
+
+  // 输出变量累加值
+  std::cout << "  [DEBUG] Term component sums (over " << total_terms_added
+            << " terms):\n";
+  std::cout << "    Sum phi (forward flux): " << sum_phi << "\n";
+  std::cout << "    Sum phi* (adjoint flux): " << sum_phi_star << "\n";
+  std::cout << "    Sum sigma_f: " << sum_sigma_f << "\n";
+  std::cout << "    Sum nu_total: " << sum_nu << "\n";
+  std::cout << "    Sum chi_prompt: " << sum_chi << "\n";
+  std::cout << "    Direct sum of terms: " << sum_terms << "\n";
+  std::cout << "    Volume used: " << volume << "\n";
+
+  // 输出调试信息
+  std::cout << "  [DEBUG] compute_denominator_material diagnostics:\n";
+  std::cout << "    Total flux cells: " << flux.size() << "\n";
+  std::cout << "    Total adjoint cells: " << adjoint_flux.size() << "\n";
+  std::cout << "    Cells with adjoint: " << cells_with_adjoint << "\n";
+  std::cout << "    Cells with nuc_data: " << cells_with_nuc_data << "\n";
+  std::cout << "    Cells with flux_groups: " << cells_with_flux_groups << "\n";
+  std::cout << "    Cells with adj_groups: " << cells_with_adj_groups << "\n";
+  std::cout << "    Cells with valid nuc groups: "
+            << cells_with_valid_nuc_groups << "\n";
+  std::cout << "    Total terms added: " << total_terms_added << "\n";
+  std::cout << "    n_energy_groups_: " << n_energy_groups_ << "\n";
+  std::cout << "    cell_nuclear_data_ size: " << cell_nuclear_data_.size()
+            << "\n";
+
+  // 输出前几个单元索引样本
+  if (!flux.empty() && !adjoint_flux.empty()) {
+    std::cout << "    Sample flux cell indices: ";
+    int count = 0;
+    for (const auto& [idx, _] : flux) {
+      if (count++ >= 5)
+        break;
+      std::cout << idx << " ";
+    }
+    std::cout << "\n";
+
+    std::cout << "    Sample adjoint cell indices: ";
+    count = 0;
+    for (const auto& [idx, _] : adjoint_flux) {
+      if (count++ >= 5)
+        break;
+      std::cout << idx << " ";
+    }
+    std::cout << "\n";
   }
 
   return kahan_sum(terms);
@@ -791,409 +883,41 @@ double BetaEffective::compute_denominator_material(
 //------------------------------------------------------------------------------
 // 从 OpenMC 核数据库动态提取核参数
 //------------------------------------------------------------------------------
-// 通过遍历 OpenMC 的材料与核素表构建位置相关的核数据。对于每个裂变核素，
-// 计算宏观 Σ_f、ν_total/ν_prompt/ν_delayed 以及（可选）与公共能群一致的 χ
-// 分布。MaterialNuclearData 让后续网格循环无需再次查询物理量即可直接使用。
+// 使用 MaterialNuclearDataExtractor 提取材料的核数据。
+// 该类封装了截面、产额、能谱的计算逻辑，使代码更加模块化。
 //------------------------------------------------------------------------------
 MaterialNuclearData BetaEffective::extract_material_nuclear_data(
   int material_id) const
 {
-  MaterialNuclearData data;
-  data.material_id = material_id;
-
-  // 安全检查: 确保材料库已初始化
-  if (model::materials.empty()) {
-    warning("Material library is empty in extract_material_nuclear_data");
-    return data;
-  }
-
-  // 通过 ID 查找材料 (不是数组索引!)
-  Material* mat = nullptr;
-  for (const auto& mat_ptr : model::materials) {
-    if (mat_ptr && mat_ptr->id() == material_id) {
-      mat = mat_ptr.get();
-      break;
-    }
-  }
-
-  if (!mat) {
-    warning("Material not found for id: " + std::to_string(material_id));
-    return data;
-  }
-
-  data.material_name = mat->name();
-  data.is_fissionable = mat->fissionable();
-
-  if (!data.is_fissionable) {
-    return data; // 非裂变材料，返回零值
-  }
-
+  // 校验输入参数
   const int n_groups = n_energy_groups_;
   if (n_groups <= 1) {
     fatal_error("Material data extraction requires multi-group inputs.");
   }
-  const size_t delayed_group_size =
-    static_cast<size_t>(n_groups) * N_DELAYED_GROUPS;
 
   if (energy_edges_common_.size() != static_cast<size_t>(n_groups + 1)) {
     fatal_error("Multi-group β_eff requires a shared energy grid with "
                 "n_groups + 1 edges.");
   }
 
+  // 获取通量折合权重
   std::vector<double> collapse_weights(
     n_groups, 1.0 / static_cast<double>(n_groups));
   if (flux_collapse_weights_.size() == static_cast<size_t>(n_groups)) {
     collapse_weights = flux_collapse_weights_;
   }
 
-  std::vector<double> chi_prompt_acc(n_groups, 0.0);
-  std::vector<double> chi_delayed_acc(delayed_group_size, 0.0);
-  bool prompt_sampled = false;
-  std::array<bool, N_DELAYED_GROUPS> delayed_sampled {};
-  delayed_sampled.fill(false);
+  // 使用 MaterialNuclearDataExtractor 提取核数据
+  MaterialNuclearDataExtractor extractor(n_groups, energy_edges_common_,
+    collapse_weights, ref_energy_, ref_temperature_);
 
-  data.chi_prompt = 1.0;
-  data.chi_delayed.fill(1.0);
+  static std::once_flag extract_log_flag;
+  std::call_once(extract_log_flag, [&]() {
+    std::cout << "  [info] Using MaterialNuclearDataExtractor for nuclear data"
+              << std::endl;
+  });
 
-  // 使用 OpenMC 核数据库 API 提取能量相关核参数
-  // 参考能量与温度由构造函数提供
-  const double E_ref = ref_energy_;      // 参考能量 eV
-  const double T_ref = ref_temperature_; // 参考温度 K (目前仅用于日志)
-
-  // 对材料中的每个裂变核素累加核数据
-  // 使用原子密度和裂变截面加权平均: ν̄ = Σ(N_i σ_f,i ν_i) / Σ(N_i σ_f,i)
-  double total_fission_density = 0.0; // Σ(N_i × σ_f,i)
-  std::vector<double> sigma_f_group_sum(n_groups, 0.0);
-  std::vector<double> fission_density_group_sum(n_groups, 0.0);
-  std::vector<double> nu_total_group_accum(n_groups, 0.0);
-  std::vector<double> nu_prompt_group_accum(n_groups, 0.0);
-  std::vector<double> nu_delayed_group_accum(delayed_group_size, 0.0);
-  std::vector<double> nu_total_nuc_groups(n_groups, 0.0);
-  std::vector<double> nu_prompt_nuc_groups(n_groups, 0.0);
-  std::vector<std::array<double, N_DELAYED_GROUPS>> nu_delayed_nuc_groups(
-    n_groups);
-  for (int g = 0; g < n_groups; ++g) {
-    nu_delayed_nuc_groups[g].fill(0.0);
-  }
-
-  auto nuclides = mat->nuclides();
-  auto densities = mat->densities();
-
-  if (nuclides.size() == 0) {
-    warning("Material " + std::to_string(material_id) + " has no nuclides");
-    return data;
-  }
-
-  for (size_t i = 0; i < nuclides.size(); ++i) {
-    int nuc_idx = nuclides[i];
-    double atom_density = densities[i]; // atom/b-cm
-
-    // 安全检查: 验证核素索引有效性
-    if (nuc_idx < 0 || nuc_idx >= static_cast<int>(data::nuclides.size())) {
-      warning("Invalid nuclide index: " + std::to_string(nuc_idx));
-      continue;
-    }
-
-    // 访问核素数据
-    const auto& nuc = data::nuclides[nuc_idx];
-
-    if (!nuc) {
-      warning("Nuclide pointer is null for index: " + std::to_string(nuc_idx));
-      continue;
-    }
-
-    if (!nuc->fissionable_)
-      continue;
-
-    std::string nuc_name = nuc->name_;
-    const int MT_FISSION = 18;
-
-    //==========================================================================
-    // 1 & 2. 统一能群折合的 Σ_f 与 ν
-    std::vector<double> sigma_f_nuc_groups(n_groups, 0.0);
-    std::vector<double> macro_sigma_groups(n_groups, 0.0);
-    std::array<const Function1D*, N_DELAYED_GROUPS> delayed_yield_funcs {};
-    delayed_yield_funcs.fill(nullptr);
-    if (!nuc->fission_rx_.empty()) {
-      const auto* fission_rx = nuc->fission_rx_[0];
-      int delayed_group_idx = 0;
-      for (int i_prod = 1; i_prod < fission_rx->products_.size() &&
-                           delayed_group_idx < N_DELAYED_GROUPS;
-        ++i_prod) {
-        const auto& product = fission_rx->products_[i_prod];
-        if (product.particle_ == ParticleType::neutron &&
-            product.emission_mode_ == ReactionProduct::EmissionMode::delayed) {
-          delayed_yield_funcs[delayed_group_idx] = product.yield_.get();
-          delayed_group_idx++;
-        }
-      }
-    }
-
-    std::vector<double> group_flux(n_groups, 0.0);
-    static std::once_flag collapse_log_flag;
-    std::call_once(collapse_log_flag, [&]() {
-      std::cout << "  [debug] Using collapse_rate_weighted for material "
-                << data.material_name << std::endl;
-    });
-    auto collapse_sigma_group = [&](int g) {
-      std::fill(group_flux.begin(), group_flux.end(), 0.0);
-      group_flux[g] = 1.0;
-      return nuc->collapse_rate(
-        MT_FISSION, T_ref, energy_edges_common_, group_flux);
-    };
-    auto collapse_sigma_weighted = [&](int g,
-                                     const std::function<double(double)>& fn) {
-      std::fill(group_flux.begin(), group_flux.end(), 0.0);
-      group_flux[g] = 1.0;
-      return nuc->collapse_rate_weighted(
-        MT_FISSION, T_ref, energy_edges_common_, group_flux, fn);
-    };
-
-    std::function<double(double)> nu_total_weight = [&](double E) {
-      return nuc->nu(E, ReactionProduct::EmissionMode::total, 0);
-    };
-    std::function<double(double)> nu_prompt_weight = [&](double E) {
-      return nuc->nu(E, ReactionProduct::EmissionMode::prompt, 0);
-    };
-
-    std::array<std::function<double(double)>, N_DELAYED_GROUPS>
-      delayed_weight_fns;
-    for (int d = 0; d < N_DELAYED_GROUPS; ++d) {
-      const Function1D* yield_fn = delayed_yield_funcs[d];
-      delayed_weight_fns[d] = [yield_fn](double E) -> double {
-        if (!yield_fn)
-          return 0.0;
-        double val = (*yield_fn)(E);
-        return val > 0.0 ? val : 0.0;
-      };
-    }
-
-    for (int g = 0; g < n_groups; ++g) {
-      double sigma_avg = 0.0;
-      try {
-        sigma_avg = collapse_sigma_group(g);
-      } catch (...) {
-        sigma_avg = 0.0;
-      }
-      sigma_avg = std::max(0.0, sigma_avg);
-      sigma_f_nuc_groups[g] = sigma_avg;
-
-      if (sigma_avg > 0.0) {
-        double nu_total_weighted = collapse_sigma_weighted(g, nu_total_weight);
-        nu_total_nuc_groups[g] = nu_total_weighted / sigma_avg;
-
-        double nu_prompt_weighted =
-          collapse_sigma_weighted(g, nu_prompt_weight);
-        nu_prompt_nuc_groups[g] = nu_prompt_weighted / sigma_avg;
-
-        for (int d = 0; d < N_DELAYED_GROUPS; ++d) {
-          double nu_delayed_weighted =
-            collapse_sigma_weighted(g, delayed_weight_fns[d]);
-          nu_delayed_nuc_groups[g][d] = nu_delayed_weighted / sigma_avg;
-        }
-      } else {
-        nu_total_nuc_groups[g] = 0.0;
-        nu_prompt_nuc_groups[g] = 0.0;
-        for (int d = 0; d < N_DELAYED_GROUPS; ++d) {
-          nu_delayed_nuc_groups[g][d] = 0.0;
-        }
-      }
-    }
-
-    double macro_sigma_f = 0.0;
-    for (int g = 0; g < n_groups; ++g) {
-      macro_sigma_groups[g] = atom_density * sigma_f_nuc_groups[g];
-      sigma_f_group_sum[g] += macro_sigma_groups[g];
-      fission_density_group_sum[g] += macro_sigma_groups[g];
-      macro_sigma_f += macro_sigma_groups[g];
-    }
-
-    //==========================================================================
-    // 3. 获取瞬发、缓发能谱
-
-    // 通过蒙特卡罗抽样生成能群化能谱，失败时回退为均匀分布以保持归一化
-    auto sample_spectrum = [&](const ReactionProduct& product,
-                             std::vector<double>& spectrum,
-                             uint64_t seed_base) {
-      if (product.distribution_.empty())
-        return false;
-
-      uint64_t seed = seed_base;
-      const int n_samples = 5000;
-      for (int s = 0; s < n_samples; ++s) {
-        double E_out = 0.0;
-        double mu = 0.0;
-        product.distribution_[0]->sample(E_ref, E_out, mu, &seed);
-        int g_idx = group_index_from_energy(E_out);
-        if (g_idx >= 0 && g_idx < n_groups) {
-          spectrum[g_idx] += 1.0;
-        }
-      }
-
-      double total = std::accumulate(spectrum.begin(), spectrum.end(), 0.0);
-      if (total <= 0.0) {
-        double uniform = 1.0 / static_cast<double>(spectrum.size());
-        std::fill(spectrum.begin(), spectrum.end(), uniform);
-        return false;
-      }
-
-      for (double& value : spectrum) {
-        value /= total;
-      }
-      return true;
-    };
-
-    if (n_groups > 1 && !energy_edges_common_.empty() &&
-        !nuc->fission_rx_.empty()) {
-      const auto& fission = nuc->fission_rx_[0];
-
-      // 采样瞬发能谱
-      for (const auto& product : fission->products_) {
-        if (product.particle_ == ParticleType::neutron &&
-            product.emission_mode_ == ReactionProduct::EmissionMode::prompt) {
-          std::vector<double> prompt_spectrum(n_groups, 0.0);
-          uint64_t seed = 0x9e3779b97f4a7c15ULL ^
-                          static_cast<uint64_t>(material_id) ^
-                          (static_cast<uint64_t>(nuc_idx) << 16);
-          sample_spectrum(product, prompt_spectrum, seed);
-          for (int g = 0; g < n_groups; ++g) {
-            chi_prompt_acc[g] += macro_sigma_f * prompt_spectrum[g];
-          }
-          prompt_sampled = true;
-          break;
-        }
-      }
-
-      // 采样缓发能谱
-      int delayed_group_idx = 0;
-      for (const auto& product : fission->products_) {
-        if (product.particle_ == ParticleType::neutron &&
-            product.emission_mode_ == ReactionProduct::EmissionMode::delayed) {
-          std::vector<double> delayed_spectrum(n_groups, 0.0);
-          uint64_t seed = 0x6a09e667f3bcc909ULL ^
-                          static_cast<uint64_t>(material_id) ^
-                          (static_cast<uint64_t>(nuc_idx) << 24) ^
-                          static_cast<uint64_t>(delayed_group_idx);
-          sample_spectrum(product, delayed_spectrum, seed);
-          for (int g = 0; g < n_groups; ++g) {
-            chi_delayed_acc[delayed_offset(g, delayed_group_idx)] +=
-              macro_sigma_f * delayed_spectrum[g];
-          }
-          delayed_sampled[delayed_group_idx] = true;
-          delayed_group_idx++;
-          if (delayed_group_idx >= N_DELAYED_GROUPS)
-            break;
-        }
-      }
-    }
-
-    total_fission_density += macro_sigma_f;
-
-    data.sigma_f += macro_sigma_f;
-
-    for (int g = 0; g < n_groups; ++g) {
-      double macro_sigma = macro_sigma_groups[g];
-      if (macro_sigma <= 0.0)
-        continue;
-
-      nu_total_group_accum[g] += macro_sigma * nu_total_nuc_groups[g];
-      nu_prompt_group_accum[g] += macro_sigma * nu_prompt_nuc_groups[g];
-
-      for (int d = 0; d < N_DELAYED_GROUPS; ++d) {
-        nu_delayed_group_accum[delayed_offset(g, d)] +=
-          macro_sigma * nu_delayed_nuc_groups[g][d];
-      }
-    }
-  }
-
-  //==========================================================================
-  // 4. 归一化 (除以总裂变密度)
-  if (total_fission_density > 0.0) {
-    if (prompt_sampled) {
-      for (double& value : chi_prompt_acc) {
-        value /= total_fission_density;
-      }
-    }
-    if (!chi_delayed_acc.empty()) {
-      for (double& value : chi_delayed_acc) {
-        value /= total_fission_density;
-      }
-    }
-    // 能谱按裂变密度加权，保持 χ_g/χ_{d,ig} 的概率意义
-    // sigma_f 已经是宏观截面，不需要归一化
-  }
-
-  // 整理数据用于β_eff计算
-
-  // 若瞬发或某个缓发群在采样过程中没有得到有效结果（或整个材料无裂变贡献），
-  // 就把该能谱设为各群均匀分布，避免 χ 数据缺失。
-  if (!prompt_sampled || total_fission_density <= 0.0) {
-    double uniform = 1.0 / static_cast<double>(n_groups);
-    std::fill(chi_prompt_acc.begin(), chi_prompt_acc.end(), uniform);
-  }
-
-  // 写入数据
-  for (int d = 0; d < N_DELAYED_GROUPS; ++d) {
-    if (!delayed_sampled[d] || total_fission_density <= 0.0) {
-      double uniform = 1.0 / static_cast<double>(n_groups);
-      for (int g = 0; g < n_groups; ++g) {
-        chi_delayed_acc[delayed_offset(g, d)] = uniform;
-      }
-    }
-  }
-
-  data.chi_prompt_groups = chi_prompt_acc;
-  data.chi_delayed_groups = chi_delayed_acc;
-
-  data.sigma_f_groups = sigma_f_group_sum;
-  data.nu_total_groups.assign(n_groups, 0.0);
-  data.nu_prompt_groups.assign(n_groups, 0.0);
-  data.nu_delayed_groups = nu_delayed_group_accum;
-
-  for (int g = 0; g < n_groups; ++g) {
-    double denom = fission_density_group_sum[g];
-    if (denom > 0.0) {
-      data.nu_total_groups[g] = nu_total_group_accum[g] / denom;
-      data.nu_prompt_groups[g] = nu_prompt_group_accum[g] / denom;
-      for (int d = 0; d < N_DELAYED_GROUPS; ++d) {
-        data.nu_delayed_groups[delayed_offset(g, d)] /= denom;
-      }
-    }
-  }
-
-  auto flux_weighted_average = [&](const std::vector<double>& per_group) {
-    double used_weight = 0.0;
-    double accum = 0.0;
-    for (int g = 0; g < n_groups; ++g) {
-      double weight = collapse_weights[g];
-      if (weight <= 0.0)
-        continue;
-      if (fission_density_group_sum[g] <= 0.0)
-        continue;
-      accum += weight * per_group[g];
-      used_weight += weight;
-    }
-    if (used_weight > 0.0) {
-      return accum / used_weight;
-    }
-    if (!per_group.empty()) {
-      return per_group.front();
-    }
-    return 0.0;
-  };
-
-  data.nu_total = flux_weighted_average(data.nu_total_groups);
-  data.nu_prompt = flux_weighted_average(data.nu_prompt_groups);
-
-  for (int d = 0; d < N_DELAYED_GROUPS; ++d) {
-    std::vector<double> delayed_slice(n_groups, 0.0);
-    for (int g = 0; g < n_groups; ++g) {
-      delayed_slice[g] = data.nu_delayed_groups[delayed_offset(g, d)];
-    }
-    data.nu_delayed[d] = flux_weighted_average(delayed_slice);
-  }
-
-  return data;
+  return extractor.extract(material_id);
 }
 
 //------------------------------------------------------------------------------
@@ -1234,22 +958,25 @@ void BetaEffective::build_cell_material_map(
 
   std::vector<ThreadLocalData> thread_data;
 
+  // 将 flux map 转换为 vector 以便并行化 (在并行区域外部创建)
+  std::vector<std::pair<int, double>> flux_vec(flux.begin(), flux.end());
+
+  // 预先确定线程数并分配存储
+  int num_threads_max = 1;
+#ifdef _OPENMP
+  num_threads_max = omp_get_max_threads();
+#endif
+  thread_data.resize(num_threads_max);
+
 #pragma omp parallel
   {
-    int thread_id = omp_get_thread_num();
-    int num_threads = omp_get_num_threads();
-
-    // 初始化线程局部存储
-#pragma omp single
-    {
-      thread_data.resize(num_threads);
-    }
+    int thread_id = 0;
+#ifdef _OPENMP
+    thread_id = omp_get_thread_num();
+#endif
 
     auto& local_data = thread_data[thread_id];
     GeometryState geom; // 线程私有几何状态
-
-    // 将 flux map 转换为 vector 以便并行化 (读取顺序与稀疏数据一致)
-    std::vector<std::pair<int, double>> flux_vec(flux.begin(), flux.end());
 
 #pragma omp for schedule(dynamic, 100)
     for (size_t idx = 0; idx < flux_vec.size(); ++idx) {
