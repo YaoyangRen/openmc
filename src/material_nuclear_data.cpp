@@ -620,6 +620,7 @@ double MaterialNuclearDataExtractor::flux_weighted_average(
 
 //------------------------------------------------------------------------------
 // 根据能量返回所属能群索引
+// 自动检测能量边界排列方向（升序或降序）
 //------------------------------------------------------------------------------
 int MaterialNuclearDataExtractor::group_index_from_energy(
   double energy_eV) const
@@ -627,15 +628,32 @@ int MaterialNuclearDataExtractor::group_index_from_energy(
   if (energy_edges_.size() < 2)
     return 0;
 
-  // 能量边界降序排列（高能在前）
-  if (energy_eV >= energy_edges_.front())
-    return 0;
-  if (energy_eV <= energy_edges_.back())
-    return n_groups_ - 1;
+  // 检测能量边界排列方向
+  bool ascending = (energy_edges_.front() < energy_edges_.back());
 
-  for (int g = 0; g < n_groups_; ++g) {
-    if (energy_eV <= energy_edges_[g] && energy_eV > energy_edges_[g + 1]) {
-      return g;
+  if (ascending) {
+    // 能量边界升序排列（低能在前）: edges[g] <= E < edges[g+1]
+    if (energy_eV <= energy_edges_.front())
+      return 0;
+    if (energy_eV >= energy_edges_.back())
+      return n_groups_ - 1;
+
+    for (int g = 0; g < n_groups_; ++g) {
+      if (energy_eV >= energy_edges_[g] && energy_eV < energy_edges_[g + 1]) {
+        return g;
+      }
+    }
+  } else {
+    // 能量边界降序排列（高能在前）: edges[g+1] < E <= edges[g]
+    if (energy_eV >= energy_edges_.front())
+      return 0;
+    if (energy_eV <= energy_edges_.back())
+      return n_groups_ - 1;
+
+    for (int g = 0; g < n_groups_; ++g) {
+      if (energy_eV <= energy_edges_[g] && energy_eV > energy_edges_[g + 1]) {
+        return g;
+      }
     }
   }
   return n_groups_ - 1;
