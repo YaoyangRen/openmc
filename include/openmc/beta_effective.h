@@ -59,7 +59,10 @@ public:
   double get_beta_total() const { return beta_total_; }
 
   //! 获取所有缓发群的 β_i,eff
-  const std::array<double, N_DELAYED_GROUPS>& get_all_beta_i() const { return beta_i_; }
+  const std::array<double, N_DELAYED_GROUPS>& get_all_beta_i() const
+  {
+    return beta_i_;
+  }
 
 private:
   //! 计算缓发中子贡献的分子
@@ -67,9 +70,18 @@ private:
     const std::unordered_map<int, double>& flux,
     const std::unordered_map<int, double>& adjoint_flux, double volume) const;
 
-  //! 计算总中子贡献的分母
+  //! 计算总中子贡献的分母 (含 chi_prompt)
   double compute_denominator_material(
     const std::unordered_map<int, double>& flux,
+    const std::unordered_map<int, double>& adjoint_flux, double volume) const;
+
+  //! 计算不含 chi 的分母 (用于诊断对比)
+  double compute_denominator_without_chi(
+    const std::unordered_map<int, double>& flux,
+    const std::unordered_map<int, double>& adjoint_flux, double volume) const;
+
+  //! 输出详细诊断信息
+  void print_diagnostic_info(const std::unordered_map<int, double>& flux,
     const std::unordered_map<int, double>& adjoint_flux, double volume) const;
 
   //! 从材料库提取核数据
@@ -95,9 +107,10 @@ private:
   //! 计算多材料单元的加权核数据
   //! \param material_counts 材料 -> 命中次数的映射
   //! \param total_samples 总采样点数
+  //! \param material_cache 材料核数据缓存（线程安全）
   MaterialNuclearData compute_weighted_nuclear_data(
-    const std::unordered_map<int, int>& material_counts,
-    int total_samples) const;
+    const std::unordered_map<int, int>& material_counts, int total_samples,
+    const std::unordered_map<int, MaterialNuclearData>& material_cache) const;
 
   //! Kahan 求和算法（提高数值精度）
   //! \param values 待求和的数值向量
