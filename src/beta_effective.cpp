@@ -648,11 +648,10 @@ void BetaEffective::write_to_file(const std::string& filename) const
 //==============================================================================
 
 //------------------------------------------------------------------------------
-// 材料感知的缓发分子：
-//   Σ_cell ∫ φ*(r,E) χ_d,i(E,r) ν_d,i(E,r) Σ_f(r,E) φ(r,E) dE × ΔV。
-// 代码重用稀疏网格 map（φ、φ*），若存在单元多群通量则逐群积分，使网格结果
-// 能与提取的材料核数据混合使用；若无多群信息，则退化为基于均匀核
-// 数据的单群近似。
+// 材料感知的缓发分子（第 i 组）：
+//   N_i = Σ_cell ΔV × [Σ_{g'} φ*_{g'} χ_{d,i,g'}] × [Σ_g ν_{d,i,g} Σ_{f,g} φ_g]
+// 出生能量 E(g') 和诱发裂变能量 E'(g) 是两个独立积分变量，
+// 不能在同一群内逐项相乘。若无多群信息则退化为单群近似。
 //------------------------------------------------------------------------------
 double BetaEffective::compute_delayed_numerator_material(int group,
   const std::unordered_map<int, double>& flux,
@@ -714,20 +713,24 @@ double BetaEffective::compute_delayed_numerator_material(int group,
                   " missing multi-group delayed data.");
     }
 
+    // 出生能量积分: A_{d,i} = Σ_{g'} φ*_{g'} × χ_{d,i,g'}
+    double adj_chi_delayed = 0.0;
+    for (int gp = 0; gp < n_energy_groups_; ++gp) {
+      adj_chi_delayed += adjoint_groups[gp] *
+                         nuc_data.chi_delayed_groups[delayed_offset(gp, group)];
+    }
+
+    // 诱发裂变能量积分: F_{d,i} = Σ_g ν_{d,i,g} × Σ_{f,g} × φ_g
+    double delayed_fission_source = 0.0;
     for (int g = 0; g < n_energy_groups_; ++g) {
-      double phi_g = flux_groups[g];
-      double phi_star_g = adjoint_groups[g];
-      if (phi_g == 0.0 || phi_star_g == 0.0)
-        continue;
+      delayed_fission_source +=
+        nuc_data.nu_delayed_groups[delayed_offset(g, group)] *
+        nuc_data.sigma_f_groups[g] * flux_groups[g];
+    }
 
-      double sigma_f_g = nuc_data.sigma_f_groups[g];
-      double nu_delayed_g =
-        nuc_data.nu_delayed_groups[delayed_offset(g, group)];
-      double chi_delayed_g =
-        nuc_data.chi_delayed_groups[delayed_offset(g, group)];
-
-      double term =
-        phi_star_g * chi_delayed_g * nu_delayed_g * sigma_f_g * phi_g * volume;
+    // 单元贡献 = ΔV × A_{d,i} × F_{d,i}
+    double term = volume * adj_chi_delayed * delayed_fission_source;
+    if (term != 0.0) {
       terms.push_back(term);
     }
   }
@@ -737,10 +740,10 @@ double BetaEffective::compute_delayed_numerator_material(int group,
 
 //------------------------------------------------------------------------------
 
-// 分母与上式互补：
-//   Σ_cell ∫ φ*(r,E) χ_p(E,r) ν_total(E,r) Σ_f(r,E) φ(r,E) dE × ΔV。
-// 保持与分子完全对称，从而无论用户是否提供多群网格，β_i = numerator_i /
-// denominator 都具备一致的含义。
+// 分母（瞬发项）：
+//   D = Σ_cell ΔV × [Σ_{g'} φ*_{g'} χ_p,{g'}] × [Σ_g ν_g Σ_{f,g} φ_g]
+// 出生能量 E(g') 和诱发裂变能量 E'(g) 是两个独立积分变量，
+// 不能在同一群内逐项相乘。
 double BetaEffective::compute_denominator_material(
   const std::unordered_map<int, double>& flux,
   const std::unordered_map<int, double>& adjoint_flux, double volume) const
@@ -781,18 +784,22 @@ double BetaEffective::compute_denominator_material(
       fatal_error("材料 " + nuc_data.material_name + " 缺少多群核数据。");
     }
 
+    // 出生能量积分: A_p = Σ_{g'} φ*_{g'} × χ_{p,g'}
+    double adj_chi_prompt = 0.0;
+    for (int gp = 0; gp < n_energy_groups_; ++gp) {
+      adj_chi_prompt += adjoint_groups[gp] * nuc_data.chi_prompt_groups[gp];
+    }
+
+    // 诱发裂变能量积分: F = Σ_g ν_g × Σ_{f,g} × φ_g
+    double fission_source = 0.0;
     for (int g = 0; g < n_energy_groups_; ++g) {
-      double phi_g = flux_groups[g];
-      double phi_star_g = adjoint_groups[g];
-      if (phi_g == 0.0 || phi_star_g == 0.0)
-        continue;
+      fission_source += nuc_data.nu_total_groups[g] *
+                        nuc_data.sigma_f_groups[g] * flux_groups[g];
+    }
 
-      double sigma_f_g = nuc_data.sigma_f_groups[g];
-      double nu_total_g = nuc_data.nu_total_groups[g];
-      double chi_prompt_g = nuc_data.chi_prompt_groups[g];
-
-      double term =
-        phi_star_g * chi_prompt_g * nu_total_g * sigma_f_g * phi_g * volume;
+    // 单元贡献 = ΔV × A_p × F
+    double term = volume * adj_chi_prompt * fission_source;
+    if (term != 0.0) {
       terms.push_back(term);
     }
   }
