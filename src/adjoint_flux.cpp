@@ -17,18 +17,16 @@ void AdjointFlux::compute_from_files(const std::string& transfer_function_file,
   const std::string& fission_matrix_file, const std::string& output_file)
 {
   std::cout << "\n" << std::string(70, '=') << std::endl;
-  std::cout << "ADJOINT FLUX COMPUTATION" << std::endl;
+  std::cout << "共轭通量计算" << std::endl;
   std::cout << std::string(70, '=') << std::endl;
 
   // 1. 读取传递函数数据
-  std::cout << "\nReading transfer function data from: "
-            << transfer_function_file << std::endl;
+  std::cout << "\n读取传递函数: " << transfer_function_file << std::endl;
 
   // 检查传递函数文件是否存在
   if (!file_exists(transfer_function_file)) {
-    fatal_error(
-      "Transfer function file not found: " + transfer_function_file +
-      "\nPlease ensure the transfer function has been computed and saved.");
+    fatal_error("传递函数文件不存在: " + transfer_function_file +
+                "\n请确保已计算并保存传递函数。");
   }
 
   hid_t tf_file = file_open(transfer_function_file, 'r');
@@ -54,15 +52,13 @@ void AdjointFlux::compute_from_files(const std::string& transfer_function_file,
 
   n_cells_ = static_cast<size_t>(shape_[0]) * shape_[1] * shape_[2];
 
-  std::cout << "  Grid: " << shape_[0] << " x " << shape_[1] << " x "
-            << shape_[2] << " = " << n_cells_ << " cells" << std::endl;
-  std::cout << "  Pitch: " << pitch_ << " cm" << std::endl;
+  std::cout << "  网格: " << shape_[0] << "x" << shape_[1] << "x" << shape_[2]
+            << "=" << n_cells_ << "单元, 间距: " << pitch_ << " cm"
+            << std::endl;
 
   // 读取源单元索引列表
   vector<int> source_cell_indices;
   read_dataset(tf_file, "source_cell_indices", source_cell_indices);
-
-  std::cout << "  Source cells: " << source_cell_indices.size() << std::endl;
 
   // 读取传递函数（稀疏格式）
   std::unordered_map<int, std::unordered_map<int, vector<double>>>
@@ -115,17 +111,16 @@ void AdjointFlux::compute_from_files(const std::string& transfer_function_file,
   H5Gclose(tf_group);
   file_close(tf_file);
 
-  std::cout << "  Transfer function entries: " << total_tf_entries << std::endl;
+  std::cout << "  源单元: " << source_cell_indices.size()
+            << ", 传递函数条目: " << total_tf_entries << std::endl;
 
   // 2. 读取伴随源数据
-  std::cout << "\nReading adjoint source from: " << fission_matrix_file
-            << std::endl;
+  std::cout << "\n读取伴随源: " << fission_matrix_file << std::endl;
 
   // 检查裂变矩阵文件是否存在
   if (!file_exists(fission_matrix_file)) {
-    fatal_error(
-      "Fission matrix file not found: " + fission_matrix_file +
-      "\nPlease ensure the fission matrix has been computed and saved.");
+    fatal_error("裂变矩阵文件不存在: " + fission_matrix_file +
+                "\n请确保已计算并保存裂变矩阵。");
   }
 
   hid_t fm_file = file_open(fission_matrix_file, 'r');
@@ -133,8 +128,8 @@ void AdjointFlux::compute_from_files(const std::string& transfer_function_file,
   // 检查是否存在伴随源
   if (!object_exists(fm_file, "adjoint_source")) {
     file_close(fm_file);
-    fatal_error("Adjoint source not found in fission matrix file. Run "
-                "compute_adjoint_source first.");
+    fatal_error(
+      "裂变矩阵文件中未找到伴随源。请先运行 compute_adjoint_source。");
   }
 
   vector<double> adjoint_source;
@@ -152,25 +147,22 @@ void AdjointFlux::compute_from_files(const std::string& transfer_function_file,
 
   file_close(fm_file);
 
-  std::cout << "  Adjoint source cells: " << adjoint_source.size() << std::endl;
+  std::cout << "  伴随源单元: " << adjoint_source.size();
   if (keff_reference > 0.0) {
-    std::cout << "  Reference keff: " << std::fixed << std::setprecision(6)
-              << keff_reference << std::endl;
+    std::cout << ", keff=" << std::fixed << std::setprecision(5)
+              << keff_reference;
   }
-  if (adjoint_iterations > 0) {
-    std::cout << "  Adjoint iterations: " << adjoint_iterations << std::endl;
-  }
+  std::cout << std::endl;
 
   // 验证网格一致性
   if (adjoint_source.size() != n_cells_) {
-    fatal_error("Grid mismatch: transfer function has " +
-                std::to_string(n_cells_) + " cells, but adjoint source has " +
-                std::to_string(adjoint_source.size()) + " cells");
+    fatal_error("网格不匹配: 传递函数有 " + std::to_string(n_cells_) +
+                " 个单元，但伴随源有 " + std::to_string(adjoint_source.size()) +
+                " 个单元");
   }
 
   // 3. 计算共轭通量
-  std::cout << "\nComputing adjoint flux: Φ†(r) = Σ_i T(i→r) × S†(i)"
-            << std::endl;
+  std::cout << "\n计算共轭通量: Φ†(r) = Σ_i T(i→r) × S†(i)" << std::endl;
 
   compute_from_memory(transfer_functions, adjoint_source, shape_, origin_,
     pitch_, tf_n_groups, std::move(tf_energy_edges));
@@ -213,26 +205,22 @@ void AdjointFlux::compute_from_memory(
 
   // 计算 Φ†(r) = Σ_i T(i -> r) × S†(i)
   for (const auto& [i_source, response_map] : transfer_functions) {
-    // 获取源单元的伴随源值（重要性）
     if (i_source < 0 || i_source >= static_cast<int>(adjoint_source.size())) {
       continue;
     }
 
     double importance = adjoint_source[i_source];
-
     if (importance <= 0.0) {
-      continue; // 跳过零重要性的源
+      continue;
     }
 
-    // 对该源单元的所有响应位置进行累加
     for (const auto& [j_response, T_values] : response_map) {
       auto& flux_vector = adjoint_flux_sparse_[j_response];
       if (flux_vector.empty()) {
         flux_vector = make_zero_group_vector();
       }
       for (int g = 0; g < n_groups_; ++g) {
-        double contribution = T_values[g] * importance;
-        flux_vector[g] += contribution;
+        flux_vector[g] += T_values[g] * importance;
       }
     }
   }
@@ -257,38 +245,11 @@ void AdjointFlux::compute_from_memory(
 
   // 输出统计信息
   double density = 100.0 * nonzero_cells_ / n_cells_;
-  std::cout << "\nAdjoint Flux Statistics:" << std::endl;
-  std::cout << "  Nonzero cells: " << nonzero_cells_ << " / " << n_cells_
-            << " (" << std::fixed << std::setprecision(2) << density << "%)"
-            << std::endl;
-  std::cout << "  Max value: " << std::scientific << std::setprecision(6)
-            << max_flux_ << std::endl;
-  std::cout << "  Total flux: " << total_flux_ << std::endl;
-  std::cout << "  Mean (nonzero): "
-            << (nonzero_cells_ > 0 ? total_flux_ / nonzero_cells_ : 0.0)
-            << std::endl;
-
-  if (n_groups_ > 1 && !group_total_flux_.empty()) {
-    std::cout << "  Group totals:" << std::endl;
-    for (int g = 0; g < n_groups_; ++g) {
-      double fraction =
-        total_flux_ > 0.0 ? group_total_flux_[g] / total_flux_ : 0.0;
-      if (!energy_edges_.empty() &&
-          static_cast<int>(energy_edges_.size()) == n_groups_ + 1) {
-        std::cout << "    G" << std::setw(2) << g << " [" << std::scientific
-                  << std::setprecision(3) << energy_edges_[g] << ", "
-                  << energy_edges_[g + 1] << ") eV: " << group_total_flux_[g]
-                  << " (" << std::fixed << std::setprecision(2)
-                  << fraction * 100.0 << "%)" << std::endl;
-      } else {
-        std::cout << "    G" << std::setw(2) << g << ": " << std::scientific
-                  << std::setprecision(6) << group_total_flux_[g] << " ("
-                  << std::fixed << std::setprecision(2) << fraction * 100.0
-                  << "%)" << std::endl;
-      }
-    }
-    std::cout << std::defaultfloat << std::setprecision(6);
-  }
+  std::cout << "\n共轭通量统计:" << std::endl;
+  std::cout << "  非零单元: " << nonzero_cells_ << "/" << n_cells_ << " ("
+            << std::fixed << std::setprecision(1) << density << "%)"
+            << ", 最大值: " << std::scientific << std::setprecision(3)
+            << max_flux_ << ", 总通量: " << total_flux_ << std::endl;
 }
 
 vector<double> AdjointFlux::get_adjoint_flux_dense() const
@@ -333,7 +294,7 @@ double AdjointFlux::get_total_flux() const
 
 void AdjointFlux::write_to_file(const std::string& filename)
 {
-  std::cout << "\nWriting adjoint flux to: " << filename << std::endl;
+  std::cout << "\n写入共轭通量: " << filename << std::endl;
 
   hid_t file_id = file_open(filename, 'w');
 
@@ -344,7 +305,7 @@ void AdjointFlux::write_to_file(const std::string& filename)
     "Adjoint flux computed from transfer function and adjoint source");
   write_attribute(file_id, "storage_format", "sparse");
 
-  // 写入网格信息（仅保留统一字段）
+  // 写入网格信息
   write_dataset(file_id, "origin", origin_);
   write_dataset(file_id, "grid_shape", shape_);
   std::array<double, 3> grid_pitch_array {pitch_, pitch_, pitch_};
@@ -362,7 +323,7 @@ void AdjointFlux::write_to_file(const std::string& filename)
   write_attribute(
     file_id, "density_percent", 100.0 * nonzero_cells_ / n_cells_);
 
-  // 写入稀疏格式的共轭通量数据（包含分群信息）
+  // 写入稀疏格式数据
   vector<int> indices;
   vector<double> total_values;
   vector<double> group_values;
@@ -394,10 +355,9 @@ void AdjointFlux::write_to_file(const std::string& filename)
   }
 
   write_dataset(file_id, "cell_indices", sorted_indices);
-  // 统一字段名：仅写 flux_mean/flux_group_mean
   write_dataset(file_id, "flux_mean", sorted_values);
 
-  // 写入按索引对应的分群数据
+  // 写入分群数据
   vector<double> sorted_group_values(group_values.size());
   for (size_t i = 0; i < sort_indices.size(); ++i) {
     size_t src_offset = sort_indices[i] * static_cast<size_t>(n_groups_);
@@ -407,7 +367,7 @@ void AdjointFlux::write_to_file(const std::string& filename)
   }
   write_dataset(file_id, "flux_group_mean", sorted_group_values);
 
-  // 也写入稠密格式（可选，用于可视化）
+  // 写入稠密格式
   auto dense_flux = get_adjoint_flux_dense();
   write_dataset(file_id, "adjoint_flux_dense", dense_flux);
   auto dense_group_flux = get_adjoint_flux_group_dense();
@@ -419,9 +379,7 @@ void AdjointFlux::write_to_file(const std::string& filename)
 
   file_close(file_id);
 
-  std::cout << "  Sparse entries written: " << adjoint_flux_sparse_.size()
-            << std::endl;
-  std::cout << "  File size estimate: "
+  std::cout << "  稀疏条目: " << adjoint_flux_sparse_.size() << ", 估计大小: "
             << (adjoint_flux_sparse_.size() * 12 + n_cells_ * 8) / (1024 * 1024)
             << " MB" << std::endl;
 }

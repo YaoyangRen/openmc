@@ -123,7 +123,6 @@ void FissionMatrix::start_new_batch(int batch_id)
   source_birth_cells_.clear();
 }
 
-
 void FissionMatrix::compute_adjoint_source(
   const std::string& initial_guess, int max_iterations, double tolerance)
 {
@@ -181,11 +180,41 @@ void FissionMatrix::compute_adjoint_source(
     }
   }
 
+  std::unordered_map<size_t, double> normalized_matrix;
+  normalized_matrix.reserve(fission_matrix_sparse_.size());
+
+  int normalized_source_rows = 0;
+  for (size_t i = 0; i < source_counts_.size(); ++i) {
+    if (source_counts_[i] > 0.0) {
+      normalized_source_rows++;
+    }
+  }
+
+  for (const auto& [key, value] : fission_matrix_sparse_) {
+    size_t row = key / grid_->n_cells();
+    double source_total = source_counts_[row];
+    if (source_total > 0.0) {
+      normalized_matrix[key] = value / source_total;
+    }
+  }
+
+  if (normalized_matrix.empty()) {
+    std::cerr
+      << "Error: Normalized fission matrix is empty. Cannot compute adjoint "
+         "source."
+      << std::endl;
+    return;
+  }
+
   // 幂迭代法求解伴随源
-  // I* = (1/k) F^T I*
+  // I* = (1/k) F_norm^T I*
   std::cout << "\nPerforming power iteration..." << std::endl;
   std::cout << "  Max iterations: " << max_iterations << std::endl;
   std::cout << "  Tolerance: " << tolerance << std::endl;
+  std::cout << "  Normalized FM entries: " << normalized_matrix.size()
+            << std::endl;
+  std::cout << "  Source cells with counts: " << normalized_source_rows << " / "
+            << grid_->n_cells() << std::endl;
 
   vector<double> I_new(grid_->n_cells(), 0.0);
   double max_delta = 0.0;
@@ -195,19 +224,16 @@ void FissionMatrix::compute_adjoint_source(
   const double inv_keff = 1.0 / keff;
 
   for (int iter = 0; iter < max_iterations; ++iter) {
-    // 计算 F^T × I*
-    // 由于 F[i][j] 存储�?key = i * n_cells + j
-    // F^T[j][i] = F[i][j]
-    // (F^T × I*)_j = Σ_i F^T[j][i] × I*_i = Σ_i F[i][j] × I*_i
+    // 计算 F_norm^T × I*
+    // 其中 F_norm[i][j] = F[i][j] / source_counts[i]
 
     std::fill(I_new.begin(), I_new.end(), 0.0);
 
-    for (const auto& [key, F_ij] : fission_matrix_sparse_) {
+    for (const auto& [key, F_ij] : normalized_matrix) {
       size_t i = key / grid_->n_cells(); // 源单元（行）
       size_t j = key % grid_->n_cells(); // 裂变单元（列）
 
-      // F^T[j][i] = F[i][j]
-      // (F^T × I*)_j += F[i][j] × I*_i
+      // (F_norm^T × I*)_j += F_norm[i][j] × I*_i
       I_new[j] += F_ij * adjoint_source_[i];
     }
 

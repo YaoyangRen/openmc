@@ -58,24 +58,34 @@ GreenFunctionMesh::GreenFunctionMesh(std::shared_ptr<SharedMeshGrid> grid,
 
 int GreenFunctionMesh::position_to_cell_index(const Position& r) const
 {
-  constexpr double eps = 1.0e-10;
+  // 重要：必须与 FissionMatrix::position_to_index 使用完全相同的算法！
+  // 否则同一个位置会被映射到不同的单元索引，导致伴随源覆盖不足
 
-  int ix =
-    static_cast<int>(std::floor((r.x - grid_->origin()[0] + eps) * inv_pitch_));
-  int iy =
-    static_cast<int>(std::floor((r.y - grid_->origin()[1] + eps) * inv_pitch_));
-  int iz =
-    static_cast<int>(std::floor((r.z - grid_->origin()[2] + eps) * inv_pitch_));
+  const auto& origin = grid_->origin();
+  const auto& shape = grid_->shape();
+  const auto& upper_bound = upper_bound_;
 
-  // 边界检查
-  if (ix < 0 || ix >= grid_->shape()[0] || iy < 0 || iy >= grid_->shape()[1] ||
-      iz < 0 || iz >= grid_->shape()[2]) {
-    return -1; // 超出边界
+  int indices[3];
+  double coords[3] = {r.x, r.y, r.z};
+
+  for (int axis = 0; axis < 3; ++axis) {
+    double coord = coords[axis];
+    // 边界检查 - 与 FissionMatrix 完全一致
+    if (coord < origin[axis] || coord >= upper_bound[axis]) {
+      return -1;
+    }
+    int idx = static_cast<int>((coord - origin[axis]) * inv_pitch_);
+    // 边界clamp - 与 FissionMatrix 完全一致
+    if (idx < 0) {
+      idx = 0;
+    } else if (idx >= shape[axis]) {
+      idx = shape[axis] - 1;
+    }
+    indices[axis] = idx;
   }
 
-  // 计算线性索引
-  return ix * grid_->shape()[1] * grid_->shape()[2] + iy * grid_->shape()[2] +
-         iz;
+  // 线性索引计算 - 与 FissionMatrix 完全一致
+  return (indices[0] * shape[1] + indices[1]) * shape[2] + indices[2];
 }
 
 void GreenFunctionMesh::record_source_birth(
@@ -261,23 +271,20 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(
   size_t dense_memory_mb =
     (n_source_cells * spatial_size_ * sizeof(double)) / (1024 * 1024);
 
-  // 简洁输出传递函数信信息
+  // 简洁输出传递函数信息
   std::cout << "\n" << std::string(70, '=') << std::endl;
-  std::cout << "\nTransfer Function T(r_s->r): " << n_source_cells
-            << " source cells, " << total_source_particles
-            << " source particles, " << total_contributions_ << " contributions"
-            << std::endl;
-  std::cout << "  Sparse storage: " << total_nonzero_entries
-            << " non-zero entries (" << std::fixed << std::setprecision(2)
-            << (100.0 - sparsity) << "% density, " << sparsity << "% sparsity)"
-            << std::endl;
-  std::cout << "  Memory saved: " << dense_memory_mb << " MB (dense) -> "
-            << sparse_memory_mb << " MB (sparse), " << std::fixed
-            << std::setprecision(1)
+  std::cout << "传递函数 T(r_s->r): " << n_source_cells << " 个源单元, "
+            << total_source_particles << " 个源粒子, " << total_contributions_
+            << " 次贡献" << std::endl;
+  std::cout << "  稀疏存储: " << total_nonzero_entries << " 个非零条目 ("
+            << std::fixed << std::setprecision(1) << (100.0 - sparsity)
+            << "% 密度)" << std::endl;
+  std::cout << "  内存节省: " << dense_memory_mb << " MB -> "
+            << sparse_memory_mb << " MB (节省 " << std::setprecision(0)
             << (100.0 * (1.0 - static_cast<double>(sparse_memory_mb) /
                                  dense_memory_mb))
-            << "% reduction" << std::endl;
-  std::cout << "  Output: " << filename << std::endl;
+            << "%)" << std::endl;
+  std::cout << "  输出: " << filename << std::endl;
 
   // 创建HDF5文件，使用指定的文件名
   hid_t file_id = file_open(filename, 'w');

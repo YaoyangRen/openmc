@@ -36,10 +36,9 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
   std::cout << std::string(70, '=') << std::endl;
 
   // 1. 读取正向通量
-  std::cout << "[1/4] Reading forward flux from: " << flux_file << std::endl;
+  std::cout << "[1/4] 读取正向通量: " << flux_file << std::endl;
   if (!file_exists(flux_file)) {
-    fatal_error("Flux file not found: " + flux_file +
-                "\nPlease run the forward calculation first.");
+    fatal_error("通量文件不存在: " + flux_file + "\n请先运行正向计算。");
   }
 
   std::unordered_map<int, double> flux;
@@ -47,17 +46,15 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
   double flux_pitch = 0.0;
   read_flux_data(flux_file, flux, flux_shape, flux_pitch);
 
-  std::cout << "  Grid: " << flux_shape[0] << " x " << flux_shape[1] << " x "
-            << flux_shape[2] << std::endl;
-  std::cout << "  Pitch: " << flux_pitch << " cm" << std::endl;
-  std::cout << "  Non-zero cells: " << flux.size() << std::endl;
+  std::cout << "  网格: " << flux_shape[0] << "x" << flux_shape[1] << "x"
+            << flux_shape[2] << ", 间距: " << flux_pitch << " cm"
+            << ", 非零单元: " << flux.size() << std::endl;
 
-  // 2. 读取共轭通量 (φ*)，后续作为加权函数将所有单元联系在一起
-  std::cout << "\n[2/4] Reading adjoint flux from: " << adjoint_flux_file
-            << std::endl;
+  // 2. 读取共轭通量 (φ*)
+  std::cout << "\n[2/4] 读取共轭通量: " << adjoint_flux_file << std::endl;
   if (!file_exists(adjoint_flux_file)) {
-    fatal_error("Adjoint flux file not found: " + adjoint_flux_file +
-                "\nPlease ensure adjoint flux has been computed.");
+    fatal_error(
+      "共轭通量文件不存在: " + adjoint_flux_file + "\n请确保已计算共轭通量。");
   }
 
   std::unordered_map<int, double> adjoint_flux;
@@ -66,10 +63,9 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
   read_adjoint_flux_data(
     adjoint_flux_file, adjoint_flux, adjoint_shape, adjoint_pitch);
 
-  std::cout << "  Grid: " << adjoint_shape[0] << " x " << adjoint_shape[1]
-            << " x " << adjoint_shape[2] << std::endl;
-  std::cout << "  Pitch: " << adjoint_pitch << " cm" << std::endl;
-  std::cout << "  Non-zero cells: " << adjoint_flux.size() << std::endl;
+  std::cout << "  网格: " << adjoint_shape[0] << "x" << adjoint_shape[1] << "x"
+            << adjoint_shape[2] << ", 间距: " << adjoint_pitch << " cm"
+            << ", 非零单元: " << adjoint_flux.size() << std::endl;
 
   // 3. 验证网格一致性：β_eff 依赖逐单元的 φ-φ* 内积，因此两张网格必须完全
   //    对齐（尺寸、pitch 以及多群能量边界）。
@@ -159,20 +155,9 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
   // 计算网格单元体积
   double volume = flux_pitch * flux_pitch * flux_pitch;
 
-  std::cout << "\n[3/4] Computing β_eff using MATERIAL-DEPENDENT nuclear data"
-            << std::endl;
-  if (n_sample_points_ == 1) {
-    std::cout << "  Mode: Phase 2.2 (Single-point geometry query)" << std::endl;
-  } else {
-    std::cout << "  Mode: Phase 2.3 (Multi-point sampling)" << std::endl;
-    std::cout << "  Sample points per cell: " << n_sample_points_ << std::endl;
-    std::cout << "  Weighting mode: "
-              << (weighting_mode_ == WeightingMode::VOLUME_WEIGHTED
-                     ? "Volume-weighted"
-                     : "Reaction-rate weighted")
-              << std::endl;
-  }
-  std::cout << "  Cell volume = " << volume << " cm³" << std::endl;
+  std::cout << "\n[3/4] 计算 β_eff (材料相关核数据)" << std::endl;
+  std::cout << "  采样模式: " << (n_sample_points_ == 1 ? "单点" : "多点")
+            << ", 单元体积: " << volume << " cm³" << std::endl;
 
   // 构建单元-材料映射并提取核数据：通过几何查询找出每个网格实际包含的
   // 材料组合，从而得到空间依赖的 Σ_f、ν_t、ν_d、χ。
@@ -190,48 +175,65 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
       "Denominator (with chi) is zero or negative! Cannot compute β_eff.");
   }
 
-  std::cout << "\n  " << std::string(60, '=') << std::endl;
-  std::cout << "  DENOMINATOR COMPARISON (key diagnostic)" << std::endl;
-  std::cout << "  " << std::string(60, '-') << std::endl;
-  std::cout << "  Denominator (with chi_p):    " << std::scientific
-            << std::setprecision(6) << denominator_ << std::endl;
-  std::cout << "  Denominator (without chi):   " << std::scientific
-            << std::setprecision(6) << denominator_no_chi << std::endl;
-  std::cout << "  Ratio (with/without chi):    " << std::fixed
-            << std::setprecision(6)
+  std::cout << "\n  分母对比: D(含χ)=" << std::scientific
+            << std::setprecision(4) << denominator_
+            << ", D(无χ)=" << denominator_no_chi << ", 比值=" << std::fixed
+            << std::setprecision(4)
             << (denominator_no_chi > 0 ? denominator_ / denominator_no_chi
                                        : 0.0)
             << std::endl;
-  std::cout << "  " << std::string(60, '=') << std::endl;
 
-  // 对每个缓发群计算分子和
-  // β_i,eff。若存在多群数据则逐群折合；否则退化为单群形式。
-  std::cout << "\n  Delayed group contributions:" << std::endl;
-  std::cout << "  Group    Numerator        β_i,eff" << std::endl;
-  std::cout << "  " << std::string(50, '-') << std::endl;
-
+  // 计算各缓发群的β_i
   for (int i = 0; i < 8; ++i) {
     numerators_[i] =
       compute_delayed_numerator_material(i, flux, adjoint_flux, volume);
     beta_i_[i] = numerators_[i] / denominator_;
-
-    std::cout << "    " << (i + 1) << "    " << std::scientific
-              << std::setprecision(6) << numerators_[i] << "   " << beta_i_[i]
-              << std::endl;
   }
-
-  // 6. 计算总 β_eff
   beta_total_ = std::accumulate(beta_i_.begin(), beta_i_.end(), 0.0);
 
-  std::cout << "  " << std::string(55, '-') << std::endl;
-  std::cout << "  Total β_eff = " << std::fixed << std::setprecision(15)
-            << beta_total_ << std::endl;
+  // MCNP参考值 (beta_eff)
+  const double mcnp_beta[6] = {
+    0.00016, 0.00104, 0.00097, 0.00253, 0.00107, 0.00042};
+  const double mcnp_beta_total = 0.00619;
 
-  // 输出详细诊断信息（在分子计算之后，以便显示正确的 numerators_）
-  print_diagnostic_info(flux, adjoint_flux, volume);
+  // 输出与MCNP对比结果
+  std::cout << "\n  缓发中子先驱核群 β_eff 计算结果与MCNP对比:" << std::endl;
+  std::cout << "  " << std::string(60, '-') << std::endl;
+  std::cout << "    先驱核群    OpenMC β_eff    MCNP β_eff    相对偏差(%)"
+            << std::endl;
+  std::cout << "  " << std::string(60, '-') << std::endl;
+
+  for (int i = 0; i < 6; ++i) {
+    double rel_err = (mcnp_beta[i] > 0)
+                       ? (beta_i_[i] - mcnp_beta[i]) / mcnp_beta[i] * 100.0
+                       : 0.0;
+    std::cout << "       " << (i + 1) << "        " << std::scientific
+              << std::setprecision(5) << beta_i_[i] << "     "
+              << std::setprecision(5) << mcnp_beta[i] << "     " << std::fixed
+              << std::setprecision(2) << std::setw(7) << rel_err << std::endl;
+  }
+  // 群7和群8（如有）
+  for (int i = 6; i < 8; ++i) {
+    if (beta_i_[i] > 1e-10) {
+      std::cout << "       " << (i + 1) << "        " << std::scientific
+                << std::setprecision(5) << beta_i_[i]
+                << "        -             -" << std::endl;
+    }
+  }
+
+  std::cout << "  " << std::string(60, '-') << std::endl;
+  double total_rel_err =
+    (mcnp_beta_total > 0)
+      ? (beta_total_ - mcnp_beta_total) / mcnp_beta_total * 100.0
+      : 0.0;
+  std::cout << "      总计      " << std::scientific << std::setprecision(5)
+            << beta_total_ << "     " << std::setprecision(5) << mcnp_beta_total
+            << "     " << std::fixed << std::setprecision(2) << std::setw(7)
+            << total_rel_err << std::endl;
+  std::cout << "  " << std::string(60, '-') << std::endl;
 
   // 7. 输出结果到文件
-  std::cout << "\n[4/4] Writing results to: " << output_file << std::endl;
+  std::cout << "\n[4/4] 写入结果: " << output_file << std::endl;
   write_to_file(output_file);
 
   std::cout << std::string(70, '=') << std::endl;
@@ -442,10 +444,7 @@ void BetaEffective::validate_group_metadata()
                 "group spectra; ensure tallies were written correctly.");
   }
 
-  std::cout << "  Multi-group β_eff enabled (" << n_energy_groups_
-            << " energy groups)." << std::endl;
-  std::cout << "  Flux groups detected: " << flux_group_map_.size()
-            << ", adjoint groups detected: " << adjoint_group_map_.size()
+  std::cout << "  多群 β_eff 已启用 (" << n_energy_groups_ << " 个能群)"
             << std::endl;
 }
 
@@ -479,15 +478,13 @@ void BetaEffective::initialize_flux_spectrum_weights()
     double uniform = 1.0 / static_cast<double>(n_energy_groups_);
     std::fill(
       flux_collapse_weights_.begin(), flux_collapse_weights_.end(), uniform);
-    std::cout
-      << "  Flux spectrum not available; using uniform collapse weights."
-      << std::endl;
+    std::cout << "  通量谱权重不可用，使用均匀折合权重" << std::endl;
   } else {
     for (double& value : flux_collapse_weights_) {
       value /= total;
     }
-    std::cout << "  Flux-weighted collapse enabled using spectrum from "
-              << flux_group_map_.size() << " mesh cells." << std::endl;
+    std::cout << "  通量加权折合已启用 (" << flux_group_map_.size()
+              << " 个网格单元)" << std::endl;
   }
 }
 
@@ -642,12 +639,9 @@ void BetaEffective::write_to_file(const std::string& filename) const
   H5Gclose(diag_group);
   file_close(file_id);
 
-  std::cout << "  Results written successfully" << std::endl;
-
   std::cout << "  β_eff = " << std::fixed << std::setprecision(5) << beta_total_
+            << " (基于" << unique_materials_.size() << "种裂变材料)"
             << std::endl;
-  std::cout << "  Based on " << unique_materials_.size()
-            << " fissionable material(s)" << std::endl;
 }
 //==============================================================================
 // Material-Dependent Methods
@@ -668,12 +662,12 @@ double BetaEffective::compute_delayed_numerator_material(int group,
     n_energy_groups_ > 1 && flux_has_group_data_ && adjoint_has_group_data_ &&
     !flux_group_map_.empty() && !adjoint_group_map_.empty();
 
-  static bool notified = false;
-  if (!notified) {
+  // 使用 std::once_flag 保证线程安全的一次性输出
+  static std::once_flag numerator_debug_flag;
+  std::call_once(numerator_debug_flag, [&]() {
     std::cout << "  [debug] use_multi_group = "
               << (use_multi_group ? "true" : "false") << std::endl;
-    notified = true;
-  }
+  });
 
   std::vector<double> terms;
   terms.reserve(use_multi_group ? flux.size() * n_energy_groups_ : flux.size());
@@ -754,48 +748,28 @@ double BetaEffective::compute_denominator_material(
   std::vector<double> terms;
   terms.reserve(flux.size() * n_energy_groups_);
 
-  // 调试统计
-  int cells_with_adjoint = 0;
-  int cells_with_nuc_data = 0;
-  int cells_with_flux_groups = 0;
-  int cells_with_adj_groups = 0;
-  int cells_with_valid_nuc_groups = 0;
-  int total_terms_added = 0;
-  double sum_phi = 0.0, sum_phi_star = 0.0, sum_sigma_f = 0.0;
-  double sum_nu = 0.0, sum_chi = 0.0, sum_terms = 0.0;
-  int first_sample_cell = -1;
-
   for (const auto& [cell_idx, phi] : flux) {
     auto it_adj_total = adjoint_flux.find(cell_idx);
     if (it_adj_total == adjoint_flux.end())
       continue;
-    cells_with_adjoint++;
 
     auto it_data = cell_nuclear_data_.find(cell_idx);
     if (it_data == cell_nuclear_data_.end() || !it_data->second.is_fissionable)
       continue;
-    cells_with_nuc_data++;
 
     const auto& nuc_data = it_data->second;
 
     auto it_flux_groups = flux_group_map_.find(cell_idx);
     auto it_adj_groups = adjoint_group_map_.find(cell_idx);
-    if (it_flux_groups == flux_group_map_.end()) {
+    if (it_flux_groups == flux_group_map_.end() ||
+        it_adj_groups == adjoint_group_map_.end())
       continue;
-    }
-    cells_with_flux_groups++;
-
-    if (it_adj_groups == adjoint_group_map_.end()) {
-      continue;
-    }
-    cells_with_adj_groups++;
 
     const auto& flux_groups = it_flux_groups->second;
     const auto& adjoint_groups = it_adj_groups->second;
     if (flux_groups.size() != static_cast<size_t>(n_energy_groups_) ||
         adjoint_groups.size() != static_cast<size_t>(n_energy_groups_)) {
-      fatal_error("Cell " + std::to_string(cell_idx) +
-                  " is missing multi-group flux data.");
+      fatal_error("单元 " + std::to_string(cell_idx) + " 缺少多群通量数据。");
     }
 
     if (nuc_data.sigma_f_groups.size() !=
@@ -804,24 +778,7 @@ double BetaEffective::compute_denominator_material(
           static_cast<size_t>(n_energy_groups_) ||
         nuc_data.chi_prompt_groups.size() !=
           static_cast<size_t>(n_energy_groups_)) {
-      fatal_error("Material " + nuc_data.material_name +
-                  " missing multi-group nuclear data.");
-    }
-    cells_with_valid_nuc_groups++;
-
-    // 记录第一个有效单元的详细数据用于调试
-    if (first_sample_cell < 0) {
-      first_sample_cell = cell_idx;
-      std::cout << "  [DEBUG] First valid cell " << cell_idx << " details:\n";
-      std::cout << "    Material: " << nuc_data.material_name << "\n";
-      std::cout << "    Group data (g, phi, phi*, sigma_f, nu, chi):\n";
-      for (int g = 0; g < std::min(n_energy_groups_, 10); ++g) {
-        std::cout << "      G" << g << ": phi=" << flux_groups[g]
-                  << ", phi*=" << adjoint_groups[g]
-                  << ", sigma_f=" << nuc_data.sigma_f_groups[g]
-                  << ", nu=" << nuc_data.nu_total_groups[g]
-                  << ", chi=" << nuc_data.chi_prompt_groups[g] << "\n";
-      }
+      fatal_error("材料 " + nuc_data.material_name + " 缺少多群核数据。");
     }
 
     for (int g = 0; g < n_energy_groups_; ++g) {
@@ -834,66 +791,10 @@ double BetaEffective::compute_denominator_material(
       double nu_total_g = nuc_data.nu_total_groups[g];
       double chi_prompt_g = nuc_data.chi_prompt_groups[g];
 
-      // 累加用于诊断
-      sum_phi += phi_g;
-      sum_phi_star += phi_star_g;
-      sum_sigma_f += sigma_f_g;
-      sum_nu += nu_total_g;
-      sum_chi += chi_prompt_g;
-
       double term =
         phi_star_g * chi_prompt_g * nu_total_g * sigma_f_g * phi_g * volume;
-      sum_terms += term;
       terms.push_back(term);
-      total_terms_added++;
     }
-  }
-
-  // 输出变量累加值
-  std::cout << "  [DEBUG] Term component sums (over " << total_terms_added
-            << " terms):\n";
-  std::cout << "    Sum phi (forward flux): " << sum_phi << "\n";
-  std::cout << "    Sum phi* (adjoint flux): " << sum_phi_star << "\n";
-  std::cout << "    Sum sigma_f: " << sum_sigma_f << "\n";
-  std::cout << "    Sum nu_total: " << sum_nu << "\n";
-  std::cout << "    Sum chi_prompt: " << sum_chi << "\n";
-  std::cout << "    Direct sum of terms: " << sum_terms << "\n";
-  std::cout << "    Volume used: " << volume << "\n";
-
-  // 输出调试信息
-  std::cout << "  [DEBUG] compute_denominator_material diagnostics:\n";
-  std::cout << "    Total flux cells: " << flux.size() << "\n";
-  std::cout << "    Total adjoint cells: " << adjoint_flux.size() << "\n";
-  std::cout << "    Cells with adjoint: " << cells_with_adjoint << "\n";
-  std::cout << "    Cells with nuc_data: " << cells_with_nuc_data << "\n";
-  std::cout << "    Cells with flux_groups: " << cells_with_flux_groups << "\n";
-  std::cout << "    Cells with adj_groups: " << cells_with_adj_groups << "\n";
-  std::cout << "    Cells with valid nuc groups: "
-            << cells_with_valid_nuc_groups << "\n";
-  std::cout << "    Total terms added: " << total_terms_added << "\n";
-  std::cout << "    n_energy_groups_: " << n_energy_groups_ << "\n";
-  std::cout << "    cell_nuclear_data_ size: " << cell_nuclear_data_.size()
-            << "\n";
-
-  // 输出前几个单元索引样本
-  if (!flux.empty() && !adjoint_flux.empty()) {
-    std::cout << "    Sample flux cell indices: ";
-    int count = 0;
-    for (const auto& [idx, _] : flux) {
-      if (count++ >= 5)
-        break;
-      std::cout << idx << " ";
-    }
-    std::cout << "\n";
-
-    std::cout << "    Sample adjoint cell indices: ";
-    count = 0;
-    for (const auto& [idx, _] : adjoint_flux) {
-      if (count++ >= 5)
-        break;
-      std::cout << idx << " ";
-    }
-    std::cout << "\n";
   }
 
   return kahan_sum(terms);
@@ -959,228 +860,7 @@ double BetaEffective::compute_denominator_without_chi(
 }
 
 //------------------------------------------------------------------------------
-// 输出详细诊断信息
-//------------------------------------------------------------------------------
-void BetaEffective::print_diagnostic_info(
-  const std::unordered_map<int, double>& flux,
-  const std::unordered_map<int, double>& adjoint_flux, double volume) const
-{
-  std::cout << "\n  ========== DETAILED DIAGNOSTIC INFO ==========\n";
-
-  // 1. 能量群结构
-  std::cout << "\n  [1] Energy group structure:\n";
-  std::cout << "    Number of groups: " << n_energy_groups_ << "\n";
-  if (!energy_edges_common_.empty()) {
-    std::cout << "    Energy edges (eV): [";
-    for (size_t i = 0; i < std::min(energy_edges_common_.size(), size_t(6));
-      ++i) {
-      std::cout << std::scientific << std::setprecision(2)
-                << energy_edges_common_[i];
-      if (i < energy_edges_common_.size() - 1)
-        std::cout << ", ";
-    }
-    if (energy_edges_common_.size() > 6)
-      std::cout << " ... ";
-    std::cout << std::scientific << std::setprecision(2)
-              << energy_edges_common_.back() << "]\n";
-  }
-
-  // 2. Chi 分布统计
-  std::cout << "\n  [2] Chi_prompt distribution (summed over all cells):\n";
-  std::vector<double> chi_sum(n_energy_groups_, 0.0);
-  int n_cells_with_chi = 0;
-
-  for (const auto& [cell_idx, nuc_data] : cell_nuclear_data_) {
-    if (!nuc_data.is_fissionable)
-      continue;
-    if (nuc_data.chi_prompt_groups.size() !=
-        static_cast<size_t>(n_energy_groups_))
-      continue;
-    n_cells_with_chi++;
-    for (int g = 0; g < n_energy_groups_; ++g) {
-      chi_sum[g] += nuc_data.chi_prompt_groups[g];
-    }
-  }
-
-  // 找出 chi 非零的群
-  std::cout << "    Cells with chi data: " << n_cells_with_chi << "\n";
-  std::cout << "    Chi_prompt per group (showing non-zero groups):\n";
-  double total_chi = 0.0;
-  for (int g = 0; g < n_energy_groups_; ++g) {
-    total_chi += chi_sum[g];
-    if (chi_sum[g] > 1e-10) {
-      double E_low = (g < static_cast<int>(energy_edges_common_.size()))
-                       ? energy_edges_common_[g]
-                       : 0.0;
-      double E_high = (g + 1 < static_cast<int>(energy_edges_common_.size()))
-                        ? energy_edges_common_[g + 1]
-                        : 0.0;
-      std::cout << "      G" << std::setw(2) << g
-                << ": chi_sum=" << std::scientific << std::setprecision(4)
-                << chi_sum[g] << " (E: " << std::setprecision(2) << E_low
-                << " - " << E_high << " eV)\n";
-    }
-  }
-  std::cout << "    Total chi_sum: " << std::scientific << std::setprecision(4)
-            << total_chi << "\n";
-
-  // 3. 通量分布统计
-  std::cout << "\n  [3] Flux distribution per group (summed over all cells):\n";
-  std::vector<double> flux_sum(n_energy_groups_, 0.0);
-  std::vector<double> adjoint_sum(n_energy_groups_, 0.0);
-
-  for (const auto& [cell_idx, groups] : flux_group_map_) {
-    for (int g = 0; g < n_energy_groups_ && g < static_cast<int>(groups.size());
-      ++g) {
-      flux_sum[g] += groups[g];
-    }
-  }
-  for (const auto& [cell_idx, groups] : adjoint_group_map_) {
-    for (int g = 0; g < n_energy_groups_ && g < static_cast<int>(groups.size());
-      ++g) {
-      adjoint_sum[g] += groups[g];
-    }
-  }
-
-  std::cout << "    Groups with significant flux (phi > 1e-10):\n";
-  for (int g = 0; g < n_energy_groups_; ++g) {
-    if (flux_sum[g] > 1e-10 || adjoint_sum[g] > 1e-10) {
-      double E_low = (g < static_cast<int>(energy_edges_common_.size()))
-                       ? energy_edges_common_[g]
-                       : 0.0;
-      double E_high = (g + 1 < static_cast<int>(energy_edges_common_.size()))
-                        ? energy_edges_common_[g + 1]
-                        : 0.0;
-      std::cout << "      G" << std::setw(2) << g << ": phi=" << std::scientific
-                << std::setprecision(3) << flux_sum[g]
-                << ", phi*=" << std::setprecision(3) << adjoint_sum[g]
-                << " (E: " << std::setprecision(2) << E_low << " - " << E_high
-                << " eV)\n";
-    }
-  }
-
-  // 4. 分子分母各组贡献
-  std::cout << "\n  [4] Denominator contribution per energy group:\n";
-  std::vector<double> denom_per_group(n_energy_groups_, 0.0);
-  std::vector<double> denom_no_chi_per_group(n_energy_groups_, 0.0);
-
-  for (const auto& [cell_idx, phi] : flux) {
-    auto it_adj = adjoint_flux.find(cell_idx);
-    if (it_adj == adjoint_flux.end())
-      continue;
-
-    auto it_data = cell_nuclear_data_.find(cell_idx);
-    if (it_data == cell_nuclear_data_.end() || !it_data->second.is_fissionable)
-      continue;
-
-    const auto& nuc_data = it_data->second;
-    auto it_flux_g = flux_group_map_.find(cell_idx);
-    auto it_adj_g = adjoint_group_map_.find(cell_idx);
-    if (it_flux_g == flux_group_map_.end() ||
-        it_adj_g == adjoint_group_map_.end())
-      continue;
-
-    const auto& fg = it_flux_g->second;
-    const auto& ag = it_adj_g->second;
-
-    for (int g = 0; g < n_energy_groups_; ++g) {
-      if (g >= static_cast<int>(fg.size()) || g >= static_cast<int>(ag.size()))
-        continue;
-      if (g >= static_cast<int>(nuc_data.sigma_f_groups.size()))
-        continue;
-
-      double phi_g = fg[g];
-      double phi_star_g = ag[g];
-      if (phi_g == 0.0 || phi_star_g == 0.0)
-        continue;
-
-      double sigma_f_g = nuc_data.sigma_f_groups[g];
-      double nu_g = nuc_data.nu_total_groups[g];
-      double chi_g = (g < static_cast<int>(nuc_data.chi_prompt_groups.size()))
-                       ? nuc_data.chi_prompt_groups[g]
-                       : 0.0;
-
-      denom_per_group[g] +=
-        phi_star_g * chi_g * nu_g * sigma_f_g * phi_g * volume;
-      denom_no_chi_per_group[g] +=
-        phi_star_g * nu_g * sigma_f_g * phi_g * volume;
-    }
-  }
-
-  std::cout
-    << "    Group  Denom(with chi)   Denom(no chi)    Chi contribution\n";
-  std::cout << "    " << std::string(60, '-') << "\n";
-  for (int g = 0; g < n_energy_groups_; ++g) {
-    if (denom_per_group[g] > 1e-20 || denom_no_chi_per_group[g] > 1e-20) {
-      double chi_factor = (denom_no_chi_per_group[g] > 0)
-                            ? denom_per_group[g] / denom_no_chi_per_group[g]
-                            : 0.0;
-      std::cout << "    G" << std::setw(2) << g << "   " << std::scientific
-                << std::setprecision(4) << denom_per_group[g] << "      "
-                << std::setprecision(4) << denom_no_chi_per_group[g] << "      "
-                << std::fixed << std::setprecision(4) << chi_factor << "\n";
-    }
-  }
-
-  // 5. β_eff 使用两种分母的对比
-  double denom_with_chi =
-    std::accumulate(denom_per_group.begin(), denom_per_group.end(), 0.0);
-  double denom_without_chi = std::accumulate(
-    denom_no_chi_per_group.begin(), denom_no_chi_per_group.end(), 0.0);
-
-  std::cout << "\n  [5] Beta_eff comparison with different denominators:\n";
-  std::cout << "    Using formula: β_i = N_i / D\n\n";
-  std::cout << "    Group    Numerator         β(with chi)      β(no chi)      "
-               " MCNP ref\n";
-  std::cout << "    " << std::string(70, '-') << "\n";
-
-  // MCNP 参考值
-  const double mcnp_beta[] = {
-    0.00016, 0.00104, 0.00097, 0.00253, 0.00107, 0.00042, 0.0, 0.0};
-
-  double total_beta_chi = 0.0, total_beta_no_chi = 0.0, total_mcnp = 0.00621;
-  for (int i = 0; i < 8; ++i) {
-    double beta_chi =
-      (denom_with_chi > 0) ? numerators_[i] / denom_with_chi : 0.0;
-    double beta_no_chi =
-      (denom_without_chi > 0) ? numerators_[i] / denom_without_chi : 0.0;
-    total_beta_chi += beta_chi;
-    total_beta_no_chi += beta_no_chi;
-
-    std::cout << "      " << (i + 1) << "    " << std::scientific
-              << std::setprecision(4) << numerators_[i] << "     " << std::fixed
-              << std::setprecision(5) << beta_chi << "      "
-              << std::setprecision(5) << beta_no_chi << "      "
-              << std::setprecision(5) << mcnp_beta[i] << "\n";
-  }
-  std::cout << "    " << std::string(70, '-') << "\n";
-  std::cout << "    Total              " << std::fixed << std::setprecision(5)
-            << total_beta_chi << "      " << std::setprecision(5)
-            << total_beta_no_chi << "      " << std::setprecision(5)
-            << total_mcnp << "\n";
-
-  std::cout << "\n  [6] Summary:\n";
-  std::cout << "    β_eff (with chi_p in denom): " << std::fixed
-            << std::setprecision(5) << total_beta_chi << "\n";
-  std::cout << "    β_eff (without chi in denom): " << std::fixed
-            << std::setprecision(5) << total_beta_no_chi << "\n";
-  std::cout << "    MCNP reference: " << std::fixed << std::setprecision(5)
-            << total_mcnp << "\n";
-  std::cout << "    Relative error (with chi): " << std::fixed
-            << std::setprecision(2)
-            << ((total_beta_chi - total_mcnp) / total_mcnp * 100.0) << "%\n";
-  std::cout << "    Relative error (no chi): " << std::fixed
-            << std::setprecision(2)
-            << ((total_beta_no_chi - total_mcnp) / total_mcnp * 100.0) << "%\n";
-
-  std::cout << "\n  ================================================\n";
-}
-
-//------------------------------------------------------------------------------
 // 从 OpenMC 核数据库动态提取核参数
-//------------------------------------------------------------------------------
-// 使用 MaterialNuclearDataExtractor 提取材料的核数据。
-// 该类封装了截面、产额、能谱的计算逻辑，使代码更加模块化。
 //------------------------------------------------------------------------------
 MaterialNuclearData BetaEffective::extract_material_nuclear_data(
   int material_id) const
@@ -1188,12 +868,11 @@ MaterialNuclearData BetaEffective::extract_material_nuclear_data(
   // 校验输入参数
   const int n_groups = n_energy_groups_;
   if (n_groups <= 1) {
-    fatal_error("Material data extraction requires multi-group inputs.");
+    fatal_error("材料数据提取需要多群输入。");
   }
 
   if (energy_edges_common_.size() != static_cast<size_t>(n_groups + 1)) {
-    fatal_error("Multi-group β_eff requires a shared energy grid with "
-                "n_groups + 1 edges.");
+    fatal_error("多群 β_eff 需要 n_groups + 1 个能量边界。");
   }
 
   // 获取通量折合权重
@@ -1208,10 +887,8 @@ MaterialNuclearData BetaEffective::extract_material_nuclear_data(
     collapse_weights, ref_energy_, ref_temperature_);
 
   static std::once_flag extract_log_flag;
-  std::call_once(extract_log_flag, [&]() {
-    std::cout << "  [info] Using MaterialNuclearDataExtractor for nuclear data"
-              << std::endl;
-  });
+  std::call_once(extract_log_flag,
+    [&]() { std::cout << "  使用材料核数据提取器" << std::endl; });
 
   return extractor.extract(material_id);
 }
@@ -1221,7 +898,7 @@ MaterialNuclearData BetaEffective::extract_material_nuclear_data(
 void BetaEffective::build_cell_material_map(
   const std::unordered_map<int, double>& flux)
 {
-  std::cout << "  Building cell-material mapping using geometry queries..."
+  std::cout << "  构建单元-材料映射 (" << flux.size() << " 个网格单元)..."
             << std::endl;
 
   cell_to_material_.clear();
@@ -1234,24 +911,21 @@ void BetaEffective::build_cell_material_map(
     return;
   }
 
-  std::cout << "  Total materials in library: " << model::materials.size()
-            << std::endl;
-  std::cout << "  Querying geometry for " << flux.size() << " mesh cells..."
+  std::cout << "  材料库: " << model::materials.size() << " 种材料"
             << std::endl;
 
   // ===== 在并行区域之前预先提取所有裂变材料的核数据 =====
   // 这是线程安全的关键：所有核数据库访问都在单线程中完成
   std::unordered_map<int, MaterialNuclearData> global_material_cache;
-  std::cout << "  Pre-extracting nuclear data for all fissionable materials..."
-            << std::endl;
+  std::cout << "  预提取裂变材料核数据..." << std::endl;
   for (const auto& mat_ptr : model::materials) {
     if (mat_ptr && mat_ptr->fissionable()) {
       int mat_id = mat_ptr->id();
       global_material_cache[mat_id] = extract_material_nuclear_data(mat_id);
     }
   }
-  std::cout << "  Pre-extracted data for " << global_material_cache.size()
-            << " fissionable materials" << std::endl;
+  std::cout << "  已提取 " << global_material_cache.size() << " 种裂变材料数据"
+            << std::endl;
 
   // 线程局部缓存和统计
   struct ThreadLocalData {
@@ -1442,41 +1116,9 @@ void BetaEffective::build_cell_material_map(
   }
 
   // 输出统计信息
-  std::cout << "  " << std::string(60, '-') << std::endl;
-  std::cout << "  Geometry query results:" << std::endl;
-  std::cout << "    Fissionable cells: " << fissionable_count << std::endl;
-  if (n_sample_points_ > 1) {
-    std::cout << "    Heterogeneous cells (multi-fissionable): "
-              << n_heterogeneous_cells_ << std::endl;
-  }
-  std::cout << "    Non-fissionable cells: " << non_fissionable_count
-            << std::endl;
-  std::cout << "    Void cells: " << void_count << std::endl;
-  if (geometry_failed_count > 0) {
-    std::cout << "    Geometry query failed: " << geometry_failed_count
-              << std::endl;
-  }
-  std::cout << "    Unique fissionable materials: " << unique_materials_.size()
-            << std::endl;
-
-  // 输出每个裂变材料的分布(仅计算裂变区域采样)
-  if (!material_hit_counts.empty()) {
-    std::cout << "\n  Fissionable material distribution (sample hits):"
-              << std::endl;
-    for (const auto& [mat_id, count] : material_hit_counts) {
-      auto it = global_material_cache.find(mat_id);
-      if (it != global_material_cache.end()) {
-        const auto& data = it->second;
-        std::cout << "    Material " << mat_id << " (" << data.material_name
-                  << "): " << count << " hits" << std::endl;
-        std::cout << "      ν_total = " << std::fixed << std::setprecision(4)
-                  << data.nu_total << ", Σ_f = " << std::scientific
-                  << std::setprecision(3) << data.sigma_f << " cm⁻¹"
-                  << std::endl;
-      }
-    }
-  }
-  std::cout << "  " << std::string(60, '-') << std::endl;
+  std::cout << "  几何查询结果: 裂变单元 " << fissionable_count << ", 非裂变 "
+            << non_fissionable_count << ", 空白 " << void_count << ", 材料种类 "
+            << unique_materials_.size() << std::endl;
 }
 
 //------------------------------------------------------------------------------

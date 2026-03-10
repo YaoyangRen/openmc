@@ -242,42 +242,46 @@ double FluxMesh::get_flux(int cell_index) const
 
 int FluxMesh::position_to_index(const std::array<double, 3>& position) const
 {
+  // 重要：必须与 FissionMatrix::position_to_index 使用完全相同的算法！
+  // 否则同一个位置会被映射到不同的单元索引
+
   const auto& origin = grid_->origin();
   const auto& upper_bound = grid_->upper_bound();
   const auto& shape = grid_->shape();
   double inv_pitch = grid_->inv_pitch();
 
-  // 检查位置是否在网格范围内
-  for (int i = 0; i < 3; ++i) {
-    if (position[i] < origin[i] || position[i] > upper_bound[i]) {
-      return -1; // 超出范围
+  int indices[3];
+  for (int axis = 0; axis < 3; ++axis) {
+    double coord = position[axis];
+    // 边界检查 - 与 FissionMatrix 完全一致
+    if (coord < origin[axis] || coord >= upper_bound[axis]) {
+      return -1;
     }
+    int idx = static_cast<int>((coord - origin[axis]) * inv_pitch);
+    // 边界clamp - 与 FissionMatrix 完全一致
+    if (idx < 0) {
+      idx = 0;
+    } else if (idx >= shape[axis]) {
+      idx = shape[axis] - 1;
+    }
+    indices[axis] = idx;
   }
 
-  // 计算三维网格索引
-  int ix = static_cast<int>((position[0] - origin[0]) * inv_pitch);
-  int iy = static_cast<int>((position[1] - origin[1]) * inv_pitch);
-  int iz = static_cast<int>((position[2] - origin[2]) * inv_pitch);
-
-  // 边界检查(处理舍入误差)
-  ix = std::min(ix, shape[0] - 1);
-  iy = std::min(iy, shape[1] - 1);
-  iz = std::min(iz, shape[2] - 1);
-
-  // 转换为一维索引
-  return grid_to_index(ix, iy, iz);
+  // 线性索引计算 - 与 FissionMatrix 完全一致 (XYZ顺序)
+  return (indices[0] * shape[1] + indices[1]) * shape[2] + indices[2];
 }
 
 //------------------------------------------------------------------------------
 
 std::array<int, 3> FluxMesh::index_to_grid(int index) const
 {
+  // 逆向计算：index = (ix * shape[1] + iy) * shape[2] + iz
   const auto& shape = grid_->shape();
   std::array<int, 3> grid_idx;
-  grid_idx[2] = index / (shape[0] * shape[1]); // iz
-  int remainder = index % (shape[0] * shape[1]);
-  grid_idx[1] = remainder / shape[0]; // iy
-  grid_idx[0] = remainder % shape[0]; // ix
+  grid_idx[2] = index % shape[2]; // iz
+  int remainder = index / shape[2];
+  grid_idx[1] = remainder % shape[1]; // iy
+  grid_idx[0] = remainder / shape[1]; // ix
   return grid_idx;
 }
 
@@ -285,8 +289,10 @@ std::array<int, 3> FluxMesh::index_to_grid(int index) const
 
 int FluxMesh::grid_to_index(int ix, int iy, int iz) const
 {
+  // 线性索引计算 - 与 FissionMatrix 完全一致 (XYZ顺序)
+  // index = (ix * shape[1] + iy) * shape[2] + iz
   const auto& shape = grid_->shape();
-  return iz * shape[0] * shape[1] + iy * shape[0] + ix;
+  return (ix * shape[1] + iy) * shape[2] + iz;
 }
 
 //------------------------------------------------------------------------------
