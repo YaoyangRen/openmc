@@ -80,6 +80,20 @@ private:
     const std::unordered_map<int, double>& flux,
     const std::unordered_map<int, double>& adjoint_flux, double volume) const;
 
+  //! 标量重要性近似版分子
+  //! 当共轭量为 I*(r) 而非严格 φ*(r,E) 时使用
+  //! N_i = Σ_cell ΔV × I*(r) × [Σ_g ν_{d,i,g} Σ_{f,g} φ_g]
+  double compute_delayed_numerator_scalar_importance(int group,
+    const std::unordered_map<int, double>& flux,
+    const std::unordered_map<int, double>& adjoint_flux, double volume) const;
+
+  //! 标量重要性近似版分母
+  //! 当共轭量为 I*(r) 而非严格 φ*(r,E) 时使用
+  //! D = Σ_cell ΔV × I*(r) × [Σ_g ν_g Σ_{f,g} φ_g]
+  double compute_denominator_scalar_importance(
+    const std::unordered_map<int, double>& flux,
+    const std::unordered_map<int, double>& adjoint_flux, double volume) const;
+
   //! 输出详细诊断信息
   void print_diagnostic_info(const std::unordered_map<int, double>& flux,
     const std::unordered_map<int, double>& adjoint_flux, double volume) const;

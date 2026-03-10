@@ -163,74 +163,121 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
   // 材料组合，从而得到空间依赖的 Σ_f、ν_t、ν_d、χ。
   build_cell_material_map(flux);
 
-  // 计算分母 (含 chi_prompt)
-  denominator_ = compute_denominator_material(flux, adjoint_flux, volume);
-
-  // 计算不含 chi 的分母作为对比
-  double denominator_no_chi =
-    compute_denominator_without_chi(flux, adjoint_flux, volume);
-
-  if (denominator_ <= 0.0) {
-    fatal_error(
-      "Denominator (with chi) is zero or negative! Cannot compute β_eff.");
-  }
-
-  std::cout << "\n  分母对比: D(含χ)=" << std::scientific
-            << std::setprecision(4) << denominator_
-            << ", D(无χ)=" << denominator_no_chi << ", 比值=" << std::fixed
-            << std::setprecision(4)
-            << (denominator_no_chi > 0 ? denominator_ / denominator_no_chi
-                                       : 0.0)
-            << std::endl;
-
-  // 计算各缓发群的β_i
-  for (int i = 0; i < 8; ++i) {
-    numerators_[i] =
-      compute_delayed_numerator_material(i, flux, adjoint_flux, volume);
-    beta_i_[i] = numerators_[i] / denominator_;
-  }
-  beta_total_ = std::accumulate(beta_i_.begin(), beta_i_.end(), 0.0);
-
   // MCNP参考值 (beta_eff)
   const double mcnp_beta[6] = {
     0.00016, 0.00104, 0.00097, 0.00253, 0.00107, 0.00042};
   const double mcnp_beta_total = 0.00619;
 
-  // 输出与MCNP对比结果
-  std::cout << "\n  缓发中子先驱核群 β_eff 计算结果与MCNP对比:" << std::endl;
-  std::cout << "  " << std::string(60, '-') << std::endl;
-  std::cout << "    先驱核群    OpenMC β_eff    MCNP β_eff    相对偏差(%)"
+  //==========================================================================
+  // 方法 A: 严格伴随多群公式 (假定 adjoint 为真 φ*(r,E))
+  //   D = Σ_cell ΔV × [Σ_{g'} φ*_{g'} χ_{p,g'}] × [Σ_g ν_g Σ_{f,g} φ_g]
+  //   N_i = Σ_cell ΔV × [Σ_{g'} φ*_{g'} χ_{d,i,g'}] × [Σ_g ν_{d,i,g} Σ_{f,g} φ_g]
+  //==========================================================================
+  double denom_adjoint = compute_denominator_material(flux, adjoint_flux, volume);
+  std::array<double, N_DELAYED_GROUPS> num_adjoint;
+  std::array<double, N_DELAYED_GROUPS> beta_adjoint;
+  double beta_adjoint_total = 0.0;
+  for (int i = 0; i < 8; ++i) {
+    num_adjoint[i] =
+      compute_delayed_numerator_material(i, flux, adjoint_flux, volume);
+    beta_adjoint[i] = (denom_adjoint > 0.0) ? num_adjoint[i] / denom_adjoint : 0.0;
+    beta_adjoint_total += beta_adjoint[i];
+  }
+
+  //==========================================================================
+  // 方法 B: 标量重要性近似公式 (adjoint 为 I*(r), 不再乘 χ)
+  //   D = Σ_cell ΔV × I*(r) × [Σ_g ν_g Σ_{f,g} φ_g]
+  //   N_i = Σ_cell ΔV × I*(r) × [Σ_g ν_{d,i,g} Σ_{f,g} φ_g]
+  //==========================================================================
+  double denom_scalar =
+    compute_denominator_scalar_importance(flux, adjoint_flux, volume);
+  std::array<double, N_DELAYED_GROUPS> num_scalar;
+  std::array<double, N_DELAYED_GROUPS> beta_scalar;
+  double beta_scalar_total = 0.0;
+  for (int i = 0; i < 8; ++i) {
+    num_scalar[i] = compute_delayed_numerator_scalar_importance(
+      i, flux, adjoint_flux, volume);
+    beta_scalar[i] = (denom_scalar > 0.0) ? num_scalar[i] / denom_scalar : 0.0;
+    beta_scalar_total += beta_scalar[i];
+  }
+
+  // 诊断: 不含 chi 的分母
+  double denominator_no_chi =
+    compute_denominator_without_chi(flux, adjoint_flux, volume);
+
+  // 使用标量重要性近似版作为主结果 (因为当前共轭量为 I*(r))
+  denominator_ = denom_scalar;
+  for (int i = 0; i < 8; ++i) {
+    numerators_[i] = num_scalar[i];
+    beta_i_[i] = beta_scalar[i];
+  }
+  beta_total_ = beta_scalar_total;
+
+  if (denominator_ <= 0.0) {
+    fatal_error(
+      "Denominator (scalar importance) is zero or negative! Cannot compute β_eff.");
+  }
+
+  // 输出分母对比
+  std::cout << "\n  分母对比:" << std::endl;
+  std::cout << "    D(严格伴随,含χ) = " << std::scientific << std::setprecision(4)
+            << denom_adjoint << std::endl;
+  std::cout << "    D(标量重要性)   = " << std::scientific << std::setprecision(4)
+            << denom_scalar << std::endl;
+  std::cout << "    D(无χ诊断)      = " << std::scientific << std::setprecision(4)
+            << denominator_no_chi << std::endl;
+  std::cout << "    D(标量)/D(无χ)   = " << std::fixed << std::setprecision(4)
+            << (denominator_no_chi > 0 ? denom_scalar / denominator_no_chi : 0.0)
             << std::endl;
-  std::cout << "  " << std::string(60, '-') << std::endl;
+
+  // 输出两种方法的对比表
+  std::cout << "\n  β_eff 两种方法对比 (方法A: 严格伴随  方法B: 标量重要性近似):" << std::endl;
+  std::cout << "  " << std::string(90, '-') << std::endl;
+  std::cout << "    先驱核群    方法A(伴随)    方法B(标量)    MCNP参考      "
+               "偏差A(%)  偏差B(%)" << std::endl;
+  std::cout << "  " << std::string(90, '-') << std::endl;
 
   for (int i = 0; i < 6; ++i) {
-    double rel_err = (mcnp_beta[i] > 0)
-                       ? (beta_i_[i] - mcnp_beta[i]) / mcnp_beta[i] * 100.0
-                       : 0.0;
+    double err_a = (mcnp_beta[i] > 0)
+                     ? (beta_adjoint[i] - mcnp_beta[i]) / mcnp_beta[i] * 100.0
+                     : 0.0;
+    double err_b = (mcnp_beta[i] > 0)
+                     ? (beta_scalar[i] - mcnp_beta[i]) / mcnp_beta[i] * 100.0
+                     : 0.0;
     std::cout << "       " << (i + 1) << "        " << std::scientific
-              << std::setprecision(5) << beta_i_[i] << "     "
-              << std::setprecision(5) << mcnp_beta[i] << "     " << std::fixed
-              << std::setprecision(2) << std::setw(7) << rel_err << std::endl;
+              << std::setprecision(5) << beta_adjoint[i] << "  "
+              << std::setprecision(5) << beta_scalar[i] << "  "
+              << std::setprecision(5) << mcnp_beta[i] << "  " << std::fixed
+              << std::setprecision(2) << std::setw(7) << err_a << "  "
+              << std::setw(7) << err_b << std::endl;
   }
   // 群7和群8（如有）
   for (int i = 6; i < 8; ++i) {
-    if (beta_i_[i] > 1e-10) {
+    if (beta_adjoint[i] > 1e-10 || beta_scalar[i] > 1e-10) {
       std::cout << "       " << (i + 1) << "        " << std::scientific
-                << std::setprecision(5) << beta_i_[i]
-                << "        -             -" << std::endl;
+                << std::setprecision(5) << beta_adjoint[i] << "  "
+                << std::setprecision(5) << beta_scalar[i]
+                << "      -             -         -" << std::endl;
     }
   }
 
-  std::cout << "  " << std::string(60, '-') << std::endl;
-  double total_rel_err =
+  std::cout << "  " << std::string(90, '-') << std::endl;
+  double err_a_total =
     (mcnp_beta_total > 0)
-      ? (beta_total_ - mcnp_beta_total) / mcnp_beta_total * 100.0
+      ? (beta_adjoint_total - mcnp_beta_total) / mcnp_beta_total * 100.0
+      : 0.0;
+  double err_b_total =
+    (mcnp_beta_total > 0)
+      ? (beta_scalar_total - mcnp_beta_total) / mcnp_beta_total * 100.0
       : 0.0;
   std::cout << "      总计      " << std::scientific << std::setprecision(5)
-            << beta_total_ << "     " << std::setprecision(5) << mcnp_beta_total
-            << "     " << std::fixed << std::setprecision(2) << std::setw(7)
-            << total_rel_err << std::endl;
-  std::cout << "  " << std::string(60, '-') << std::endl;
+            << beta_adjoint_total << "  " << std::setprecision(5)
+            << beta_scalar_total << "  " << std::setprecision(5)
+            << mcnp_beta_total << "  " << std::fixed << std::setprecision(2)
+            << std::setw(7) << err_a_total << "  " << std::setw(7)
+            << err_b_total << std::endl;
+  std::cout << "  " << std::string(90, '-') << std::endl;
+  std::cout << "  (*)当前主结果采用方法B: 标量重要性近似" << std::endl;
 
   // 7. 输出结果到文件
   std::cout << "\n[4/4] 写入结果: " << output_file << std::endl;
@@ -801,6 +848,123 @@ double BetaEffective::compute_denominator_material(
     double term = volume * adj_chi_prompt * fission_source;
     if (term != 0.0) {
       terms.push_back(term);
+    }
+  }
+
+  return kahan_sum(terms);
+}
+
+//==============================================================================
+// Scalar-Importance Approximation Methods
+// 当共轭量为空间重要性 I*(r) 而非严格群伴随通量 φ*(r,E) 时使用。
+// I*(r) 已经隐含了裂变谱加权，因此不再额外乘 χ_p 或 χ_{d,i}。
+//==============================================================================
+
+//------------------------------------------------------------------------------
+// 标量重要性近似版分母：
+//   D = Σ_cell ΔV × I*(r) × [Σ_g ν_g Σ_{f,g} φ_g]
+// 不含 χ_p，因为 I*(r) ≈ ∫ φ*(r,E) χ(E) dE 已经包含了谱权重。
+//------------------------------------------------------------------------------
+double BetaEffective::compute_denominator_scalar_importance(
+  const std::unordered_map<int, double>& flux,
+  const std::unordered_map<int, double>& adjoint_flux, double volume) const
+{
+  std::vector<double> terms;
+  terms.reserve(flux.size());
+
+  for (const auto& [cell_idx, phi] : flux) {
+    auto it_adj = adjoint_flux.find(cell_idx);
+    if (it_adj == adjoint_flux.end())
+      continue;
+
+    auto it_data = cell_nuclear_data_.find(cell_idx);
+    if (it_data == cell_nuclear_data_.end() || !it_data->second.is_fissionable)
+      continue;
+
+    const auto& nuc_data = it_data->second;
+    double I_star = it_adj->second; // 标量重要性
+
+    // 检查是否有多群通量数据
+    auto it_flux_groups = flux_group_map_.find(cell_idx);
+    if (it_flux_groups != flux_group_map_.end() &&
+        it_flux_groups->second.size() ==
+          static_cast<size_t>(n_energy_groups_) &&
+        nuc_data.sigma_f_groups.size() ==
+          static_cast<size_t>(n_energy_groups_) &&
+        nuc_data.nu_total_groups.size() ==
+          static_cast<size_t>(n_energy_groups_)) {
+      // 多群正向通量: F = Σ_g ν_g × Σ_{f,g} × φ_g
+      const auto& flux_groups = it_flux_groups->second;
+      double fission_source = 0.0;
+      for (int g = 0; g < n_energy_groups_; ++g) {
+        fission_source += nuc_data.nu_total_groups[g] *
+                          nuc_data.sigma_f_groups[g] * flux_groups[g];
+      }
+      double term = volume * I_star * fission_source;
+      if (term != 0.0)
+        terms.push_back(term);
+    } else {
+      // 单群退化
+      double term =
+        volume * I_star * nuc_data.nu_total * nuc_data.sigma_f * phi;
+      if (term != 0.0)
+        terms.push_back(term);
+    }
+  }
+
+  return kahan_sum(terms);
+}
+
+//------------------------------------------------------------------------------
+// 标量重要性近似版分子（第 i 组）：
+//   N_i = Σ_cell ΔV × I*(r) × [Σ_g ν_{d,i,g} Σ_{f,g} φ_g]
+// 不含 χ_{d,i}，因为 I*(r) 已经包含了谱权重。
+//------------------------------------------------------------------------------
+double BetaEffective::compute_delayed_numerator_scalar_importance(int group,
+  const std::unordered_map<int, double>& flux,
+  const std::unordered_map<int, double>& adjoint_flux, double volume) const
+{
+  std::vector<double> terms;
+  terms.reserve(flux.size());
+
+  for (const auto& [cell_idx, phi] : flux) {
+    auto it_adj = adjoint_flux.find(cell_idx);
+    if (it_adj == adjoint_flux.end())
+      continue;
+
+    auto it_data = cell_nuclear_data_.find(cell_idx);
+    if (it_data == cell_nuclear_data_.end() || !it_data->second.is_fissionable)
+      continue;
+
+    const auto& nuc_data = it_data->second;
+    double I_star = it_adj->second; // 标量重要性
+
+    // 检查是否有多群通量数据
+    auto it_flux_groups = flux_group_map_.find(cell_idx);
+    if (it_flux_groups != flux_group_map_.end() &&
+        it_flux_groups->second.size() ==
+          static_cast<size_t>(n_energy_groups_) &&
+        nuc_data.sigma_f_groups.size() ==
+          static_cast<size_t>(n_energy_groups_) &&
+        nuc_data.nu_delayed_groups.size() ==
+          static_cast<size_t>(n_energy_groups_) * N_DELAYED_GROUPS) {
+      // 多群: F_{d,i} = Σ_g ν_{d,i,g} × Σ_{f,g} × φ_g
+      const auto& flux_groups = it_flux_groups->second;
+      double delayed_fission_source = 0.0;
+      for (int g = 0; g < n_energy_groups_; ++g) {
+        delayed_fission_source +=
+          nuc_data.nu_delayed_groups[delayed_offset(g, group)] *
+          nuc_data.sigma_f_groups[g] * flux_groups[g];
+      }
+      double term = volume * I_star * delayed_fission_source;
+      if (term != 0.0)
+        terms.push_back(term);
+    } else {
+      // 单群退化
+      double term =
+        volume * I_star * nuc_data.nu_delayed[group] * nuc_data.sigma_f * phi;
+      if (term != 0.0)
+        terms.push_back(term);
     }
   }
 
