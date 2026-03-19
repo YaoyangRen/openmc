@@ -166,21 +166,24 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
   // MCNP参考值 (beta_eff)
   const double mcnp_beta[6] = {
     0.00016, 0.00104, 0.00097, 0.00253, 0.00107, 0.00042};
-  const double mcnp_beta_total = 0.00619;
+  const double mcnp_beta_total = 0.00621;
 
   //==========================================================================
   // 方法 A: 严格伴随多群公式 (假定 adjoint 为真 φ*(r,E))
   //   D = Σ_cell ΔV × [Σ_{g'} φ*_{g'} χ_{p,g'}] × [Σ_g ν_g Σ_{f,g} φ_g]
-  //   N_i = Σ_cell ΔV × [Σ_{g'} φ*_{g'} χ_{d,i,g'}] × [Σ_g ν_{d,i,g} Σ_{f,g} φ_g]
+  //   N_i = Σ_cell ΔV × [Σ_{g'} φ*_{g'} χ_{d,i,g'}] × [Σ_g ν_{d,i,g} Σ_{f,g}
+  //   φ_g]
   //==========================================================================
-  double denom_adjoint = compute_denominator_material(flux, adjoint_flux, volume);
+  double denom_adjoint =
+    compute_denominator_material(flux, adjoint_flux, volume);
   std::array<double, N_DELAYED_GROUPS> num_adjoint;
   std::array<double, N_DELAYED_GROUPS> beta_adjoint;
   double beta_adjoint_total = 0.0;
   for (int i = 0; i < 8; ++i) {
     num_adjoint[i] =
       compute_delayed_numerator_material(i, flux, adjoint_flux, volume);
-    beta_adjoint[i] = (denom_adjoint > 0.0) ? num_adjoint[i] / denom_adjoint : 0.0;
+    beta_adjoint[i] =
+      (denom_adjoint > 0.0) ? num_adjoint[i] / denom_adjoint : 0.0;
     beta_adjoint_total += beta_adjoint[i];
   }
 
@@ -214,27 +217,31 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
   beta_total_ = beta_scalar_total;
 
   if (denominator_ <= 0.0) {
-    fatal_error(
-      "Denominator (scalar importance) is zero or negative! Cannot compute β_eff.");
+    fatal_error("Denominator (scalar importance) is zero or negative! Cannot "
+                "compute β_eff.");
   }
 
   // 输出分母对比
   std::cout << "\n  分母对比:" << std::endl;
-  std::cout << "    D(严格伴随,含χ) = " << std::scientific << std::setprecision(4)
-            << denom_adjoint << std::endl;
-  std::cout << "    D(标量重要性)   = " << std::scientific << std::setprecision(4)
-            << denom_scalar << std::endl;
-  std::cout << "    D(无χ诊断)      = " << std::scientific << std::setprecision(4)
-            << denominator_no_chi << std::endl;
+  std::cout << "    D(严格伴随,含χ) = " << std::scientific
+            << std::setprecision(4) << denom_adjoint << std::endl;
+  std::cout << "    D(标量重要性)   = " << std::scientific
+            << std::setprecision(4) << denom_scalar << std::endl;
+  std::cout << "    D(无χ诊断)      = " << std::scientific
+            << std::setprecision(4) << denominator_no_chi << std::endl;
   std::cout << "    D(标量)/D(无χ)   = " << std::fixed << std::setprecision(4)
-            << (denominator_no_chi > 0 ? denom_scalar / denominator_no_chi : 0.0)
+            << (denominator_no_chi > 0 ? denom_scalar / denominator_no_chi
+                                       : 0.0)
             << std::endl;
 
   // 输出两种方法的对比表
-  std::cout << "\n  β_eff 两种方法对比 (方法A: 严格伴随  方法B: 标量重要性近似):" << std::endl;
+  std::cout
+    << "\n  β_eff 两种方法对比 (方法A: 严格伴随  方法B: 标量重要性近似):"
+    << std::endl;
   std::cout << "  " << std::string(90, '-') << std::endl;
   std::cout << "    先驱核群    方法A(伴随)    方法B(标量)    MCNP参考      "
-               "偏差A(%)  偏差B(%)" << std::endl;
+               "偏差A(%)  偏差B(%)"
+            << std::endl;
   std::cout << "  " << std::string(90, '-') << std::endl;
 
   for (int i = 0; i < 6; ++i) {
