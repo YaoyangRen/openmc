@@ -377,6 +377,32 @@ void AdjointFlux::write_to_file(const std::string& filename)
     write_dataset(file_id, "group_total_flux", group_total_flux_);
   }
 
+  // ========== 语义元数据 (Phase 2) ==========
+  // 记录此文件中 "共轭通量" 的物理含义
+  hid_t sem_group = H5Gcreate(
+    file_id, "semantic_metadata", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+  write_attribute(sem_group, "physical_quantity",
+    "Response-weighted importance field, NOT true adjoint flux");
+  write_attribute(sem_group, "definition",
+    "phi_dag(r) = sum_i T(i->r) * I_star(i), where T is the transfer "
+    "function and I_star is the fission matrix eigenvector (scalar per cell)");
+  write_attribute(sem_group, "group_meaning",
+    "Group data phi_dag_g(r) reflects collision-energy-resolved importance "
+    "at response position r. The group index g refers to the energy of the "
+    "neutron causing fission at r, not the birth energy of fission neutrons.");
+  write_attribute(sem_group, "adjoint_source",
+    "I_star(i) from fission matrix eigenvalue problem. Scalar (no energy "
+    "dependence). This is the main limitation for beta_eff accuracy.");
+  write_attribute(sem_group, "limitations",
+    "1) I_star is scalar, not energy-resolved => cannot distinguish prompt/"
+    "delayed importance at source level. 2) phi_dag_g is response-energy "
+    "(collision), not birth-energy => chi weighting is approximate.");
+  write_attribute(sem_group, "usage_in_beta_eff",
+    "Method A: weight by chi (birth spectrum). "
+    "Method B: use scalar I_star directly. "
+    "Method D: weight by nu fractions (production decomposition).");
+  H5Gclose(sem_group);
+
   file_close(file_id);
 
   std::cout << "  稀疏条目: " << adjoint_flux_sparse_.size() << ", 估计大小: "

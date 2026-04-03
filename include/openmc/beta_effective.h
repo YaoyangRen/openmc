@@ -10,6 +10,16 @@
 
 namespace openmc {
 
+//==============================================================================
+//! 单种方法的 β_eff 结果集
+//==============================================================================
+struct MethodResult {
+  std::array<double, N_DELAYED_GROUPS> beta_i {};     //!< 各组 β_i,eff
+  std::array<double, N_DELAYED_GROUPS> numerators {}; //!< 各组分子
+  double denominator {0.0};                           //!< 分母
+  double beta_total {0.0};                            //!< 总 β_eff
+};
+
 // Forward declarations
 struct Position;
 
@@ -93,6 +103,53 @@ private:
   double compute_denominator_scalar_importance(
     const std::unordered_map<int, double>& flux,
     const std::unordered_map<int, double>& adjoint_flux, double volume) const;
+
+  //==========================================================================
+  // 方法 C: 相对有效重要性修正
+  //==========================================================================
+
+  //! 构建每单元、每缓发群的相对有效重要性比值 κ_i(cell)
+  //!
+  //! κ_i(cell) = A_{d,i}(cell) / A_p(cell)
+  //! 其中 A_p = Σ_{g'} s_{g'} χ_{p,g'}, A_{d,i} = Σ_{g'} s_{g'} χ_{d,i,g'}
+  //! s_{g'} 为 adjoint 分群值在单元内归一化后的形状
+  //! 当 A_p <= 0 或无分群数据时回退 κ_i = 1（等价于方法 B）
+  void build_relative_importance_map(
+    const std::unordered_map<int, double>& adjoint_flux);
+
+  //! 方法 C 分子：在方法 B 基础上乘以相对有效重要性修正
+  //! N_i^(C) = Σ_cell ΔV × I*(r) × κ_i(cell) × [Σ_g ν_{d,i,g} Σ_{f,g} φ_g]
+  double compute_delayed_numerator_relative_importance(int group,
+    const std::unordered_map<int, double>& flux,
+    const std::unordered_map<int, double>& adjoint_flux, double volume) const;
+
+  //==========================================================================
+  // Phase 2: 显式有效重要性场 (诊断用, 数学等价于方法 A)
+  //==========================================================================
+
+  //! 构建每单元的显式有效重要性场
+  //! I_eff_prompt(cell) = Σ_{g'} φ†_{g'} × χ_{p,g'}
+  //! I_eff_delayed_k(cell) = Σ_{g'} φ†_{g'} × χ_{d,k,g'}
+  void build_effective_importance_fields(
+    const std::unordered_map<int, double>& adjoint_flux);
+
+  //==========================================================================
+  // Phase 3 (方法 D): 族解析有效重要性 (ν-fraction decomposition)
+  //==========================================================================
+
+  //! 构建以 ν 产额份额分解的族解析重要性场
+  //! I_prompt(cell) = Σ_g φ†_g × (ν_{p,g} / ν_{total,g})
+  //! I_delayed_k(cell) = Σ_g φ†_g × (ν_{d,k,g} / ν_{total,g})
+  void build_family_resolved_importance(
+    const std::unordered_map<int, double>& adjoint_flux);
+
+  //! 方法 D 分母: D = Σ_cell ΔV × I_prompt(cell) × F_total(cell)
+  double compute_denominator_family_resolved(
+    const std::unordered_map<int, double>& flux, double volume) const;
+
+  //! 方法 D 分子: N_k = Σ_cell ΔV × I_delayed_k(cell) × F_{d,k}(cell)
+  double compute_delayed_numerator_family_resolved(int group,
+    const std::unordered_map<int, double>& flux, double volume) const;
 
   //! 输出详细诊断信息
   void print_diagnostic_info(const std::unordered_map<int, double>& flux,
@@ -198,6 +255,31 @@ private:
 
   // Phase 2.3: 多点采样统计
   int n_heterogeneous_cells_ {0}; //!< 包含多材料的单元数
+
+  // 方法 C: 相对有效重要性修正缓存
+  //! κ_i(cell) = A_{d,i}(cell) / A_p(cell), 维度 [cell_idx -> array<8>]
+  std::unordered_map<int, std::array<double, N_DELAYED_GROUPS>>
+    cell_relative_importance_ratio_;
+
+  //! 四种方法的结果缓存 (用于对比输出)
+  MethodResult result_a_; //!< 方法 A: 严格伴随
+  MethodResult result_b_; //!< 方法 B: 标量重要性
+  MethodResult result_c_; //!< 方法 C: 相对有效重要性修正
+  MethodResult result_d_; //!< 方法 D: 族解析有效重要性
+
+  //! 方法 C 诊断统计
+  int n_cells_with_kappa_ {0};     //!< 成功构建 κ_i 的单元数
+  int n_cells_fallback_kappa_ {0}; //!< 回退到 κ_i=1 的单元数
+
+  // Phase 2: 显式有效重要性场缓存 (诊断用)
+  std::unordered_map<int, double> cell_prompt_eff_importance_;
+  std::unordered_map<int, std::array<double, N_DELAYED_GROUPS>>
+    cell_delayed_eff_importance_;
+
+  // Phase 3: 族解析有效重要性缓存 (ν-fraction decomposition)
+  std::unordered_map<int, double> cell_family_prompt_importance_;
+  std::unordered_map<int, std::array<double, N_DELAYED_GROUPS>>
+    cell_family_delayed_importance_;
 
   // 网格信息(用于验证一致性)
   std::array<int, 3> grid_shape_;
