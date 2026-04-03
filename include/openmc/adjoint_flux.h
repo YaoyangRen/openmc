@@ -50,7 +50,7 @@ public:
       transfer_functions,
     const vector<double>& adjoint_source, const std::array<int, 3>& shape,
     const std::array<double, 3>& origin, double pitch, int n_groups = 1,
-    vector<double> energy_edges = {});
+    int n_families = 1, vector<double> energy_edges = {});
 
   // 获取计算结果（稀疏格式）
   const std::unordered_map<int, vector<double>>& get_adjoint_flux_sparse() const
@@ -77,6 +77,15 @@ public:
   double get_max_value() const;
   double get_total_flux() const;
 
+  // Family-resolved accessors
+  bool has_family_data() const { return has_family_data_; }
+  int n_families() const { return n_families_; }
+  const std::vector<std::unordered_map<int, vector<double>>>&
+  get_family_adjoint_flux() const
+  {
+    return family_adjoint_flux_;
+  }
+
 private:
   // 共轭通量数据（稀疏存储）
   // Key: 单元索引 j, Value: Φ†(j)
@@ -88,8 +97,13 @@ private:
   double pitch_ {0.0};
   size_t n_cells_ {0};
   int n_groups_ {1};
+  int n_families_ {1};
+  bool has_family_data_ {false};
   vector<double> energy_edges_;
   vector<double> group_total_flux_;
+
+  // Family-resolved adjoint flux: [family_index] -> (cell -> group_vector)
+  std::vector<std::unordered_map<int, vector<double>>> family_adjoint_flux_;
 
   // 统计信息
   double max_flux_ {0.0};

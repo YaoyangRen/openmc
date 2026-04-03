@@ -1010,7 +1010,9 @@ void score_general_ce_nonanalog(Particle& p, int i_tally, int start_index,
                       p.neutron_xs(p.event_nuclide()).nu_fission /
                       p.neutron_xs(p.event_nuclide()).total;
 
-        // 累积到传递函数网格
+        // 累积到传递函数网格 —— 按产额分份记入各 family
+        // family 0 = prompt, family 1..8 = delayed group 1..8
+        // 每次裂变碰撞对所有 family 同时贡献，权重为 ν_f/ν_total
         if (simulation::transfer_function_mesh &&
             p.source_particle_id() != -1) {
           double energy_eV = p.E();
@@ -1018,8 +1020,33 @@ void score_general_ce_nonanalog(Particle& p, int i_tally, int start_index,
           if (!settings::run_CE && p.type() == Type::neutron) {
             mg_group = p.g();
           }
-          simulation::transfer_function_mesh->accumulate(
-            p.r(), nu_t, p.source_particle_id(), energy_eV, mg_group);
+
+          const auto& nuc = *data::nuclides[p.event_nuclide()];
+          double E = p.E();
+          double nu_total_yield = nuc.nu(E, Nuclide::EmissionMode::total);
+
+          if (nu_total_yield > 0.0) {
+            // prompt 份额
+            double nu_p = nuc.nu(E, Nuclide::EmissionMode::prompt);
+            simulation::transfer_function_mesh->accumulate(p.r(),
+              nu_t * (nu_p / nu_total_yield), p.source_particle_id(), 0,
+              energy_eV, mg_group);
+
+            // delayed 各群份额
+            int n_prec = std::min(nuc.n_precursor_, 8);
+            for (int k = 1; k <= n_prec; ++k) {
+              double nu_dk = nuc.nu(E, Nuclide::EmissionMode::delayed, k);
+              if (nu_dk > 0.0) {
+                simulation::transfer_function_mesh->accumulate(p.r(),
+                  nu_t * (nu_dk / nu_total_yield), p.source_particle_id(), k,
+                  energy_eV, mg_group);
+              }
+            }
+          } else {
+            // 回退：全部记入 family 0
+            simulation::transfer_function_mesh->accumulate(
+              p.r(), nu_t, p.source_particle_id(), 0, energy_eV, mg_group);
+          }
         }
       }
       score = 0.0; // tally 本身不记录数值，只作为开关

@@ -36,6 +36,9 @@ namespace openmc {
 //!
 class GreenFunctionMesh {
 public:
+  //! prompt(0) + delayed_1..8 共 9 个 family
+  static constexpr int N_FAMILIES = 9;
+
   // 构造函数，初始化传递函数网格
   explicit GreenFunctionMesh(std::shared_ptr<SharedMeshGrid> grid,
     int max_batches, std::vector<double> energy_edges = {});
@@ -45,8 +48,10 @@ public:
 
   // 为特定源粒子累积传递函数贡献
   // contribution: 期望裂变中子数 nu_t = (w/k_eff) × w_ufs × (ν̄Σf/Σt)
+  // family: 0=prompt, 1..8=delayed_group (来自 p.delayed_group())
   void accumulate(const Position& r, double contribution,
-    int64_t source_particle_id, double energy_eV = -1.0, int mg_group = -1);
+    int64_t source_particle_id, int family = 0, double energy_eV = -1.0,
+    int mg_group = -1);
 
   // 开始新batch
   void start_new_batch(int batch_id);

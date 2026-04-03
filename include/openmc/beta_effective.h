@@ -105,25 +105,6 @@ private:
     const std::unordered_map<int, double>& adjoint_flux, double volume) const;
 
   //==========================================================================
-  // 方法 C: 相对有效重要性修正
-  //==========================================================================
-
-  //! 构建每单元、每缓发群的相对有效重要性比值 κ_i(cell)
-  //!
-  //! κ_i(cell) = A_{d,i}(cell) / A_p(cell)
-  //! 其中 A_p = Σ_{g'} s_{g'} χ_{p,g'}, A_{d,i} = Σ_{g'} s_{g'} χ_{d,i,g'}
-  //! s_{g'} 为 adjoint 分群值在单元内归一化后的形状
-  //! 当 A_p <= 0 或无分群数据时回退 κ_i = 1（等价于方法 B）
-  void build_relative_importance_map(
-    const std::unordered_map<int, double>& adjoint_flux);
-
-  //! 方法 C 分子：在方法 B 基础上乘以相对有效重要性修正
-  //! N_i^(C) = Σ_cell ΔV × I*(r) × κ_i(cell) × [Σ_g ν_{d,i,g} Σ_{f,g} φ_g]
-  double compute_delayed_numerator_relative_importance(int group,
-    const std::unordered_map<int, double>& flux,
-    const std::unordered_map<int, double>& adjoint_flux, double volume) const;
-
-  //==========================================================================
   // Phase 2: 显式有效重要性场 (诊断用, 数学等价于方法 A)
   //==========================================================================
 
@@ -149,6 +130,20 @@ private:
 
   //! 方法 D 分子: N_k = Σ_cell ΔV × I_delayed_k(cell) × F_{d,k}(cell)
   double compute_delayed_numerator_family_resolved(int group,
+    const std::unordered_map<int, double>& flux, double volume) const;
+
+  //==========================================================================
+  // 方法 E: 上游族解析 (upstream family-resolved adjoint)
+  //==========================================================================
+
+  //! 方法 E 分母: D = Σ_cell ΔV × I_total(cell) × F_total(cell)
+  //! I_total = I_prompt + Σ_k I_delayed_k (来自上游族解析伴随通量)
+  double compute_denominator_upstream_family(
+    const std::unordered_map<int, double>& flux, double volume) const;
+
+  //! 方法 E 分子: N_k = Σ_cell ΔV × I_delayed_k(cell) × F_{d,k}(cell)
+  //! I_delayed_k 来自上游族解析伴随通量 (传递函数 family 轴)
+  double compute_delayed_numerator_upstream_family(int group,
     const std::unordered_map<int, double>& flux, double volume) const;
 
   //! 输出详细诊断信息
@@ -256,20 +251,11 @@ private:
   // Phase 2.3: 多点采样统计
   int n_heterogeneous_cells_ {0}; //!< 包含多材料的单元数
 
-  // 方法 C: 相对有效重要性修正缓存
-  //! κ_i(cell) = A_{d,i}(cell) / A_p(cell), 维度 [cell_idx -> array<8>]
-  std::unordered_map<int, std::array<double, N_DELAYED_GROUPS>>
-    cell_relative_importance_ratio_;
-
-  //! 四种方法的结果缓存 (用于对比输出)
+  //! 各方法的结果缓存 (用于对比输出)
   MethodResult result_a_; //!< 方法 A: 严格伴随
   MethodResult result_b_; //!< 方法 B: 标量重要性
-  MethodResult result_c_; //!< 方法 C: 相对有效重要性修正
   MethodResult result_d_; //!< 方法 D: 族解析有效重要性
-
-  //! 方法 C 诊断统计
-  int n_cells_with_kappa_ {0};     //!< 成功构建 κ_i 的单元数
-  int n_cells_fallback_kappa_ {0}; //!< 回退到 κ_i=1 的单元数
+  MethodResult result_e_; //!< 方法 E: 上游族解析
 
   // Phase 2: 显式有效重要性场缓存 (诊断用)
   std::unordered_map<int, double> cell_prompt_eff_importance_;
@@ -280,6 +266,12 @@ private:
   std::unordered_map<int, double> cell_family_prompt_importance_;
   std::unordered_map<int, std::array<double, N_DELAYED_GROUPS>>
     cell_family_delayed_importance_;
+
+  // Method E: 上游族解析伴随通量缓存
+  bool has_upstream_family_data_ {false};
+  std::unordered_map<int, double> cell_upstream_prompt_importance_;
+  std::array<std::unordered_map<int, double>, N_DELAYED_GROUPS>
+    cell_upstream_delayed_importance_;
 
   // 网格信息(用于验证一致性)
   std::array<int, 3> grid_shape_;

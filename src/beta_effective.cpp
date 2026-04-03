@@ -204,26 +204,6 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
     beta_scalar_total += beta_scalar[i];
   }
 
-  //==========================================================================
-  // 方法 C: 相对有效重要性修正 (分母保持方法 B, 分子乘 κ_i)
-  //   D = D_scalar (同方法 B)
-  //   N_i = Σ_cell ΔV × I*(r) × κ_i(cell) × [Σ_g ν_{d,i,g} Σ_{f,g} φ_g]
-  //   κ_i(cell) = A_{d,i}(cell) / A_p(cell)  -- 见
-  //   build_relative_importance_map
-  //==========================================================================
-  build_relative_importance_map(adjoint_flux);
-  double denom_relative = denom_scalar; // 分母与方法 B 相同
-  std::array<double, N_DELAYED_GROUPS> num_relative;
-  std::array<double, N_DELAYED_GROUPS> beta_relative;
-  double beta_relative_total = 0.0;
-  for (int i = 0; i < 8; ++i) {
-    num_relative[i] = compute_delayed_numerator_relative_importance(
-      i, flux, adjoint_flux, volume);
-    beta_relative[i] =
-      (denom_relative > 0.0) ? num_relative[i] / denom_relative : 0.0;
-    beta_relative_total += beta_relative[i];
-  }
-
   // 诊断: 不含 chi 的分母
   double denominator_no_chi =
     compute_denominator_without_chi(flux, adjoint_flux, volume);
@@ -253,24 +233,47 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
     beta_family_total += beta_family[i];
   }
 
-  // 缓存四种方法的结果
+  //==========================================================================
+  // 方法 E: 上游族解析 (upstream family-resolved adjoint)
+  //   利用传递函数 family 轴，从上游直接获取 prompt/delayed 重要性
+  //   传递函数按产额分份 ν_f/ν_t 记入各 family，故 I_delayed_k 已含 ν_{d,k}/ν_t
+  //   D = Σ_cell ΔV × I_total(cell) × F_total(cell)
+  //   N_k = Σ_cell ΔV × I_delayed_k(cell) × F_total(cell)  (用 F_total 避免
+  //   ν_{d,k} 双重计数)
+  //==========================================================================
+  double denom_upstream = 0.0;
+  std::array<double, N_DELAYED_GROUPS> num_upstream {};
+  std::array<double, N_DELAYED_GROUPS> beta_upstream {};
+  double beta_upstream_total = 0.0;
+  if (has_upstream_family_data_) {
+    denom_upstream = compute_denominator_upstream_family(flux, volume);
+    for (int i = 0; i < 8; ++i) {
+      num_upstream[i] =
+        compute_delayed_numerator_upstream_family(i, flux, volume);
+      beta_upstream[i] =
+        (denom_upstream > 0.0) ? num_upstream[i] / denom_upstream : 0.0;
+      beta_upstream_total += beta_upstream[i];
+    }
+  }
+
+  // 缓存各方法的结果
   result_a_.denominator = denom_adjoint;
   result_a_.beta_total = beta_adjoint_total;
   result_b_.denominator = denom_scalar;
   result_b_.beta_total = beta_scalar_total;
-  result_c_.denominator = denom_relative;
-  result_c_.beta_total = beta_relative_total;
   result_d_.denominator = denom_family;
   result_d_.beta_total = beta_family_total;
+  result_e_.denominator = denom_upstream;
+  result_e_.beta_total = beta_upstream_total;
   for (int i = 0; i < 8; ++i) {
     result_a_.numerators[i] = num_adjoint[i];
     result_a_.beta_i[i] = beta_adjoint[i];
     result_b_.numerators[i] = num_scalar[i];
     result_b_.beta_i[i] = beta_scalar[i];
-    result_c_.numerators[i] = num_relative[i];
-    result_c_.beta_i[i] = beta_relative[i];
     result_d_.numerators[i] = num_family[i];
     result_d_.beta_i[i] = beta_family[i];
+    result_e_.numerators[i] = num_upstream[i];
+    result_e_.beta_i[i] = beta_upstream[i];
   }
 
   // 使用标量重要性近似版作为主结果 (因为当前共轭量为 I*(r))
@@ -294,6 +297,10 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
             << std::setprecision(4) << denom_scalar << std::endl;
   std::cout << "    D(族解析,方法D) = " << std::scientific
             << std::setprecision(4) << denom_family << std::endl;
+  if (has_upstream_family_data_) {
+    std::cout << "    D(上游族解析,E) = " << std::scientific
+              << std::setprecision(4) << denom_upstream << std::endl;
+  }
   std::cout << "    D(无χ诊断)      = " << std::scientific
             << std::setprecision(4) << denominator_no_chi << std::endl;
   std::cout << "    D(标量)/D(无χ)   = " << std::fixed << std::setprecision(4)
@@ -301,16 +308,25 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
                                        : 0.0)
             << std::endl;
 
-  // 输出四种方法的对比表
-  std::cout << "\n  β_eff 四种方法对比:" << std::endl;
-  std::cout << "    A: 严格伴随  B: 标量重要性  C: 相对修正  D: 族解析重要性"
-            << std::endl;
-  std::cout << "  " << std::string(145, '-') << std::endl;
-  std::cout
-    << "    先驱核群    方法A(伴随)    方法B(标量)    方法C(修正)    "
-       "方法D(族解析)  MCNP参考      偏差A(%)  偏差B(%)  偏差C(%)  偏差D(%)"
-    << std::endl;
-  std::cout << "  " << std::string(145, '-') << std::endl;
+  // 输出方法对比表
+  std::cout << "\n  β_eff 方法对比:" << std::endl;
+  if (has_upstream_family_data_) {
+    std::cout << "    A: 严格伴随  B: 标量重要性  D: 族解析  E: 上游族解析"
+              << std::endl;
+    std::cout << "  " << std::string(155, '-') << std::endl;
+    std::cout << "    先驱核群    方法A(伴随)    方法B(标量)    "
+                 "方法D(族解析)  方法E(上游)  MCNP参考      偏差A(%)  偏差B(%) "
+                 " 偏差D(%)  偏差E(%)"
+              << std::endl;
+    std::cout << "  " << std::string(155, '-') << std::endl;
+  } else {
+    std::cout << "    A: 严格伴随  B: 标量重要性  D: 族解析重要性" << std::endl;
+    std::cout << "  " << std::string(130, '-') << std::endl;
+    std::cout << "    先驱核群    方法A(伴随)    方法B(标量)    "
+                 "方法D(族解析)  MCNP参考      偏差A(%)  偏差B(%)  偏差D(%)"
+              << std::endl;
+    std::cout << "  " << std::string(130, '-') << std::endl;
+  }
 
   for (int i = 0; i < 6; ++i) {
     double err_a = (mcnp_beta[i] > 0)
@@ -319,37 +335,50 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
     double err_b = (mcnp_beta[i] > 0)
                      ? (beta_scalar[i] - mcnp_beta[i]) / mcnp_beta[i] * 100.0
                      : 0.0;
-    double err_c = (mcnp_beta[i] > 0)
-                     ? (beta_relative[i] - mcnp_beta[i]) / mcnp_beta[i] * 100.0
-                     : 0.0;
     double err_d = (mcnp_beta[i] > 0)
                      ? (beta_family[i] - mcnp_beta[i]) / mcnp_beta[i] * 100.0
                      : 0.0;
-    std::cout << "       " << (i + 1) << "        " << std::scientific
-              << std::setprecision(5) << beta_adjoint[i] << "  "
-              << std::setprecision(5) << beta_scalar[i] << "  "
-              << std::setprecision(5) << beta_relative[i] << "  "
-              << std::setprecision(5) << beta_family[i] << "  "
-              << std::setprecision(5) << mcnp_beta[i] << "  " << std::fixed
-              << std::setprecision(2) << std::setw(7) << err_a << "  "
-              << std::setw(7) << err_b << "  " << std::setw(7) << err_c << "  "
-              << std::setw(7) << err_d << std::endl;
+    if (has_upstream_family_data_) {
+      double err_e = (mcnp_beta[i] > 0) ? (beta_upstream[i] - mcnp_beta[i]) /
+                                            mcnp_beta[i] * 100.0
+                                        : 0.0;
+      std::cout << "       " << (i + 1) << "        " << std::scientific
+                << std::setprecision(5) << beta_adjoint[i] << "  "
+                << std::setprecision(5) << beta_scalar[i] << "  "
+                << std::setprecision(5) << beta_family[i] << "  "
+                << std::setprecision(5) << beta_upstream[i] << "  "
+                << std::setprecision(5) << mcnp_beta[i] << "  " << std::fixed
+                << std::setprecision(2) << std::setw(7) << err_a << "  "
+                << std::setw(7) << err_b << "  " << std::setw(7) << err_d
+                << "  " << std::setw(7) << err_e << std::endl;
+    } else {
+      std::cout << "       " << (i + 1) << "        " << std::scientific
+                << std::setprecision(5) << beta_adjoint[i] << "  "
+                << std::setprecision(5) << beta_scalar[i] << "  "
+                << std::setprecision(5) << beta_family[i] << "  "
+                << std::setprecision(5) << mcnp_beta[i] << "  " << std::fixed
+                << std::setprecision(2) << std::setw(7) << err_a << "  "
+                << std::setw(7) << err_b << "  " << std::setw(7) << err_d
+                << std::endl;
+    }
   }
   // 群7和群8（如有）
   for (int i = 6; i < 8; ++i) {
     if (beta_adjoint[i] > 1e-10 || beta_scalar[i] > 1e-10 ||
-        beta_relative[i] > 1e-10 || beta_family[i] > 1e-10) {
+        beta_family[i] > 1e-10 || beta_upstream[i] > 1e-10) {
       std::cout << "       " << (i + 1) << "        " << std::scientific
                 << std::setprecision(5) << beta_adjoint[i] << "  "
                 << std::setprecision(5) << beta_scalar[i] << "  "
-                << std::setprecision(5) << beta_relative[i] << "  "
-                << std::setprecision(5) << beta_family[i]
-                << "      -             -         -         -         -"
-                << std::endl;
+                << std::setprecision(5) << beta_family[i];
+      if (has_upstream_family_data_) {
+        std::cout << "  " << std::setprecision(5) << beta_upstream[i];
+      }
+      std::cout << "      -             -         -         -" << std::endl;
     }
   }
 
-  std::cout << "  " << std::string(145, '-') << std::endl;
+  std::cout << "  " << std::string(has_upstream_family_data_ ? 155 : 130, '-')
+            << std::endl;
   double err_a_total =
     (mcnp_beta_total > 0)
       ? (beta_adjoint_total - mcnp_beta_total) / mcnp_beta_total * 100.0
@@ -358,27 +387,43 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
     (mcnp_beta_total > 0)
       ? (beta_scalar_total - mcnp_beta_total) / mcnp_beta_total * 100.0
       : 0.0;
-  double err_c_total =
-    (mcnp_beta_total > 0)
-      ? (beta_relative_total - mcnp_beta_total) / mcnp_beta_total * 100.0
-      : 0.0;
   double err_d_total =
     (mcnp_beta_total > 0)
       ? (beta_family_total - mcnp_beta_total) / mcnp_beta_total * 100.0
       : 0.0;
-  std::cout << "      总计      " << std::scientific << std::setprecision(5)
-            << beta_adjoint_total << "  " << std::setprecision(5)
-            << beta_scalar_total << "  " << std::setprecision(5)
-            << beta_relative_total << "  " << std::setprecision(5)
-            << beta_family_total << "  " << std::setprecision(5)
-            << mcnp_beta_total << "  " << std::fixed << std::setprecision(2)
-            << std::setw(7) << err_a_total << "  " << std::setw(7)
-            << err_b_total << "  " << std::setw(7) << err_c_total << "  "
-            << std::setw(7) << err_d_total << std::endl;
-  std::cout << "  " << std::string(145, '-') << std::endl;
+  if (has_upstream_family_data_) {
+    double err_e_total =
+      (mcnp_beta_total > 0)
+        ? (beta_upstream_total - mcnp_beta_total) / mcnp_beta_total * 100.0
+        : 0.0;
+    std::cout << "      总计      " << std::scientific << std::setprecision(5)
+              << beta_adjoint_total << "  " << std::setprecision(5)
+              << beta_scalar_total << "  " << std::setprecision(5)
+              << beta_family_total << "  " << std::setprecision(5)
+              << beta_upstream_total << "  " << std::setprecision(5)
+              << mcnp_beta_total << "  " << std::fixed << std::setprecision(2)
+              << std::setw(7) << err_a_total << "  " << std::setw(7)
+              << err_b_total << "  " << std::setw(7) << err_d_total << "  "
+              << std::setw(7) << err_e_total << std::endl;
+  } else {
+    std::cout << "      总计      " << std::scientific << std::setprecision(5)
+              << beta_adjoint_total << "  " << std::setprecision(5)
+              << beta_scalar_total << "  " << std::setprecision(5)
+              << beta_family_total << "  " << std::setprecision(5)
+              << mcnp_beta_total << "  " << std::fixed << std::setprecision(2)
+              << std::setw(7) << err_a_total << "  " << std::setw(7)
+              << err_b_total << "  " << std::setw(7) << err_d_total
+              << std::endl;
+  }
+  std::cout << "  " << std::string(has_upstream_family_data_ ? 155 : 130, '-')
+            << std::endl;
   std::cout << "  (*)当前主结果采用方法B: 标量重要性近似" << std::endl;
   std::cout << "  (*)方法D: ν-fraction decomposition, 改善群间重要性分配"
             << std::endl;
+  if (has_upstream_family_data_) {
+    std::cout << "  (*)方法E: upstream family-resolved, 传递函数 family 轴分辨"
+              << std::endl;
+  }
 
   // 7. 输出结果到文件
   std::cout << "\n[4/4] 写入结果: " << output_file << std::endl;
@@ -538,6 +583,52 @@ void BetaEffective::read_adjoint_flux_data(const std::string& filename,
       }
       adjoint_group_map_[cell] = std::move(groups);
     }
+  }
+
+  // ========== 读取 family_resolved/ 组 (Method E) ==========
+  has_upstream_family_data_ = false;
+  cell_upstream_prompt_importance_.clear();
+  for (int k = 0; k < N_DELAYED_GROUPS; ++k) {
+    cell_upstream_delayed_importance_[k].clear();
+  }
+
+  if (object_exists(file_id, "family_resolved")) {
+    hid_t fr_group = H5Gopen(file_id, "family_resolved", H5P_DEFAULT);
+
+    // Read prompt importance
+    if (object_exists(fr_group, "prompt")) {
+      hid_t pg = H5Gopen(fr_group, "prompt", H5P_DEFAULT);
+      vector<int> p_indices;
+      vector<double> p_mean;
+      read_dataset(pg, "cell_indices", p_indices);
+      read_dataset(pg, "flux_mean", p_mean);
+      for (size_t i = 0; i < p_indices.size(); ++i) {
+        cell_upstream_prompt_importance_[p_indices[i]] = p_mean[i];
+      }
+      H5Gclose(pg);
+    }
+
+    // Read delayed_1..8 importance
+    for (int k = 0; k < N_DELAYED_GROUPS; ++k) {
+      std::string dname = "delayed_" + std::to_string(k + 1);
+      if (object_exists(fr_group, dname.c_str())) {
+        hid_t dg = H5Gopen(fr_group, dname.c_str(), H5P_DEFAULT);
+        vector<int> d_indices;
+        vector<double> d_mean;
+        read_dataset(dg, "cell_indices", d_indices);
+        read_dataset(dg, "flux_mean", d_mean);
+        for (size_t i = 0; i < d_indices.size(); ++i) {
+          cell_upstream_delayed_importance_[k][d_indices[i]] = d_mean[i];
+        }
+        H5Gclose(dg);
+      }
+    }
+
+    H5Gclose(fr_group);
+    has_upstream_family_data_ = true;
+    std::cout << "  [Method E] Family-resolved adjoint data loaded: "
+              << cell_upstream_prompt_importance_.size() << " prompt cells"
+              << std::endl;
   }
 
   file_close(file_id);
@@ -824,26 +915,6 @@ void BetaEffective::write_to_file(const std::string& filename) const
     H5Gclose(grp);
   }
 
-  // 方法 C: 相对有效重要性修正
-  {
-    hid_t grp =
-      H5Gcreate(mc_group, "method_c", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
-    write_attribute(
-      grp, "description", "Relative effective importance correction");
-    std::vector<double> bi(result_c_.beta_i.begin(), result_c_.beta_i.end());
-    write_dataset(grp, "beta_i", bi);
-    std::vector<double> bt = {result_c_.beta_total};
-    write_dataset(grp, "beta_total", bt);
-    std::vector<double> num(
-      result_c_.numerators.begin(), result_c_.numerators.end());
-    write_dataset(grp, "numerator", num);
-    std::vector<double> den = {result_c_.denominator};
-    write_dataset(grp, "denominator", den);
-    write_attribute(grp, "n_cells_with_kappa", n_cells_with_kappa_);
-    write_attribute(grp, "n_cells_fallback_kappa", n_cells_fallback_kappa_);
-    H5Gclose(grp);
-  }
-
   // 方法 D: 族解析有效重要性 (ν-fraction decomposition)
   {
     hid_t grp =
@@ -858,6 +929,24 @@ void BetaEffective::write_to_file(const std::string& filename) const
       result_d_.numerators.begin(), result_d_.numerators.end());
     write_dataset(grp, "numerator", num);
     std::vector<double> den = {result_d_.denominator};
+    write_dataset(grp, "denominator", den);
+    H5Gclose(grp);
+  }
+
+  // 方法 E: 上游族解析 (upstream family-resolved)
+  if (has_upstream_family_data_) {
+    hid_t grp =
+      H5Gcreate(mc_group, "method_e", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+    write_attribute(
+      grp, "description", "Upstream family-resolved adjoint (TF family axis)");
+    std::vector<double> bi(result_e_.beta_i.begin(), result_e_.beta_i.end());
+    write_dataset(grp, "beta_i", bi);
+    std::vector<double> bt = {result_e_.beta_total};
+    write_dataset(grp, "beta_total", bt);
+    std::vector<double> num(
+      result_e_.numerators.begin(), result_e_.numerators.end());
+    write_dataset(grp, "numerator", num);
+    std::vector<double> den = {result_e_.denominator};
     write_dataset(grp, "denominator", den);
     H5Gclose(grp);
   }
@@ -1227,218 +1316,6 @@ double BetaEffective::compute_delayed_numerator_scalar_importance(int group,
 }
 
 //==============================================================================
-// Method C: Relative Effective Importance Correction
-// 在方法 B 基础上引入单元级的 κ_i 修正因子，补偿各 delayed family
-// 出生谱 χ_{d,i} 与 prompt 谱 χ_p 的差异导致的有效重要性偏差。
-//==============================================================================
-
-//------------------------------------------------------------------------------
-// 构建每单元、每缓发群的相对有效重要性比值 κ_i(cell)
-//   κ_i = A_{d,i} / A_p
-//   A_p     = Σ_{g'} s_{g'} × χ_{p,g'}
-//   A_{d,i} = Σ_{g'} s_{g'} × χ_{d,i,g'}
-//   s_{g'} = adjoint_{g'} / Σ_{g'} adjoint_{g'}  (归一化 adjoint 形状)
-// 当 A_p <= 0 或无分群数据时 κ_i 回退到 1.0
-//------------------------------------------------------------------------------
-void BetaEffective::build_relative_importance_map(
-  const std::unordered_map<int, double>& adjoint_flux)
-{
-  cell_relative_importance_ratio_.clear();
-  n_cells_with_kappa_ = 0;
-  n_cells_fallback_kappa_ = 0;
-
-  if (!adjoint_has_group_data_ || n_energy_groups_ <= 1) {
-    // 无分群数据，所有单元回退 κ_i = 1
-    for (const auto& [cell_idx, nuc_data] : cell_nuclear_data_) {
-      if (!nuc_data.is_fissionable)
-        continue;
-      std::array<double, N_DELAYED_GROUPS> kappa;
-      kappa.fill(1.0);
-      cell_relative_importance_ratio_[cell_idx] = kappa;
-      n_cells_fallback_kappa_++;
-    }
-    std::cout << "  [方法C] 无分群 adjoint 数据, 全部回退到 κ_i=1 (等价方法B)"
-              << std::endl;
-    return;
-  }
-
-  // 统计 κ_i 的范围（诊断用）
-  std::array<double, N_DELAYED_GROUPS> kappa_min, kappa_max, kappa_sum;
-  std::array<int, N_DELAYED_GROUPS> kappa_count;
-  kappa_min.fill(1e30);
-  kappa_max.fill(-1e30);
-  kappa_sum.fill(0.0);
-  kappa_count.fill(0);
-
-  for (const auto& [cell_idx, nuc_data] : cell_nuclear_data_) {
-    if (!nuc_data.is_fissionable)
-      continue;
-
-    std::array<double, N_DELAYED_GROUPS> kappa;
-    kappa.fill(1.0); // 默认回退
-
-    // 查找 adjoint 分群数据
-    auto it_adj = adjoint_group_map_.find(cell_idx);
-    if (it_adj == adjoint_group_map_.end() ||
-        it_adj->second.size() != static_cast<size_t>(n_energy_groups_)) {
-      cell_relative_importance_ratio_[cell_idx] = kappa;
-      n_cells_fallback_kappa_++;
-      continue;
-    }
-
-    // 检查核数据完整性
-    if (nuc_data.chi_prompt_groups.size() !=
-          static_cast<size_t>(n_energy_groups_) ||
-        nuc_data.chi_delayed_groups.size() !=
-          static_cast<size_t>(n_energy_groups_) * N_DELAYED_GROUPS) {
-      cell_relative_importance_ratio_[cell_idx] = kappa;
-      n_cells_fallback_kappa_++;
-      continue;
-    }
-
-    const auto& adj_groups = it_adj->second;
-
-    // 归一化 adjoint 形状 s_{g'} = adj_{g'} / Σ adj_{g'}
-    double adj_total = 0.0;
-    for (int gp = 0; gp < n_energy_groups_; ++gp) {
-      adj_total += adj_groups[gp];
-    }
-
-    if (adj_total <= 0.0) {
-      cell_relative_importance_ratio_[cell_idx] = kappa;
-      n_cells_fallback_kappa_++;
-      continue;
-    }
-
-    // A_p = Σ_{g'} s_{g'} × χ_{p,g'}
-    double A_prompt = 0.0;
-    for (int gp = 0; gp < n_energy_groups_; ++gp) {
-      double s_gp = adj_groups[gp] / adj_total;
-      A_prompt += s_gp * nuc_data.chi_prompt_groups[gp];
-    }
-
-    if (A_prompt <= 0.0) {
-      cell_relative_importance_ratio_[cell_idx] = kappa;
-      n_cells_fallback_kappa_++;
-      continue;
-    }
-
-    // 对每个 delayed group 计算 κ_i
-    bool valid = true;
-    for (int i = 0; i < N_DELAYED_GROUPS; ++i) {
-      double A_delayed_i = 0.0;
-      for (int gp = 0; gp < n_energy_groups_; ++gp) {
-        double s_gp = adj_groups[gp] / adj_total;
-        A_delayed_i +=
-          s_gp * nuc_data.chi_delayed_groups[delayed_offset(gp, i)];
-      }
-      kappa[i] = A_delayed_i / A_prompt;
-
-      // 安全检查: κ_i 应为正有限值，物理上通常在 0.5~2 范围内
-      if (!std::isfinite(kappa[i]) || kappa[i] <= 0.0) {
-        valid = false;
-        break;
-      }
-
-      // 收集统计
-      kappa_min[i] = std::min(kappa_min[i], kappa[i]);
-      kappa_max[i] = std::max(kappa_max[i], kappa[i]);
-      kappa_sum[i] += kappa[i];
-      kappa_count[i]++;
-    }
-
-    if (!valid) {
-      kappa.fill(1.0);
-      n_cells_fallback_kappa_++;
-    } else {
-      n_cells_with_kappa_++;
-    }
-
-    cell_relative_importance_ratio_[cell_idx] = kappa;
-  }
-
-  // 输出诊断统计
-  std::cout << "  [方法C] κ_i 构建完成: " << n_cells_with_kappa_
-            << " 个有效单元, " << n_cells_fallback_kappa_ << " 个回退单元"
-            << std::endl;
-
-  if (n_cells_with_kappa_ > 0) {
-    std::cout << "  [方法C] κ_i 统计 (min/mean/max):" << std::endl;
-    for (int i = 0; i < N_DELAYED_GROUPS; ++i) {
-      if (kappa_count[i] > 0) {
-        double mean = kappa_sum[i] / kappa_count[i];
-        std::cout << "    群 " << (i + 1) << ": " << std::fixed
-                  << std::setprecision(4) << kappa_min[i] << " / " << mean
-                  << " / " << kappa_max[i] << std::endl;
-      }
-    }
-  }
-}
-
-//------------------------------------------------------------------------------
-// 方法 C 分子：标量重要性 × 相对有效重要性修正
-//   N_i^(C) = Σ_cell ΔV × I*(r) × κ_i(cell) × [Σ_g ν_{d,i,g} Σ_{f,g} φ_g]
-// 分母保持方法 B 不变，由此改善各群间的分配而不改变总量语义。
-//------------------------------------------------------------------------------
-double BetaEffective::compute_delayed_numerator_relative_importance(int group,
-  const std::unordered_map<int, double>& flux,
-  const std::unordered_map<int, double>& adjoint_flux, double volume) const
-{
-  std::vector<double> terms;
-  terms.reserve(flux.size());
-
-  for (const auto& [cell_idx, phi] : flux) {
-    auto it_adj = adjoint_flux.find(cell_idx);
-    if (it_adj == adjoint_flux.end())
-      continue;
-
-    auto it_data = cell_nuclear_data_.find(cell_idx);
-    if (it_data == cell_nuclear_data_.end() || !it_data->second.is_fissionable)
-      continue;
-
-    const auto& nuc_data = it_data->second;
-    double I_star = it_adj->second;
-
-    // 获取 κ_i 修正因子
-    double kappa_i = 1.0;
-    auto it_kappa = cell_relative_importance_ratio_.find(cell_idx);
-    if (it_kappa != cell_relative_importance_ratio_.end()) {
-      kappa_i = it_kappa->second[group];
-    }
-
-    // 检查是否有多群通量数据
-    auto it_flux_groups = flux_group_map_.find(cell_idx);
-    if (it_flux_groups != flux_group_map_.end() &&
-        it_flux_groups->second.size() ==
-          static_cast<size_t>(n_energy_groups_) &&
-        nuc_data.sigma_f_groups.size() ==
-          static_cast<size_t>(n_energy_groups_) &&
-        nuc_data.nu_delayed_groups.size() ==
-          static_cast<size_t>(n_energy_groups_) * N_DELAYED_GROUPS) {
-      // 多群: F_{d,i} = Σ_g ν_{d,i,g} × Σ_{f,g} × φ_g
-      const auto& flux_groups = it_flux_groups->second;
-      double delayed_fission_source = 0.0;
-      for (int g = 0; g < n_energy_groups_; ++g) {
-        delayed_fission_source +=
-          nuc_data.nu_delayed_groups[delayed_offset(g, group)] *
-          nuc_data.sigma_f_groups[g] * flux_groups[g];
-      }
-      double term = volume * I_star * kappa_i * delayed_fission_source;
-      if (term != 0.0)
-        terms.push_back(term);
-    } else {
-      // 单群退化
-      double term = volume * I_star * kappa_i * nuc_data.nu_delayed[group] *
-                    nuc_data.sigma_f * phi;
-      if (term != 0.0)
-        terms.push_back(term);
-    }
-  }
-
-  return kahan_sum(terms);
-}
-
-//==============================================================================
 // Phase 2: 显式有效重要性场 (诊断用, 数学等价于方法 A)
 //==============================================================================
 
@@ -1741,8 +1618,126 @@ double BetaEffective::compute_delayed_numerator_family_resolved(
       if (term != 0.0)
         terms.push_back(term);
     } else {
-      double term = volume * I_delayed_k * nuc_data.nu_total *
-                    nuc_data.sigma_f * phi;
+      double term =
+        volume * I_delayed_k * nuc_data.nu_total * nuc_data.sigma_f * phi;
+      if (term != 0.0)
+        terms.push_back(term);
+    }
+  }
+
+  return kahan_sum(terms);
+}
+
+//------------------------------------------------------------------------------
+// 方法 E 分母: D = Σ_cell ΔV × I_total(cell) × F_total(cell)
+// I_total = I_prompt + Σ_k I_delayed_k (来自上游族解析伴随通量)
+// I_prompt = φ†_prompt(cell), I_delayed_k = φ†_delayed_k(cell)
+//------------------------------------------------------------------------------
+double BetaEffective::compute_denominator_upstream_family(
+  const std::unordered_map<int, double>& flux, double volume) const
+{
+  std::vector<double> terms;
+  terms.reserve(flux.size());
+
+  for (const auto& [cell_idx, phi] : flux) {
+    auto it_data = cell_nuclear_data_.find(cell_idx);
+    if (it_data == cell_nuclear_data_.end() || !it_data->second.is_fissionable)
+      continue;
+
+    const auto& nuc_data = it_data->second;
+
+    // I_total = I_prompt + Σ_k I_delayed_k (来自上游传递函数 family 轴)
+    double I_total = 0.0;
+    auto it_p = cell_upstream_prompt_importance_.find(cell_idx);
+    if (it_p != cell_upstream_prompt_importance_.end()) {
+      I_total += it_p->second;
+    }
+    for (int k = 0; k < N_DELAYED_GROUPS; ++k) {
+      auto it_d = cell_upstream_delayed_importance_[k].find(cell_idx);
+      if (it_d != cell_upstream_delayed_importance_[k].end()) {
+        I_total += it_d->second;
+      }
+    }
+
+    if (I_total <= 0.0)
+      continue;
+
+    // F_total = Σ_g ν_g × Σ_f,g × φ_g
+    auto it_flux_groups = flux_group_map_.find(cell_idx);
+    if (it_flux_groups != flux_group_map_.end() &&
+        it_flux_groups->second.size() ==
+          static_cast<size_t>(n_energy_groups_) &&
+        nuc_data.sigma_f_groups.size() ==
+          static_cast<size_t>(n_energy_groups_) &&
+        nuc_data.nu_total_groups.size() ==
+          static_cast<size_t>(n_energy_groups_)) {
+      const auto& fg = it_flux_groups->second;
+      double F_total = 0.0;
+      for (int g = 0; g < n_energy_groups_; ++g) {
+        F_total +=
+          nuc_data.nu_total_groups[g] * nuc_data.sigma_f_groups[g] * fg[g];
+      }
+      double term = volume * I_total * F_total;
+      if (term != 0.0)
+        terms.push_back(term);
+    } else {
+      double term =
+        volume * I_total * nuc_data.nu_total * nuc_data.sigma_f * phi;
+      if (term != 0.0)
+        terms.push_back(term);
+    }
+  }
+
+  return kahan_sum(terms);
+}
+
+//------------------------------------------------------------------------------
+// 方法 E 分子: N_k = Σ_cell ΔV × I_delayed_k(cell) × F_total(cell)
+// I_delayed_k 来自上游族解析伴随通量（传递函数 family 轴分辨）
+// 注意：I_delayed_k 已包含 ν_{d,k}/ν_t 产额分份权重，
+//       因此乘以 F_total（而非 F_{d,k}）以避免 ν_{d,k} 双重计数。
+//------------------------------------------------------------------------------
+double BetaEffective::compute_delayed_numerator_upstream_family(
+  int group, const std::unordered_map<int, double>& flux, double volume) const
+{
+  std::vector<double> terms;
+  terms.reserve(flux.size());
+
+  for (const auto& [cell_idx, phi] : flux) {
+    // 查找上游族解析的 delayed-k 重要性
+    auto it_imp = cell_upstream_delayed_importance_[group].find(cell_idx);
+    if (it_imp == cell_upstream_delayed_importance_[group].end())
+      continue;
+
+    auto it_data = cell_nuclear_data_.find(cell_idx);
+    if (it_data == cell_nuclear_data_.end() || !it_data->second.is_fissionable)
+      continue;
+
+    const auto& nuc_data = it_data->second;
+    double I_delayed_k = it_imp->second;
+
+    // F_total = Σ_g ν_total,g × Σ_{f,g} × φ_g
+    auto it_flux_groups = flux_group_map_.find(cell_idx);
+    if (it_flux_groups != flux_group_map_.end() &&
+        it_flux_groups->second.size() ==
+          static_cast<size_t>(n_energy_groups_) &&
+        nuc_data.sigma_f_groups.size() ==
+          static_cast<size_t>(n_energy_groups_) &&
+        nuc_data.nu_total_groups.size() ==
+          static_cast<size_t>(n_energy_groups_)) {
+      const auto& fg = it_flux_groups->second;
+      double F_total = 0.0;
+      for (int g = 0; g < n_energy_groups_; ++g) {
+        F_total +=
+          nuc_data.nu_total_groups[g] * nuc_data.sigma_f_groups[g] * fg[g];
+      }
+      double term = volume * I_delayed_k * F_total;
+      if (term != 0.0)
+        terms.push_back(term);
+    } else {
+      // 无分群数据时的回退
+      double term =
+        volume * I_delayed_k * nuc_data.nu_total * nuc_data.sigma_f * phi;
       if (term != 0.0)
         terms.push_back(term);
     }

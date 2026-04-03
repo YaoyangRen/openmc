@@ -37,9 +37,13 @@ void AdjointFlux::compute_from_files(const std::string& transfer_function_file,
   read_attribute(tf_file, "pitch", pitch_);
 
   int tf_n_groups = 1;
+  int tf_n_families = 1;
   vector<double> tf_energy_edges;
   if (object_exists(tf_file, "n_groups")) {
     read_dataset(tf_file, "n_groups", tf_n_groups);
+  }
+  if (object_exists(tf_file, "n_families")) {
+    read_dataset(tf_file, "n_families", tf_n_families);
   }
   if (object_exists(tf_file, "energy_edges")) {
     read_dataset(tf_file, "energy_edges", tf_energy_edges);
@@ -79,8 +83,11 @@ void AdjointFlux::compute_from_files(const std::string& transfer_function_file,
       read_dataset(cell_group, "values", values);
 
       size_t entry_count = indices.size();
-      size_t expected = static_cast<size_t>(tf_n_groups) * entry_count;
-      if (tf_n_groups == 1 && values.size() == entry_count) {
+      size_t entries_per_response =
+        static_cast<size_t>(tf_n_families) * tf_n_groups;
+      size_t expected = entries_per_response * entry_count;
+      if (tf_n_families == 1 && tf_n_groups == 1 &&
+          values.size() == entry_count) {
         expected = entry_count;
       }
 
@@ -89,18 +96,19 @@ void AdjointFlux::compute_from_files(const std::string& transfer_function_file,
                     "unexpected length.");
       }
 
-      // 构建稀疏 map（按能群存储）
+      // 构建稀疏 map（每个响应单元存 n_families * n_groups 个值）
       for (size_t k = 0; k < indices.size(); ++k) {
-        vector<double> group_values(static_cast<size_t>(tf_n_groups), 0.0);
-        if (tf_n_groups == 1 && values.size() == entry_count) {
-          group_values[0] = values[k];
+        vector<double> fg_values(
+          static_cast<size_t>(entries_per_response), 0.0);
+        if (entries_per_response == 1 && values.size() == entry_count) {
+          fg_values[0] = values[k];
         } else {
-          for (int g = 0; g < tf_n_groups; ++g) {
-            size_t offset = static_cast<size_t>(k) * tf_n_groups + g;
-            group_values[g] = values[offset];
+          for (size_t v = 0; v < entries_per_response; ++v) {
+            size_t offset = k * entries_per_response + v;
+            fg_values[v] = values[offset];
           }
         }
-        transfer_functions[i_source][indices[k]] = std::move(group_values);
+        transfer_functions[i_source][indices[k]] = std::move(fg_values);
       }
 
       total_tf_entries += indices.size();
@@ -165,7 +173,7 @@ void AdjointFlux::compute_from_files(const std::string& transfer_function_file,
   std::cout << "\n计算共轭通量: Φ†(r) = Σ_i T(i→r) × S†(i)" << std::endl;
 
   compute_from_memory(transfer_functions, adjoint_source, shape_, origin_,
-    pitch_, tf_n_groups, std::move(tf_energy_edges));
+    pitch_, tf_n_groups, tf_n_families, std::move(tf_energy_edges));
 
   // 4. 写入输出文件
   write_to_file(output_file);
@@ -178,13 +186,15 @@ void AdjointFlux::compute_from_memory(
     transfer_functions,
   const vector<double>& adjoint_source, const std::array<int, 3>& shape,
   const std::array<double, 3>& origin, double pitch, int n_groups,
-  vector<double> energy_edges)
+  int n_families, vector<double> energy_edges)
 {
   shape_ = shape;
   origin_ = origin;
   pitch_ = pitch;
   n_cells_ = static_cast<size_t>(shape[0]) * shape[1] * shape[2];
   n_groups_ = n_groups > 0 ? n_groups : 1;
+  n_families_ = n_families > 1 ? n_families : 1;
+  has_family_data_ = (n_families_ > 1);
   energy_edges_ = std::move(energy_edges);
   if (n_groups_ > 1) {
     if (energy_edges_.size() != static_cast<size_t>(n_groups_ + 1)) {
@@ -202,8 +212,13 @@ void AdjointFlux::compute_from_memory(
 
   // 清空之前的结果
   adjoint_flux_sparse_.clear();
+  family_adjoint_flux_.clear();
+  if (has_family_data_) {
+    family_adjoint_flux_.resize(n_families_);
+  }
 
   // 计算 Φ†(r) = Σ_i T(i -> r) × S†(i)
+  // 当 has_family_data_ 时，同时计算 family-resolved 和 total 卷积
   for (const auto& [i_source, response_map] : transfer_functions) {
     if (i_source < 0 || i_source >= static_cast<int>(adjoint_source.size())) {
       continue;
@@ -215,12 +230,30 @@ void AdjointFlux::compute_from_memory(
     }
 
     for (const auto& [j_response, T_values] : response_map) {
-      auto& flux_vector = adjoint_flux_sparse_[j_response];
-      if (flux_vector.empty()) {
-        flux_vector = make_zero_group_vector();
+      auto& total_flux = adjoint_flux_sparse_[j_response];
+      if (total_flux.empty()) {
+        total_flux = make_zero_group_vector();
       }
-      for (int g = 0; g < n_groups_; ++g) {
-        flux_vector[g] += T_values[g] * importance;
+
+      if (has_family_data_) {
+        // Family-resolved: T_values has n_families * n_groups entries
+        for (int f = 0; f < n_families_; ++f) {
+          auto& family_flux = family_adjoint_flux_[f][j_response];
+          if (family_flux.empty()) {
+            family_flux = make_zero_group_vector();
+          }
+          for (int g = 0; g < n_groups_; ++g) {
+            size_t idx = static_cast<size_t>(f) * n_groups_ + g;
+            double contrib = T_values[idx] * importance;
+            family_flux[g] += contrib;
+            total_flux[g] += contrib;
+          }
+        }
+      } else {
+        // No family data: T_values has n_groups entries (backward compatible)
+        for (int g = 0; g < n_groups_; ++g) {
+          total_flux[g] += T_values[g] * importance;
+        }
       }
     }
   }
@@ -375,6 +408,74 @@ void AdjointFlux::write_to_file(const std::string& filename)
 
   if (!group_total_flux_.empty()) {
     write_dataset(file_id, "group_total_flux", group_total_flux_);
+  }
+
+  // ========== family_resolved/ 组 ==========
+  if (has_family_data_ && !family_adjoint_flux_.empty()) {
+    hid_t fr_group = H5Gcreate(
+      file_id, "family_resolved", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+    write_attribute(fr_group, "n_families", n_families_);
+    write_attribute(fr_group, "description",
+      "Family-resolved adjoint flux: phi_dag_f(r) = sum_i T_f(i->r) * I*(i)");
+    write_attribute(
+      fr_group, "family_order", "prompt, delayed_1, ..., delayed_8");
+
+    const char* family_names[] = {"prompt", "delayed_1", "delayed_2",
+      "delayed_3", "delayed_4", "delayed_5", "delayed_6", "delayed_7",
+      "delayed_8"};
+
+    for (int f = 0; f < n_families_ && f < 9; ++f) {
+      const auto& family_data = family_adjoint_flux_[f];
+      if (family_data.empty())
+        continue;
+
+      hid_t fam_group = H5Gcreate(
+        fr_group, family_names[f], H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+
+      // Collect data
+      vector<int> f_indices;
+      vector<double> f_mean;
+      vector<double> f_group_vals;
+
+      for (const auto& [j, fv] : family_data) {
+        f_indices.push_back(j);
+        double total = std::accumulate(fv.begin(), fv.end(), 0.0);
+        f_mean.push_back(total);
+        f_group_vals.insert(f_group_vals.end(), fv.begin(), fv.end());
+      }
+
+      // Sort by cell index
+      vector<size_t> si(f_indices.size());
+      std::iota(si.begin(), si.end(), 0);
+      std::sort(si.begin(), si.end(), [&f_indices](size_t a, size_t b) {
+        return f_indices[a] < f_indices[b];
+      });
+
+      vector<int> s_idx(f_indices.size());
+      vector<double> s_mean(f_mean.size());
+      vector<double> s_grp(f_group_vals.size());
+      for (size_t i = 0; i < si.size(); ++i) {
+        s_idx[i] = f_indices[si[i]];
+        s_mean[i] = f_mean[si[i]];
+        size_t src = si[i] * static_cast<size_t>(n_groups_);
+        size_t dst = i * static_cast<size_t>(n_groups_);
+        std::copy_n(f_group_vals.begin() + src, n_groups_, s_grp.begin() + dst);
+      }
+
+      write_dataset(fam_group, "cell_indices", s_idx);
+      write_dataset(fam_group, "flux_mean", s_mean);
+      if (n_groups_ > 1) {
+        write_dataset(fam_group, "flux_group_mean", s_grp);
+      }
+      write_attribute(fam_group, "n_cells", static_cast<int>(f_indices.size()));
+
+      H5Gclose(fam_group);
+    }
+
+    H5Gclose(fr_group);
+
+    std::cout << "  Family-resolved: " << n_families_ << " families written"
+              << std::endl;
   }
 
   // ========== 语义元数据 (Phase 2) ==========

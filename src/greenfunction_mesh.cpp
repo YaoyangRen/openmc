@@ -117,7 +117,7 @@ void GreenFunctionMesh::record_source_birth(
 }
 
 void GreenFunctionMesh::accumulate(const Position& r, double contribution,
-  int64_t source_particle_id, double energy_eV, int mg_group)
+  int64_t source_particle_id, int family, double energy_eV, int mg_group)
 {
   // 累积传递函数 T(r_source -> r_response):
   // contribution = nu_t = (w/k_eff) × w_ufs × (ν̄Σf/Σt)
@@ -156,6 +156,11 @@ void GreenFunctionMesh::accumulate(const Position& r, double contribution,
       "GreenFunctionMesh: unable to determine energy group for contribution.");
   }
 
+  // Clamp family index: 0=prompt, 1..8=delayed
+  if (family < 0 || family >= N_FAMILIES)
+    family = 0;
+  size_t flat_idx = static_cast<size_t>(family) * n_groups_ + group;
+
   // 稀疏存储：只在有贡献时才创建条目
   {
     std::lock_guard<std::mutex> lock(data_mutex_);
@@ -165,13 +170,13 @@ void GreenFunctionMesh::accumulate(const Position& r, double contribution,
     if (group_vector.empty()) {
       group_vector = make_zero_group_vector();
     }
-    group_vector[group] += contribution;
+    group_vector[flat_idx] += contribution;
 
     auto& cumulative_vector = cumulative_data_sparse_[j_response];
     if (cumulative_vector.empty()) {
       cumulative_vector = make_zero_group_vector();
     }
-    cumulative_vector[group] += contribution;
+    cumulative_vector[flat_idx] += contribution;
   }
 
   total_contributions_++;
@@ -188,7 +193,7 @@ void GreenFunctionMesh::start_new_batch(int batch_id)
         if (target_vector.empty()) {
           target_vector = make_zero_group_vector();
         }
-        for (int g = 0; g < n_groups_; ++g) {
+        for (size_t g = 0; g < values.size(); ++g) {
           target_vector[g] += values[g];
         }
       }
@@ -264,8 +269,9 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(
 
   double sparsity = 100.0 * (1.0 - static_cast<double>(total_nonzero_entries) /
                                      (n_source_cells * spatial_size_));
+  size_t values_per_entry = static_cast<size_t>(N_FAMILIES) * n_groups_;
   size_t sparse_memory_mb =
-    (total_nonzero_entries * (sizeof(int) + sizeof(double)) +
+    (total_nonzero_entries * (sizeof(int) + values_per_entry * sizeof(double)) +
       n_source_cells * 64) /
     (1024 * 1024); // 估算
   size_t dense_memory_mb =
@@ -291,7 +297,7 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(
 
   // 写入文件头部信息
   write_attribute(file_id, "filetype", "transfer_function_mesh_sparse");
-  write_attribute(file_id, "version", "3.0");
+  write_attribute(file_id, "version", "4.0");
   write_attribute(file_id, "description",
     "Transfer function T(r_source->r_response): Sparse storage format");
   write_attribute(file_id, "pitch", grid_->pitch());
@@ -303,6 +309,9 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(
     static_cast<int64_t>(total_nonzero_entries));
   write_attribute(file_id, "sparsity_percent", sparsity);
   write_dataset(file_id, "n_groups", n_groups_);
+  write_dataset(file_id, "n_families", N_FAMILIES);
+  write_attribute(file_id, "family_order", "prompt,delayed_1,...,delayed_8");
+  write_attribute(file_id, "storage_order", "family_major: [family][group]");
   if (!energy_edges_.empty()) {
     write_dataset(file_id, "energy_edges", energy_edges_);
   }
@@ -311,8 +320,8 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(
   vector<int> cumulative_indices;
   vector<double> cumulative_values;
   cumulative_indices.reserve(cumulative_data_sparse_.size());
-  cumulative_values.reserve(
-    cumulative_data_sparse_.size() * static_cast<size_t>(n_groups_));
+  cumulative_values.reserve(cumulative_data_sparse_.size() *
+                            static_cast<size_t>(N_FAMILIES) * n_groups_);
 
   for (const auto& [j_response, values] : cumulative_data_sparse_) {
     cumulative_indices.push_back(j_response);
@@ -357,7 +366,8 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(
     vector<int> response_indices;
     vector<double> response_values;
     response_indices.reserve(response_map.size());
-    response_values.reserve(response_map.size() * n_groups_);
+    response_values.reserve(
+      response_map.size() * static_cast<size_t>(N_FAMILIES) * n_groups_);
 
     for (const auto& [j_response, values] : response_map) {
       response_indices.push_back(j_response);
@@ -387,7 +397,7 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(
 
 std::vector<double> GreenFunctionMesh::make_zero_group_vector() const
 {
-  return std::vector<double>(static_cast<size_t>(n_groups_), 0.0);
+  return std::vector<double>(static_cast<size_t>(N_FAMILIES) * n_groups_, 0.0);
 }
 
 int GreenFunctionMesh::determine_group(double energy_eV, int mg_group) const
