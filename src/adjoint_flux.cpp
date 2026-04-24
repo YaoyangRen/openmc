@@ -38,6 +38,7 @@ void AdjointFlux::compute_from_files(const std::string& transfer_function_file,
 
   int tf_n_groups = 1;
   int tf_n_families = 1;
+  int tf_n_source_groups = 1; // 源能群数（新字段）
   vector<double> tf_energy_edges;
   if (object_exists(tf_file, "n_groups")) {
     read_dataset(tf_file, "n_groups", tf_n_groups);
@@ -47,6 +48,9 @@ void AdjointFlux::compute_from_files(const std::string& transfer_function_file,
   }
   if (object_exists(tf_file, "energy_edges")) {
     read_dataset(tf_file, "energy_edges", tf_energy_edges);
+  }
+  if (attribute_exists(tf_file, "n_source_groups")) {
+    read_attribute(tf_file, "n_source_groups", tf_n_source_groups);
   }
   if (!tf_energy_edges.empty() &&
       static_cast<int>(tf_energy_edges.size()) - 1 != tf_n_groups) {
@@ -60,9 +64,15 @@ void AdjointFlux::compute_from_files(const std::string& transfer_function_file,
             << "=" << n_cells_ << "单元, 间距: " << pitch_ << " cm"
             << std::endl;
 
-  // 读取源单元索引列表
-  vector<int> source_cell_indices;
-  read_dataset(tf_file, "source_cell_indices", source_cell_indices);
+  // 读取源状态索引（新格式: source_state_indices，旧格式: source_cell_indices）
+  vector<int> source_indices;
+  bool use_source_state_format = false;
+  if (object_exists(tf_file, "source_state_indices")) {
+    read_dataset(tf_file, "source_state_indices", source_indices);
+    use_source_state_format = true;
+  } else if (object_exists(tf_file, "source_cell_indices")) {
+    read_dataset(tf_file, "source_cell_indices", source_indices);
+  }
 
   // 读取传递函数（稀疏格式）
   std::unordered_map<int, std::unordered_map<int, vector<double>>>
@@ -71,11 +81,14 @@ void AdjointFlux::compute_from_files(const std::string& transfer_function_file,
   hid_t tf_group = H5Gopen(tf_file, "transfer_functions", H5P_DEFAULT);
 
   size_t total_tf_entries = 0;
-  for (int i_source : source_cell_indices) {
-    std::string cell_name = "source_cell_" + std::to_string(i_source);
+  for (int i_source : source_indices) {
+    // 支持新格式 (source_state_*) 和旧格式 (source_cell_*)
+    std::string state_name = use_source_state_format
+                               ? ("source_state_" + std::to_string(i_source))
+                               : ("source_cell_" + std::to_string(i_source));
 
-    if (object_exists(tf_group, cell_name.c_str())) {
-      hid_t cell_group = H5Gopen(tf_group, cell_name.c_str(), H5P_DEFAULT);
+    if (object_exists(tf_group, state_name.c_str())) {
+      hid_t cell_group = H5Gopen(tf_group, state_name.c_str(), H5P_DEFAULT);
 
       vector<int> indices;
       vector<double> values;
@@ -96,7 +109,6 @@ void AdjointFlux::compute_from_files(const std::string& transfer_function_file,
                     "unexpected length.");
       }
 
-      // 构建稀疏 map（每个响应单元存 n_families * n_groups 个值）
       for (size_t k = 0; k < indices.size(); ++k) {
         vector<double> fg_values(
           static_cast<size_t>(entries_per_response), 0.0);
@@ -119,7 +131,8 @@ void AdjointFlux::compute_from_files(const std::string& transfer_function_file,
   H5Gclose(tf_group);
   file_close(tf_file);
 
-  std::cout << "  源单元: " << source_cell_indices.size()
+  std::cout << "  源状态: " << source_indices.size()
+            << " (source_groups=" << tf_n_source_groups << ")"
             << ", 传递函数条目: " << total_tf_entries << std::endl;
 
   // 2. 读取伴随源数据
@@ -140,8 +153,21 @@ void AdjointFlux::compute_from_files(const std::string& transfer_function_file,
       "裂变矩阵文件中未找到伴随源。请先运行 compute_adjoint_source。");
   }
 
+  // 优先读取分群伴随源（新格式），否则读取标量（旧格式）
   vector<double> adjoint_source;
-  read_dataset(fm_file, "adjoint_source", adjoint_source);
+  int fm_n_source_groups = 1;
+  if (attribute_exists(fm_file, "n_source_groups")) {
+    read_attribute(fm_file, "n_source_groups", fm_n_source_groups);
+  }
+
+  bool use_grouped = false;
+  if (fm_n_source_groups > 1 &&
+      object_exists(fm_file, "adjoint_source_grouped")) {
+    read_dataset(fm_file, "adjoint_source_grouped", adjoint_source);
+    use_grouped = true;
+  } else {
+    read_dataset(fm_file, "adjoint_source", adjoint_source);
+  }
 
   double keff_reference = 0.0;
   if (attribute_exists(fm_file, "keff_reference")) {
@@ -155,25 +181,41 @@ void AdjointFlux::compute_from_files(const std::string& transfer_function_file,
 
   file_close(fm_file);
 
-  std::cout << "  伴随源单元: " << adjoint_source.size();
+  std::cout << "  伴随源: " << adjoint_source.size()
+            << (use_grouped ? " 状态 (分群)" : " 单元 (标量)");
   if (keff_reference > 0.0) {
     std::cout << ", keff=" << std::fixed << std::setprecision(5)
               << keff_reference;
   }
   std::cout << std::endl;
 
+  // 确定有效的 n_source_groups（取 TF 文件和 FM 文件的一致值）
+  int effective_n_source_groups = use_grouped ? fm_n_source_groups : 1;
+
   // 验证网格一致性
-  if (adjoint_source.size() != n_cells_) {
-    fatal_error("网格不匹配: 传递函数有 " + std::to_string(n_cells_) +
-                " 个单元，但伴随源有 " + std::to_string(adjoint_source.size()) +
-                " 个单元");
+  size_t expected_adj_size = n_cells_ * effective_n_source_groups;
+  if (adjoint_source.size() != expected_adj_size) {
+    // 尝试回退到标量
+    if (use_grouped && adjoint_source.size() == n_cells_) {
+      effective_n_source_groups = 1;
+    } else {
+      fatal_error("网格不匹配: 传递函数有 " + std::to_string(n_cells_) +
+                  " 个单元，但伴随源有 " +
+                  std::to_string(adjoint_source.size()) + " 个条目");
+    }
   }
 
   // 3. 计算共轭通量
-  std::cout << "\n计算共轭通量: Φ†(r) = Σ_i T(i→r) × S†(i)" << std::endl;
+  std::cout << "\n计算共轭通量: Φ†(r) = Σ_{source_state} T(s→r) × I*(s)"
+            << std::endl;
+  if (effective_n_source_groups > 1) {
+    std::cout << "  使用能量分辨伴随源: " << effective_n_source_groups
+              << " 个源能群" << std::endl;
+  }
 
   compute_from_memory(transfer_functions, adjoint_source, shape_, origin_,
-    pitch_, tf_n_groups, tf_n_families, std::move(tf_energy_edges));
+    pitch_, tf_n_groups, tf_n_families, std::move(tf_energy_edges),
+    effective_n_source_groups);
 
   // 4. 写入输出文件
   write_to_file(output_file);
@@ -186,7 +228,7 @@ void AdjointFlux::compute_from_memory(
     transfer_functions,
   const vector<double>& adjoint_source, const std::array<int, 3>& shape,
   const std::array<double, 3>& origin, double pitch, int n_groups,
-  int n_families, vector<double> energy_edges)
+  int n_families, vector<double> energy_edges, int n_source_groups)
 {
   shape_ = shape;
   origin_ = origin;
@@ -196,6 +238,8 @@ void AdjointFlux::compute_from_memory(
   n_families_ = n_families > 1 ? n_families : 1;
   has_family_data_ = (n_families_ > 1);
   energy_edges_ = std::move(energy_edges);
+  int effective_n_source_groups = (n_source_groups > 1) ? n_source_groups : 1;
+
   if (n_groups_ > 1) {
     if (energy_edges_.size() != static_cast<size_t>(n_groups_ + 1)) {
       fatal_error("AdjointFlux: energy_edges must have n_groups + 1 entries.");
@@ -217,14 +261,46 @@ void AdjointFlux::compute_from_memory(
     family_adjoint_flux_.resize(n_families_);
   }
 
-  // 计算 Φ†(r) = Σ_i T(i -> r) × S†(i)
-  // 当 has_family_data_ 时，同时计算 family-resolved 和 total 卷积
+  // 验证伴随源尺寸
+  size_t expected_adj_size = n_cells_ * effective_n_source_groups;
+  if (adjoint_source.size() != expected_adj_size) {
+    // 尝试用标量路径
+    if (adjoint_source.size() == n_cells_) {
+      effective_n_source_groups = 1;
+    } else {
+      fatal_error("AdjointFlux::compute_from_memory: adjoint_source.size()=" +
+                  std::to_string(adjoint_source.size()) +
+                  " 与期望的 n_cells*n_source_groups=" +
+                  std::to_string(expected_adj_size) + " 不匹配");
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // 计算 Φ†(r) = Σ_{source_state} T(source_state → r) × I*(source_state)
+  //
+  // 若 effective_n_source_groups == 1：
+  //   source_state == source_cell，与旧路径完全等价
+  // 若 effective_n_source_groups > 1：
+  //   source_state = source_cell * n_source_groups + g_source
+  //   外层 key of transfer_functions 即为 source_state
+  // -----------------------------------------------------------------------
   for (const auto& [i_source, response_map] : transfer_functions) {
-    if (i_source < 0 || i_source >= static_cast<int>(adjoint_source.size())) {
-      continue;
+    // 确定此条目对应的伴随源重要性
+    double importance = 0.0;
+    if (effective_n_source_groups == 1) {
+      // 标量路径：i_source 是 source_cell
+      if (i_source < 0 || i_source >= static_cast<int>(adjoint_source.size())) {
+        continue;
+      }
+      importance = adjoint_source[i_source];
+    } else {
+      // 分群路径：i_source 是 source_state = cell * n_source_groups + g
+      if (i_source < 0 || i_source >= static_cast<int>(adjoint_source.size())) {
+        continue;
+      }
+      importance = adjoint_source[i_source];
     }
 
-    double importance = adjoint_source[i_source];
     if (importance <= 0.0) {
       continue;
     }
@@ -236,7 +312,6 @@ void AdjointFlux::compute_from_memory(
       }
 
       if (has_family_data_) {
-        // Family-resolved: T_values has n_families * n_groups entries
         for (int f = 0; f < n_families_; ++f) {
           auto& family_flux = family_adjoint_flux_[f][j_response];
           if (family_flux.empty()) {
@@ -250,7 +325,6 @@ void AdjointFlux::compute_from_memory(
           }
         }
       } else {
-        // No family data: T_values has n_groups entries (backward compatible)
         for (int g = 0; g < n_groups_; ++g) {
           total_flux[g] += T_values[g] * importance;
         }
@@ -478,30 +552,29 @@ void AdjointFlux::write_to_file(const std::string& filename)
               << std::endl;
   }
 
-  // ========== 语义元数据 (Phase 2) ==========
-  // 记录此文件中 "共轭通量" 的物理含义
+  // ========== 语义元数据 ==========
   hid_t sem_group = H5Gcreate(
     file_id, "semantic_metadata", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
   write_attribute(sem_group, "physical_quantity",
     "Response-weighted importance field, NOT true adjoint flux");
   write_attribute(sem_group, "definition",
-    "phi_dag(r) = sum_i T(i->r) * I_star(i), where T is the transfer "
-    "function and I_star is the fission matrix eigenvector (scalar per cell)");
+    "phi_dag(r) = sum_{source_state} T(source_state->r) * "
+    "I_star(source_state), "
+    "where source_state = (source_cell, g_source) and I_star is the "
+    "energy-resolved fission matrix eigenvector");
   write_attribute(sem_group, "group_meaning",
     "Group data phi_dag_g(r) reflects collision-energy-resolved importance "
     "at response position r. The group index g refers to the energy of the "
     "neutron causing fission at r, not the birth energy of fission neutrons.");
   write_attribute(sem_group, "adjoint_source",
-    "I_star(i) from fission matrix eigenvalue problem. Scalar (no energy "
-    "dependence). This is the main limitation for beta_eff accuracy.");
-  write_attribute(sem_group, "limitations",
-    "1) I_star is scalar, not energy-resolved => cannot distinguish prompt/"
-    "delayed importance at source level. 2) phi_dag_g is response-energy "
-    "(collision), not birth-energy => chi weighting is approximate.");
-  write_attribute(sem_group, "usage_in_beta_eff",
-    "Method A: weight by chi (birth spectrum). "
-    "Method B: use scalar I_star directly. "
-    "Method D: weight by nu fractions (production decomposition).");
+    "I_star(source_state) from energy-resolved fission matrix power iteration. "
+    "source_state = source_cell * n_source_groups + g_source. "
+    "If n_source_groups=1, collapses to scalar I_star(cell).");
+  write_attribute(sem_group, "improvement_over_v4",
+    "Source energy dimension added: transfer functions now indexed by "
+    "source_state=(cell,g_source) rather than source_cell. "
+    "Adjoint source I*(cell,g) = I*(cell) * chi_empirical(g|cell). "
+    "Convolution: Phi_dag(r) = sum_{cell,g} T(cell,g->r) * I*(cell,g).");
   H5Gclose(sem_group);
 
   file_close(file_id);

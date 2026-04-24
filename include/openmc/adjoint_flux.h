@@ -40,17 +40,20 @@ public:
     const std::string& output_file = "adjoint_flux.h5");
 
   // 从内存中的数据计算共轭通量
-  // transfer_functions: 稀疏传递函数 map<i_source, map<j_response, T>>
-  // adjoint_source: 伴随源分布向量 [n_cells]
-  // shape: 网格形状 [nx, ny, nz]
-  // origin: 网格原点
-  // pitch: 网格分辨率
+  // transfer_functions: 稀疏传递函数 map<source_state, map<j_response, T>>
+  //   source_state = source_cell * n_source_groups + g_source
+  //   若 n_source_groups==1，source_state == source_cell（向后兼容）
+  // adjoint_source: 伴随源分布向量
+  //   若 n_source_groups==1：size = n_cells（标量 I*(cell)）
+  //   若 n_source_groups>1 ：size = n_cells*n_source_groups（分群 I*(cell,g)）
+  // n_source_groups: 源能群数（默认 1，等于标量模式）
   void compute_from_memory(
     const std::unordered_map<int, std::unordered_map<int, vector<double>>>&
       transfer_functions,
     const vector<double>& adjoint_source, const std::array<int, 3>& shape,
     const std::array<double, 3>& origin, double pitch, int n_groups = 1,
-    int n_families = 1, vector<double> energy_edges = {});
+    int n_families = 1, vector<double> energy_edges = {},
+    int n_source_groups = 1);
 
   // 获取计算结果（稀疏格式）
   const std::unordered_map<int, vector<double>>& get_adjoint_flux_sparse() const

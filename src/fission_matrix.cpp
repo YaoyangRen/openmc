@@ -31,13 +31,14 @@ double reference_keff()
 
 } // namespace
 
-FissionMatrix::FissionMatrix(
-  std::shared_ptr<SharedMeshGrid> grid, int max_batches)
+FissionMatrix::FissionMatrix(std::shared_ptr<SharedMeshGrid> grid,
+  int max_batches, std::vector<double> energy_edges)
   : grid_ {std::move(grid)}, upper_bound_ {0.0, 0.0, 0.0}, inv_pitch_ {1.0},
-    current_batch_id_ {-1}, max_batches_ {max_batches}, n_realizations_ {0},
-    adjoint_computed_ {false}, adjoint_iterations_ {0}, keff_reference_ {1.0},
-    enable_batch_adjoint_ {false}, adjoint_max_iter_per_batch_ {0},
-    adjoint_tolerance_ {1.0e-6}, adjoint_start_batch_ {5}
+    n_source_groups_ {1}, current_batch_id_ {-1}, max_batches_ {max_batches},
+    n_realizations_ {0}, adjoint_computed_ {false}, adjoint_iterations_ {0},
+    keff_reference_ {1.0}, enable_batch_adjoint_ {false},
+    adjoint_max_iter_per_batch_ {0}, adjoint_tolerance_ {1.0e-6},
+    adjoint_start_batch_ {5}
 {
   if (!grid_) {
     throw std::runtime_error("FissionMatrix requires a valid SharedMeshGrid.");
@@ -46,30 +47,49 @@ FissionMatrix::FissionMatrix(
   upper_bound_ = grid_->upper_bound();
   inv_pitch_ = grid_->inv_pitch();
 
+  // 处理能群边界
+  if (energy_edges.size() >= 2) {
+    if (!std::is_sorted(energy_edges.begin(), energy_edges.end())) {
+      throw std::runtime_error(
+        "FissionMatrix: energy_edges must be sorted ascending.");
+    }
+    source_energy_edges_ = std::move(energy_edges);
+    n_source_groups_ = static_cast<int>(source_energy_edges_.size()) - 1;
+  }
+
   auto n_cells = grid_->n_cells();
-  source_counts_.assign(n_cells, 0.0);
-  current_batch_source_counts_.assign(n_cells, 0.0);
+  size_t n_source_states = static_cast<size_t>(n_cells) * n_source_groups_;
+
+  source_counts_.assign(n_source_states, 0.0);
+  current_batch_source_counts_.assign(n_source_states, 0.0);
   adjoint_source_.assign(n_cells, 0.0);
+  adjoint_source_grouped_.assign(n_source_states, 0.0);
   adjoint_source_batch_.assign(n_cells, 0.0);
   adjoint_source_accumulated_.assign(n_cells, 0.0);
   forward_source_.assign(n_cells, 0.0);
 
   if (n_cells > 0) {
-    double uniform = 1.0 / static_cast<double>(n_cells);
-    std::fill(adjoint_source_.begin(), adjoint_source_.end(), uniform);
+    double uniform = 1.0 / static_cast<double>(n_source_states);
+    std::fill(
+      adjoint_source_grouped_.begin(), adjoint_source_grouped_.end(), uniform);
+    double uniform_cell = 1.0 / static_cast<double>(n_cells);
+    std::fill(adjoint_source_.begin(), adjoint_source_.end(), uniform_cell);
   }
 }
 
 void FissionMatrix::record_source_birth(
-  const Position& r, int64_t source_particle_id)
+  const Position& r, int64_t source_particle_id, double energy, int mg_group)
 {
   int cell = position_to_index(r);
   if (cell < 0)
     return;
 
+  int g = determine_source_group(energy, mg_group);
+  int source_state = cell_group_to_state(cell, g);
+
   std::lock_guard<std::mutex> lock(data_mutex_);
-  source_birth_cells_[source_particle_id] = cell;
-  current_batch_source_counts_[cell] += 1.0;
+  source_birth_states_[source_particle_id] = source_state;
+  current_batch_source_counts_[source_state] += 1.0;
   total_sources_++;
 }
 
@@ -84,13 +104,14 @@ void FissionMatrix::record_fission_event(
     return;
 
   std::lock_guard<std::mutex> lock(data_mutex_);
-  auto it = source_birth_cells_.find(source_particle_id);
-  if (it == source_birth_cells_.end())
+  auto it = source_birth_states_.find(source_particle_id);
+  if (it == source_birth_states_.end())
     return;
 
-  int source_cell = it->second;
+  int source_state = it->second;
+  // key = source_state * n_cells + fission_cell
   size_t key =
-    static_cast<size_t>(source_cell) * grid_->n_cells() + fission_cell;
+    static_cast<size_t>(source_state) * grid_->n_cells() + fission_cell;
   current_batch_sparse_[key] += nu_fission;
   total_fissions_++;
 }
@@ -105,9 +126,11 @@ void FissionMatrix::start_new_batch(int batch_id)
     for (const auto& [key, value] : current_batch_sparse_) {
       fission_matrix_sparse_[key] += value;
     }
-    // 累积源计数
-    for (size_t i = 0; i < grid_->n_cells(); ++i) {
-      source_counts_[i] += current_batch_source_counts_[i];
+    // 累积源状态计数
+    size_t n_source_states =
+      static_cast<size_t>(grid_->n_cells()) * n_source_groups_;
+    for (size_t s = 0; s < n_source_states; ++s) {
+      source_counts_[s] += current_batch_source_counts_[s];
     }
     n_realizations_++;
   }
@@ -117,10 +140,12 @@ void FissionMatrix::start_new_batch(int batch_id)
 
   // 清空当前batch数据
   current_batch_sparse_.clear();
+  size_t n_source_states =
+    static_cast<size_t>(grid_->n_cells()) * n_source_groups_;
   std::fill(current_batch_source_counts_.begin(),
     current_batch_source_counts_.end(), 0.0);
 
-  source_birth_cells_.clear();
+  source_birth_states_.clear();
 }
 
 void FissionMatrix::compute_adjoint_source(
@@ -128,6 +153,12 @@ void FissionMatrix::compute_adjoint_source(
 {
   std::cout << "\n" << std::string(70, '=') << std::endl;
   std::cout << "ADJOINT SOURCE COMPUTATION" << std::endl;
+  if (n_source_groups_ > 1) {
+    std::cout << "  Mode: energy-resolved, " << n_source_groups_
+              << " source groups" << std::endl;
+  } else {
+    std::cout << "  Mode: scalar (n_source_groups=1)" << std::endl;
+  }
   std::cout << std::string(70, '=') << std::endl;
 
   if (fission_matrix_sparse_.empty()) {
@@ -137,86 +168,114 @@ void FissionMatrix::compute_adjoint_source(
     return;
   }
 
-  // 初始化伴随源分布 I*
-  std::cout << "\nInitializing adjoint source..." << std::endl;
-  std::cout << "  Initial guess: " << initial_guess << std::endl;
+  const size_t n_cells = grid_->n_cells();
+  const size_t n_states = n_cells * static_cast<size_t>(n_source_groups_);
 
-  if (initial_guess == "uniform") {
-    // 均匀分布初始化: I* = 1 (归一化后)
-    std::fill(adjoint_source_.begin(), adjoint_source_.end(), 1.0);
-    std::cout << "  Using uniform distribution: I*(i) = 1.0" << std::endl;
-  } else if (initial_guess == "forward") {
-    // 使用正向源分布初始化: I* = S
-    // 正向源分布即为 source_counts_ (已归一化)
-    double total_sources = 0.0;
-    for (size_t i = 0; i < grid_->n_cells(); ++i) {
-      total_sources += source_counts_[i];
+  // ---------------------------------------------------------------
+  // 1. 预计算经验裂变谱 chi_empirical[j*n_groups+g]
+  //    = source_counts_[j*n_groups+g] / Σ_g source_counts_[j*n_groups+g]
+  //    仅在 n_source_groups_ > 1 时有意义
+  // ---------------------------------------------------------------
+  vector<double> chi_empirical(n_states, 0.0);
+  for (size_t j = 0; j < n_cells; ++j) {
+    double sum_g = 0.0;
+    for (int g = 0; g < n_source_groups_; ++g) {
+      sum_g += source_counts_[j * n_source_groups_ + g];
     }
-
-    if (total_sources > 0.0) {
-      for (size_t i = 0; i < grid_->n_cells(); ++i) {
-        adjoint_source_[i] = source_counts_[i] / total_sources;
+    if (sum_g > 0.0) {
+      for (int g = 0; g < n_source_groups_; ++g) {
+        chi_empirical[j * n_source_groups_ + g] =
+          source_counts_[j * n_source_groups_ + g] / sum_g;
       }
-      std::cout << "  Using forward source distribution" << std::endl;
     } else {
-      std::cerr << "Warning: Forward source is zero, using uniform instead"
-                << std::endl;
-      std::fill(adjoint_source_.begin(), adjoint_source_.end(), 1.0);
-    }
-  } else {
-    std::cerr << "Warning: Unknown initial guess '" << initial_guess
-              << "', using uniform" << std::endl;
-    std::fill(adjoint_source_.begin(), adjoint_source_.end(), 1.0);
-  }
-
-  // 归一化初始向量
-  double norm = 0.0;
-  for (double val : adjoint_source_) {
-    norm += val;
-  }
-  if (norm > 0.0) {
-    for (size_t i = 0; i < grid_->n_cells(); ++i) {
-      adjoint_source_[i] /= norm;
+      // 该 cell 没有源粒子，平均分配
+      for (int g = 0; g < n_source_groups_; ++g) {
+        chi_empirical[j * n_source_groups_ + g] =
+          1.0 / static_cast<double>(n_source_groups_);
+      }
     }
   }
 
+  // ---------------------------------------------------------------
+  // 2. 归一化裂变矩阵
+  //    M_norm[source_state → fission_cell] = M[...] /
+  //    source_counts_[source_state]
+  // ---------------------------------------------------------------
   std::unordered_map<size_t, double> normalized_matrix;
   normalized_matrix.reserve(fission_matrix_sparse_.size());
 
   int normalized_source_rows = 0;
-  for (size_t i = 0; i < source_counts_.size(); ++i) {
-    if (source_counts_[i] > 0.0) {
+  for (size_t s = 0; s < n_states; ++s) {
+    if (source_counts_[s] > 0.0)
       normalized_source_rows++;
-    }
   }
 
   for (const auto& [key, value] : fission_matrix_sparse_) {
-    size_t row = key / grid_->n_cells();
-    double source_total = source_counts_[row];
-    if (source_total > 0.0) {
-      normalized_matrix[key] = value / source_total;
+    size_t source_state = key / n_cells;
+    double sc = source_counts_[source_state];
+    if (sc > 0.0) {
+      normalized_matrix[key] = value / sc;
     }
   }
 
   if (normalized_matrix.empty()) {
-    std::cerr
-      << "Error: Normalized fission matrix is empty. Cannot compute adjoint "
-         "source."
-      << std::endl;
+    std::cerr << "Error: Normalized fission matrix is empty." << std::endl;
     return;
   }
 
-  // 幂迭代法求解伴随源
-  // I* = (1/k) F_norm^T I*
+  std::cout << "\nInitializing adjoint source..." << std::endl;
+  std::cout << "  Initial guess: " << initial_guess << std::endl;
+
+  // ---------------------------------------------------------------
+  // 3. 初始化 I*(source_state)
+  // ---------------------------------------------------------------
+  if (initial_guess == "uniform") {
+    double uniform = 1.0 / static_cast<double>(n_states);
+    std::fill(
+      adjoint_source_grouped_.begin(), adjoint_source_grouped_.end(), uniform);
+  } else if (initial_guess == "forward") {
+    double total = 0.0;
+    for (size_t s = 0; s < n_states; ++s)
+      total += source_counts_[s];
+    if (total > 0.0) {
+      for (size_t s = 0; s < n_states; ++s)
+        adjoint_source_grouped_[s] = source_counts_[s] / total;
+    } else {
+      double uniform = 1.0 / static_cast<double>(n_states);
+      std::fill(adjoint_source_grouped_.begin(), adjoint_source_grouped_.end(),
+        uniform);
+    }
+  } else {
+    double uniform = 1.0 / static_cast<double>(n_states);
+    std::fill(
+      adjoint_source_grouped_.begin(), adjoint_source_grouped_.end(), uniform);
+  }
+
+  // 归一化初始向量
+  {
+    double norm = std::accumulate(
+      adjoint_source_grouped_.begin(), adjoint_source_grouped_.end(), 0.0);
+    if (norm > 0.0) {
+      for (auto& v : adjoint_source_grouped_)
+        v /= norm;
+    }
+  }
+
   std::cout << "\nPerforming power iteration..." << std::endl;
   std::cout << "  Max iterations: " << max_iterations << std::endl;
   std::cout << "  Tolerance: " << tolerance << std::endl;
   std::cout << "  Normalized FM entries: " << normalized_matrix.size()
             << std::endl;
-  std::cout << "  Source cells with counts: " << normalized_source_rows << " / "
-            << grid_->n_cells() << std::endl;
+  std::cout << "  Source states with counts: " << normalized_source_rows
+            << " / " << n_states << std::endl;
 
-  vector<double> I_new(grid_->n_cells(), 0.0);
+  // ---------------------------------------------------------------
+  // 4. 幂迭代
+  //    q(j)       = (1/k) Σ_{source_state} M_norm[source_state→j] ×
+  //    I*(source_state) I*_new(j,g) = q(j) × chi_empirical(g|j) 归一化 I*_new
+  // ---------------------------------------------------------------
+  vector<double> q(n_cells, 0.0);
+  vector<double> I_new(n_states, 0.0);
   double max_delta = 0.0;
   adjoint_iterations_ = 0;
 
@@ -224,42 +283,43 @@ void FissionMatrix::compute_adjoint_source(
   const double inv_keff = 1.0 / keff;
 
   for (int iter = 0; iter < max_iterations; ++iter) {
-    // 计算 F_norm^T × I*
-    // 其中 F_norm[i][j] = F[i][j] / source_counts[i]
-
-    std::fill(I_new.begin(), I_new.end(), 0.0);
-
-    for (const auto& [key, F_ij] : normalized_matrix) {
-      size_t i = key / grid_->n_cells(); // 源单元（行）
-      size_t j = key % grid_->n_cells(); // 裂变单元（列）
-
-      // (F_norm^T × I*)_j += F_norm[i][j] × I*_i
-      I_new[j] += F_ij * adjoint_source_[i];
+    // Step a: q(j) = (1/k) Σ M_norm[s→j] × I*(s)
+    std::fill(q.begin(), q.end(), 0.0);
+    for (const auto& [key, F_sj] : normalized_matrix) {
+      size_t source_state = key / n_cells;
+      size_t j = key % n_cells;
+      q[j] += F_sj * adjoint_source_grouped_[source_state];
     }
-
-    for (auto& val : I_new) {
+    for (auto& val : q)
       val *= inv_keff;
+
+    // Step b: I*(j,g) = q(j) × chi_empirical(g|j)
+    for (size_t j = 0; j < n_cells; ++j) {
+      for (int g = 0; g < n_source_groups_; ++g) {
+        I_new[j * n_source_groups_ + g] =
+          q[j] * chi_empirical[j * n_source_groups_ + g];
+      }
     }
 
+    // Step c: 归一化
     double sum_new = std::accumulate(I_new.begin(), I_new.end(), 0.0);
     if (sum_new == 0.0) {
       std::cerr << "Error: adjoint source collapsed to zero at iteration "
                 << iter << std::endl;
       break;
     }
-
     const double inv_sum = 1.0 / sum_new;
-    max_delta = 0.0;
-    for (size_t i = 0; i < grid_->n_cells(); ++i) {
-      double new_val = I_new[i] * inv_sum;
-      max_delta = std::max(max_delta, std::abs(new_val - adjoint_source_[i]));
-      adjoint_source_[i] = new_val;
-    }
 
-    // 检查收敛性
+    // Step d: 计算收敛指标并更新
+    max_delta = 0.0;
+    for (size_t s = 0; s < n_states; ++s) {
+      double new_val = I_new[s] * inv_sum;
+      max_delta =
+        std::max(max_delta, std::abs(new_val - adjoint_source_grouped_[s]));
+      adjoint_source_grouped_[s] = new_val;
+    }
     adjoint_iterations_ = iter + 1;
 
-    // 50次迭代输出进度
     if ((iter + 1) % 50 == 0 || iter == 0) {
       std::cout << "  Iteration " << std::setw(4) << (iter + 1)
                 << ": max |ΔI*| = " << std::scientific << std::setprecision(2)
@@ -268,50 +328,49 @@ void FissionMatrix::compute_adjoint_source(
 
     if (max_delta < tolerance) {
       std::cout << "\nConverged at iteration " << (iter + 1) << std::endl;
-      std::cout << "  Reference keff = " << std::fixed << std::setprecision(8)
-                << keff << std::endl;
-      std::cout << "  Final max |ΔI*| = " << std::scientific
-                << std::setprecision(2) << max_delta << std::endl;
       keff_reference_ = keff;
       adjoint_computed_ = true;
       break;
     }
-
     if (iter == max_iterations - 1) {
       std::cout << "\nWarning: Maximum iterations reached without convergence"
                 << std::endl;
-      std::cout << "  Reference keff = " << std::fixed << std::setprecision(8)
-                << keff << std::endl;
-      std::cout << "  Final max |ΔI*| = " << std::scientific
-                << std::setprecision(2) << max_delta << std::endl;
       keff_reference_ = keff;
-      adjoint_computed_ = true; // 仍标记为已计算
+      adjoint_computed_ = true;
     }
   }
 
-  // 计算伴随源的统计信息
-  double max_adjoint = 0.0;
-  double min_adjoint = 1.0e100;
-  double sum_adjoint = 0.0;
-  int nonzero_count = 0;
-
-  for (size_t i = 0; i < grid_->n_cells(); ++i) {
-    if (adjoint_source_[i] > 0.0) {
-      max_adjoint = std::max(max_adjoint, adjoint_source_[i]);
-      min_adjoint = std::min(min_adjoint, adjoint_source_[i]);
-      sum_adjoint += adjoint_source_[i];
-      nonzero_count++;
+  // ---------------------------------------------------------------
+  // 5. 从 adjoint_source_grouped_ 折叠出标量 adjoint_source_（向后兼容）
+  //    adjoint_source_[cell] = Σ_g adjoint_source_grouped_[cell*n_groups+g]
+  // ---------------------------------------------------------------
+  std::fill(adjoint_source_.begin(), adjoint_source_.end(), 0.0);
+  for (size_t j = 0; j < n_cells; ++j) {
+    double sum_g = 0.0;
+    for (int g = 0; g < n_source_groups_; ++g) {
+      sum_g += adjoint_source_grouped_[j * n_source_groups_ + g];
     }
+    adjoint_source_[j] = sum_g;
   }
+
+  // 统计信息
+  double max_adjoint =
+    *std::max_element(adjoint_source_.begin(), adjoint_source_.end());
+  double sum_adjoint =
+    std::accumulate(adjoint_source_.begin(), adjoint_source_.end(), 0.0);
+  int nonzero_count = std::count_if(adjoint_source_.begin(),
+    adjoint_source_.end(), [](double x) { return x > 0.0; });
 
   std::cout << "\nAdjoint Source Statistics:" << std::endl;
-  std::cout << "  Nonzero cells: " << nonzero_count << " / " << grid_->n_cells()
+  std::cout << "  Nonzero cells: " << nonzero_count << " / " << n_cells
             << std::endl;
   std::cout << "  Max value: " << std::scientific << std::setprecision(6)
             << max_adjoint << std::endl;
-  std::cout << "  Min value: " << min_adjoint << std::endl;
   std::cout << "  Sum: " << sum_adjoint << std::endl;
-
+  if (n_source_groups_ > 1) {
+    std::cout << "  Grouped I*: " << n_states << " states (" << n_source_groups_
+              << " groups × " << n_cells << " cells)" << std::endl;
+  }
   std::cout << std::string(70, '=') << std::endl;
 }
 
@@ -334,13 +393,33 @@ void FissionMatrix::perform_adjoint_iteration(
     return;
   }
 
+  const size_t n_cells = grid_->n_cells();
+  const size_t n_states = n_cells * static_cast<size_t>(n_source_groups_);
+
+  // 预计算经验裂变谱
+  vector<double> chi_empirical(n_states, 0.0);
+  for (size_t j = 0; j < n_cells; ++j) {
+    double sum_g = 0.0;
+    for (int g = 0; g < n_source_groups_; ++g)
+      sum_g += source_to_use[j * n_source_groups_ + g];
+    if (sum_g > 0.0) {
+      for (int g = 0; g < n_source_groups_; ++g)
+        chi_empirical[j * n_source_groups_ + g] =
+          source_to_use[j * n_source_groups_ + g] / sum_g;
+    } else {
+      for (int g = 0; g < n_source_groups_; ++g)
+        chi_empirical[j * n_source_groups_ + g] =
+          1.0 / static_cast<double>(n_source_groups_);
+    }
+  }
+
   // 归一化裂变矩阵
   std::unordered_map<size_t, double> normalized_matrix;
   for (const auto& [key, value] : matrix_to_use) {
-    size_t row = key / grid_->n_cells();
-    double source_total = source_to_use[row];
-    if (source_total > 0.0) {
-      normalized_matrix[key] = value / source_total;
+    size_t source_state = key / n_cells;
+    double sc = source_to_use[source_state];
+    if (sc > 0.0) {
+      normalized_matrix[key] = value / sc;
     }
   }
 
@@ -349,15 +428,6 @@ void FissionMatrix::perform_adjoint_iteration(
       std::cerr
         << "Warning: Normalized matrix is empty (all source counts are zero)"
         << std::endl;
-
-      // 调试：检查源计数
-      int zero_sources = 0;
-      for (size_t i = 0; i < source_to_use.size(); ++i) {
-        if (source_to_use[i] == 0.0)
-          zero_sources++;
-      }
-      std::cerr << "  Source cells with zero count: " << zero_sources << " / "
-                << source_to_use.size() << std::endl;
     }
     return;
   }
@@ -367,61 +437,32 @@ void FissionMatrix::perform_adjoint_iteration(
               << " entries, starting adjoint iteration..." << std::endl;
   }
 
-  vector<double> I_new(grid_->n_cells(), 0.0);
+  vector<double> q(n_cells, 0.0);
+  vector<double> I_new(n_states, 0.0);
   double max_delta = 0.0;
   const double keff = reference_keff();
   const double inv_keff = 1.0 / keff;
 
   for (int iter = 0; iter < iterations; ++iter) {
-    // 计算 F^T × I* (使用归一化矩阵)
-    std::fill(I_new.begin(), I_new.end(), 0.0);
-
-    for (const auto& [key, F_ij] : normalized_matrix) {
-      size_t i = key / grid_->n_cells(); // 源单元（行）
-      size_t j = key % grid_->n_cells(); // 裂变单元（列）
-
-      // (F^T × I*)_j += F[i][j] × I*_i
-      I_new[j] += F_ij * adjoint_source_[i];
+    // Step a: q(j) = (1/k) Σ M_norm[s→j] × I*(s)
+    std::fill(q.begin(), q.end(), 0.0);
+    for (const auto& [key, F_sj] : normalized_matrix) {
+      size_t source_state = key / n_cells;
+      size_t j = key % n_cells;
+      q[j] += F_sj * adjoint_source_grouped_[source_state];
     }
-
-    for (auto& val : I_new) {
+    for (auto& val : q)
       val *= inv_keff;
+
+    // Step b: I*(j,g) = q(j) × chi_empirical(g|j)
+    for (size_t j = 0; j < n_cells; ++j) {
+      for (int g = 0; g < n_source_groups_; ++g) {
+        I_new[j * n_source_groups_ + g] =
+          q[j] * chi_empirical[j * n_source_groups_ + g];
+      }
     }
 
     double sum_new = std::accumulate(I_new.begin(), I_new.end(), 0.0);
-
-    // 调试输出
-    if (verbose && sum_new == 0.0) {
-      // 检查I* 中非零元数
-      int nonzero_I = 0;
-      double sum_I = 0.0;
-      for (size_t i = 0; i < grid_->n_cells(); ++i) {
-        if (adjoint_source_[i] > 0.0) {
-          nonzero_I++;
-          sum_I += adjoint_source_[i];
-        }
-      }
-      std::cerr << "  Debug at iter " << iter << ": I* has " << nonzero_I
-                << " nonzero cells, sum=" << sum_I << std::endl;
-
-      // 检查哪些单元的 I* 被用到
-      int used_cells = 0;
-      for (const auto& [key, F_ij] : normalized_matrix) {
-        size_t i = key / grid_->n_cells();
-        if (adjoint_source_[i] > 1e-15) {
-          used_cells++;
-          if (used_cells <= 3) {
-            std::cerr << "    F[" << i << "][" << (key % grid_->n_cells())
-                      << "]=" << F_ij << " * I*[" << i
-                      << "]=" << adjoint_source_[i] << " = "
-                      << (F_ij * adjoint_source_[i]) << std::endl;
-          }
-        }
-      }
-      std::cerr << "  Total matrix entries with nonzero I*: " << used_cells
-                << std::endl;
-    }
-
     if (sum_new == 0.0) {
       if (verbose) {
         std::cerr << "Error: adjoint source collapsed to zero at iteration "
@@ -432,16 +473,14 @@ void FissionMatrix::perform_adjoint_iteration(
 
     const double inv_sum = 1.0 / sum_new;
     max_delta = 0.0;
-    for (size_t i = 0; i < grid_->n_cells(); ++i) {
-      double new_val = I_new[i] * inv_sum;
-      max_delta = std::max(max_delta, std::abs(new_val - adjoint_source_[i]));
-      adjoint_source_[i] = new_val;
+    for (size_t s = 0; s < n_states; ++s) {
+      double new_val = I_new[s] * inv_sum;
+      max_delta =
+        std::max(max_delta, std::abs(new_val - adjoint_source_grouped_[s]));
+      adjoint_source_grouped_[s] = new_val;
     }
-
-    // 检查收敛性
     adjoint_iterations_++;
 
-    // 详细输出（每50次迭代或收敛时）
     if (verbose && ((iter + 1) % 50 == 0 || iter == 0)) {
       std::cout << "  Iteration " << std::setw(4) << (iter + 1)
                 << ": max |ΔI*| = " << std::scientific << std::setprecision(2)
@@ -451,13 +490,16 @@ void FissionMatrix::perform_adjoint_iteration(
     if (max_delta < adjoint_tolerance_) {
       if (verbose) {
         std::cout << "\nConverged at iteration " << (iter + 1) << std::endl;
-        std::cout << "  Reference keff = " << std::fixed << std::setprecision(8)
-                  << keff << std::endl;
-        std::cout << "  Final max |ΔI*| = " << std::scientific
-                  << std::setprecision(2) << max_delta << std::endl;
       }
       keff_reference_ = keff;
       adjoint_computed_ = true;
+      // 折叠为标量
+      std::fill(adjoint_source_.begin(), adjoint_source_.end(), 0.0);
+      for (size_t j = 0; j < n_cells; ++j) {
+        for (int g = 0; g < n_source_groups_; ++g)
+          adjoint_source_[j] +=
+            adjoint_source_grouped_[j * n_source_groups_ + g];
+      }
       break;
     }
   }
@@ -473,16 +515,18 @@ void FissionMatrix::finalize(const std::string& filename)
     return;
   }
 
-  // 简洁输�?
+  // 简洁输出（行维度已扩展为 n_source_states）
+  size_t n_cells = grid_->n_cells();
+  size_t n_source_states = n_cells * static_cast<size_t>(n_source_groups_);
   size_t sparse_elements = fission_matrix_sparse_.size();
   std::cout << "\nFission Matrix: " << sparse_elements << " non-zero elements ("
-            << grid_->n_cells() << "x" << grid_->n_cells() << " grid) -> "
-            << filename << std::endl;
+            << n_source_states << "×" << n_cells
+            << " source_state×fission_cell grid) -> " << filename << std::endl;
   std::unordered_map<size_t, double> normalized_sparse;
 
   for (const auto& [key, value] : fission_matrix_sparse_) {
-    size_t row = key / grid_->n_cells();
-    double source_total = source_counts_[row];
+    size_t source_state = key / n_cells;
+    double source_total = source_counts_[source_state];
     if (source_total > 0.0) {
       normalized_sparse[key] = value / source_total;
     }
@@ -493,22 +537,25 @@ void FissionMatrix::finalize(const std::string& filename)
 
   // 写入文件属性
   write_attribute(file_id, "filetype", "fission_matrix_sparse");
-  write_attribute(file_id, "version", "2.0");
-  write_attribute(file_id, "storage_format", "COO"); // Coordinate format
+  write_attribute(file_id, "version", "3.0"); // 新版本：源状态扩展
+  write_attribute(file_id, "storage_format", "COO");
   write_attribute(file_id, "pitch", grid_->pitch());
   write_attribute(file_id, "n_realizations", n_realizations_);
   write_attribute(
     file_id, "total_fissions", static_cast<int64_t>(total_fissions_.load()));
   write_attribute(
     file_id, "total_sources", static_cast<int64_t>(total_sources_.load()));
-  write_attribute(file_id, "n_cells", static_cast<int>(grid_->n_cells()));
+  write_attribute(file_id, "n_cells", static_cast<int>(n_cells));
   write_attribute(file_id, "nnz", static_cast<int64_t>(sparse_elements));
+  // 行维度 = n_source_states；列维度 = n_cells
+  write_attribute(file_id, "row_dim", static_cast<int>(n_source_states));
+  write_attribute(file_id, "col_dim", static_cast<int>(n_cells));
 
   // 写入网格信息
   write_dataset(file_id, "origin", grid_->origin());
   write_dataset(file_id, "shape", grid_->shape());
 
-  // 准备稀疏矩阵的COO格式数据: (row, col, value)
+  // 准备稀疏矩阵的COO格式数据: (row=source_state, col=fission_cell, value)
   vector<int> rows;
   vector<int> cols;
   vector<double> values_raw;
@@ -520,9 +567,9 @@ void FissionMatrix::finalize(const std::string& filename)
   values_normalized.reserve(sparse_elements);
 
   for (const auto& [key, value] : fission_matrix_sparse_) {
-    size_t row = key / grid_->n_cells();
-    size_t col = key % grid_->n_cells();
-    rows.push_back(static_cast<int>(row));
+    size_t source_state = key / n_cells;
+    size_t col = key % n_cells;
+    rows.push_back(static_cast<int>(source_state));
     cols.push_back(static_cast<int>(col));
     values_raw.push_back(value);
 
@@ -532,39 +579,57 @@ void FissionMatrix::finalize(const std::string& filename)
       it != normalized_sparse.end() ? it->second : 0.0);
   }
 
-  // 写入稀疏矩阵数数据(COO格式)
+  // 写入稀疏矩阵数据(COO格式)
+  // 注意：rows 现在是 source_state 索引，不再是 source_cell
   write_dataset(file_id, "row_indices", rows);
   write_dataset(file_id, "col_indices", cols);
   write_dataset(file_id, "data_raw", values_raw);
   write_dataset(file_id, "data_normalized", values_normalized);
 
-  // 写入源计�?
+  // 写入源状态计数（size = n_source_states = n_cells * n_source_groups）
   write_dataset(file_id, "source_counts", source_counts_);
+  write_attribute(
+    file_id, "n_source_groups", static_cast<int>(n_source_groups_));
+  if (!source_energy_edges_.empty()) {
+    write_dataset(file_id, "source_energy_edges", source_energy_edges_);
+  }
 
   // 写入伴随源分布（如果已计算）
   if (adjoint_computed_) {
-    // 归一化伴随源
+    // 归一化标量伴随源
     double adj_sum =
       std::accumulate(adjoint_source_.begin(), adjoint_source_.end(), 0.0);
     if (adj_sum > 0.0) {
-      for (auto& val : adjoint_source_) {
+      for (auto& val : adjoint_source_)
         val /= adj_sum;
-      }
       std::cout << "Adjoint source normalized (sum = 1.0)" << std::endl;
       std::cout << "\n" << std::string(70, '=') << std::endl;
     }
 
-    // 写入伴随源分布
+    // 写入标量伴随源（向后兼容）
     write_dataset(file_id, "adjoint_source", adjoint_source_);
     write_attribute(file_id, "reference_keff", keff_reference_);
     write_attribute(
       file_id, "adjoint_iterations", static_cast<int>(adjoint_iterations_));
     write_attribute(file_id, "adjoint_converged", adjoint_computed_);
-
-    // 添加说明信息
     write_attribute(file_id, "adjoint_source_description",
-      "Adjoint source computed from accumulated FM at end of inactive batches");
+      "Collapsed adjoint source I*(cell) = sum_g I*(cell,g) [backward compat]");
     write_attribute(file_id, "adjoint_source_units", "normalized importance");
+
+    // 写入分群伴随源 I*(source_state)（新格式）
+    if (n_source_groups_ > 1) {
+      // 归一化分群伴随源
+      double gs = std::accumulate(
+        adjoint_source_grouped_.begin(), adjoint_source_grouped_.end(), 0.0);
+      if (gs > 0.0) {
+        for (auto& v : adjoint_source_grouped_)
+          v /= gs;
+      }
+      write_dataset(file_id, "adjoint_source_grouped", adjoint_source_grouped_);
+      write_attribute(file_id, "adjoint_source_grouped_description",
+        "Energy-resolved adjoint source I*(source_state) where "
+        "source_state = cell * n_source_groups + g_source");
+    }
   }
 
   file_close(file_id);
@@ -591,6 +656,38 @@ int FissionMatrix::position_to_index(const Position& r) const
   }
 
   return (indices[0] * shape[1] + indices[1]) * shape[2] + indices[2];
+}
+
+int FissionMatrix::determine_source_group(double energy_eV, int mg_group) const
+{
+  if (n_source_groups_ == 1)
+    return 0;
+
+  // MG 模式：直接使用 mg_group
+  if (energy_eV < 0.0 && mg_group >= 0) {
+    if (mg_group < n_source_groups_)
+      return mg_group;
+    return n_source_groups_ - 1;
+  }
+
+  // CE 模式：二分查找
+  if (energy_eV >= 0.0 && !source_energy_edges_.empty()) {
+    if (energy_eV <= source_energy_edges_.front())
+      return 0;
+    if (energy_eV >= source_energy_edges_.back())
+      return n_source_groups_ - 1;
+    auto it = std::upper_bound(
+      source_energy_edges_.begin(), source_energy_edges_.end(), energy_eV);
+    int g =
+      static_cast<int>(std::distance(source_energy_edges_.begin(), it)) - 1;
+    if (g < 0)
+      g = 0;
+    if (g >= n_source_groups_)
+      g = n_source_groups_ - 1;
+    return g;
+  }
+
+  return 0;
 }
 
 } // namespace openmc

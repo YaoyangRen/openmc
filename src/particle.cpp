@@ -171,14 +171,24 @@ void Particle::from_source(const SourceSite* src)
 
   // 记录源粒子的出生位置到裂变矩阵
   if (simulation::fission_matrix && source_particle_id() != -1) {
-    simulation::fission_matrix->record_source_birth(
-      src->r, source_particle_id());
+    if (settings::run_CE) {
+      simulation::fission_matrix->record_source_birth(
+        src->r, source_particle_id(), src->E, -1);
+    } else {
+      simulation::fission_matrix->record_source_birth(
+        src->r, source_particle_id(), -1.0, static_cast<int>(src->E));
+    }
   }
 
   // 记录源粒子的出生位置到传递函数网格
   if (simulation::transfer_function_mesh && source_particle_id() != -1) {
-    simulation::transfer_function_mesh->record_source_birth(
-      src->r, source_particle_id());
+    if (settings::run_CE) {
+      simulation::transfer_function_mesh->record_source_birth(
+        src->r, source_particle_id(), src->E, -1);
+    } else {
+      simulation::transfer_function_mesh->record_source_birth(
+        src->r, source_particle_id(), -1.0, static_cast<int>(src->E));
+    }
   }
 
   if (settings::run_CE) {

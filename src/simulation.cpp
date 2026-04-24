@@ -419,9 +419,10 @@ void initialize_batch()
   }
 
   // Initialize fission matrix (裂变矩阵)
+  // 传入与 GreenFunctionMesh 相同的能群边界，使源状态与传递函数源侧共享同一组群
   if (!simulation::fission_matrix) {
-    simulation::fission_matrix =
-      std::make_unique<FissionMatrix>(shared_grid, settings::n_batches);
+    simulation::fission_matrix = std::make_unique<FissionMatrix>(
+      shared_grid, settings::n_batches, settings::kinetics_energy_edges);
   }
 
   // Initialize flux mesh (通量分布网格)
