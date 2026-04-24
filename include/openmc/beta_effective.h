@@ -75,63 +75,6 @@ public:
   }
 
 private:
-  //! 计算缓发中子贡献的分子
-  double compute_delayed_numerator_material(int group,
-    const std::unordered_map<int, double>& flux,
-    const std::unordered_map<int, double>& adjoint_flux, double volume) const;
-
-  //! 计算总中子贡献的分母 (含 chi_prompt)
-  double compute_denominator_material(
-    const std::unordered_map<int, double>& flux,
-    const std::unordered_map<int, double>& adjoint_flux, double volume) const;
-
-  //! 计算不含 chi 的分母 (用于诊断对比)
-  double compute_denominator_without_chi(
-    const std::unordered_map<int, double>& flux,
-    const std::unordered_map<int, double>& adjoint_flux, double volume) const;
-
-  //! 标量重要性近似版分子
-  //! 当共轭量为 I*(r) 而非严格 φ*(r,E) 时使用
-  //! N_i = Σ_cell ΔV × I*(r) × [Σ_g ν_{d,i,g} Σ_{f,g} φ_g]
-  double compute_delayed_numerator_scalar_importance(int group,
-    const std::unordered_map<int, double>& flux,
-    const std::unordered_map<int, double>& adjoint_flux, double volume) const;
-
-  //! 标量重要性近似版分母
-  //! 当共轭量为 I*(r) 而非严格 φ*(r,E) 时使用
-  //! D = Σ_cell ΔV × I*(r) × [Σ_g ν_g Σ_{f,g} φ_g]
-  double compute_denominator_scalar_importance(
-    const std::unordered_map<int, double>& flux,
-    const std::unordered_map<int, double>& adjoint_flux, double volume) const;
-
-  //==========================================================================
-  // Phase 2: 显式有效重要性场 (诊断用, 数学等价于方法 A)
-  //==========================================================================
-
-  //! 构建每单元的显式有效重要性场
-  //! I_eff_prompt(cell) = Σ_{g'} φ†_{g'} × χ_{p,g'}
-  //! I_eff_delayed_k(cell) = Σ_{g'} φ†_{g'} × χ_{d,k,g'}
-  void build_effective_importance_fields(
-    const std::unordered_map<int, double>& adjoint_flux);
-
-  //==========================================================================
-  // Phase 3 (方法 D): 族解析有效重要性 (ν-fraction decomposition)
-  //==========================================================================
-
-  //! 构建以 ν 产额份额分解的族解析重要性场
-  //! I_prompt(cell) = Σ_g φ†_g × (ν_{p,g} / ν_{total,g})
-  //! I_delayed_k(cell) = Σ_g φ†_g × (ν_{d,k,g} / ν_{total,g})
-  void build_family_resolved_importance(
-    const std::unordered_map<int, double>& adjoint_flux);
-
-  //! 方法 D 分母: D = Σ_cell ΔV × I_prompt(cell) × F_total(cell)
-  double compute_denominator_family_resolved(
-    const std::unordered_map<int, double>& flux, double volume) const;
-
-  //! 方法 D 分子: N_k = Σ_cell ΔV × I_delayed_k(cell) × F_{d,k}(cell)
-  double compute_delayed_numerator_family_resolved(int group,
-    const std::unordered_map<int, double>& flux, double volume) const;
-
   //==========================================================================
   // 方法 E: 上游族解析 (upstream family-resolved adjoint)
   //==========================================================================
@@ -251,21 +194,8 @@ private:
   // Phase 2.3: 多点采样统计
   int n_heterogeneous_cells_ {0}; //!< 包含多材料的单元数
 
-  //! 各方法的结果缓存 (用于对比输出)
-  MethodResult result_a_; //!< 方法 A: 严格伴随
-  MethodResult result_b_; //!< 方法 B: 标量重要性
-  MethodResult result_d_; //!< 方法 D: 族解析有效重要性
+  //! 方法 E 结果缓存
   MethodResult result_e_; //!< 方法 E: 上游族解析
-
-  // Phase 2: 显式有效重要性场缓存 (诊断用)
-  std::unordered_map<int, double> cell_prompt_eff_importance_;
-  std::unordered_map<int, std::array<double, N_DELAYED_GROUPS>>
-    cell_delayed_eff_importance_;
-
-  // Phase 3: 族解析有效重要性缓存 (ν-fraction decomposition)
-  std::unordered_map<int, double> cell_family_prompt_importance_;
-  std::unordered_map<int, std::array<double, N_DELAYED_GROUPS>>
-    cell_family_delayed_importance_;
 
   // Method E: 上游族解析伴随通量缓存
   bool has_upstream_family_data_ {false};
