@@ -177,9 +177,8 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
   //   ν_{d,k} 双重计数)
   //==========================================================================
   if (!has_upstream_family_data_) {
-    fatal_error(
-      "方法E需要上游族解析伴随通量数据 (family_resolved/)，"
-      "请确保 adjoint_flux.h5 包含该数据。");
+    fatal_error("方法E需要上游族解析伴随通量数据 (family_resolved/)，"
+                "请确保 adjoint_flux.h5 包含该数据。");
   }
 
   double denom_upstream = compute_denominator_upstream_family(flux, volume);
