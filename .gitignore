@@ -4,6 +4,8 @@
 *.log
 *.out
 *.pkl
+*.pdf
+*.PDF
 
 # Compiler python objects
 *.pyc
