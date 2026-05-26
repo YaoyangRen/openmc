@@ -25,10 +25,16 @@
 namespace openmc {
 
 //------------------------------------------------------------------------------
-// 核心驱动函数：根据网格通量/共轭通量文件完成 β_eff 计算。
-// 算法遵循扰动理论定义：
-//   β_i,eff = ∫ φ*(r,E) χ_d,i(E) ν_d,i(E,r) Σ_f(r,E) φ(r,E) dV dE / 分母
-// 分母使用瞬发量。实现直接采用材料相关核数据路径。
+// 核心驱动函数：根据正向通量和 family-resolved response-weighted
+// importance 完成 CLUTCH Method E beta_eff 计算。这里的 group 是响应侧
+// 诱发裂变碰撞能群，不是裂变中子出生能群，因此不在后处理里乘
+// chi_d,k(E_birth)。
+//
+//   D   = Σ_c ΔV Σ_g I_total(c,g)     ν_t,g Σ_f,g φ_g
+//   N_k = Σ_c ΔV Σ_g I_delayed_k(c,g) ν_t,g Σ_f,g φ_g
+//
+// I_delayed_k 已经在 GreenFunctionMesh 的 family 轴中包含 nu_d,k/nu_t
+// 分份，所以分子同样乘总裂变产生项，避免重复计数 delayed yield。
 //------------------------------------------------------------------------------
 void BetaEffective::compute_from_files(const std::string& flux_file,
   const std::string& adjoint_flux_file, const std::string& output_file)
@@ -50,11 +56,13 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
             << flux_shape[2] << ", 间距: " << flux_pitch << " cm"
             << ", 非零单元: " << flux.size() << std::endl;
 
-  // 2. 读取共轭通量 (φ*)
-  std::cout << "\n[2/4] 读取共轭通量: " << adjoint_flux_file << std::endl;
+  // 2. 读取 response-weighted importance
+  std::cout << "\n[2/4] 读取 response-weighted importance: "
+            << adjoint_flux_file << std::endl;
   if (!file_exists(adjoint_flux_file)) {
     fatal_error(
-      "共轭通量文件不存在: " + adjoint_flux_file + "\n请确保已计算共轭通量。");
+      "Importance 文件不存在: " + adjoint_flux_file +
+      "\n请确保已计算 response-weighted importance。");
   }
 
   std::unordered_map<int, double> adjoint_flux;
@@ -72,7 +80,7 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
   if (flux_shape != adjoint_shape ||
       std::abs(flux_pitch - adjoint_pitch) > 1e-6) {
     fatal_error(
-      "Grid mismatch between flux and adjoint flux!\n" +
+      "Grid mismatch between flux and response-weighted importance!\n" +
       std::string("  Flux grid: ") + std::to_string(flux_shape[0]) + "x" +
       std::to_string(flux_shape[1]) + "x" + std::to_string(flux_shape[2]) +
       ", pitch=" + std::to_string(flux_pitch) + "\n" +
@@ -90,7 +98,7 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
   initialize_flux_spectrum_weights();
 
   //============================这段代码用于调试=================================
-  // 调试输出：基于核数据的材料 β_i（不含通量和共轭通量权重）
+  // 调试输出：基于核数据的材料 β_i（不含通量和 importance 权重）
   // 用户可以根据材料 id 调整此处参数，用于与 MCNP 的材料 β_i 对比。
   // 这里只打印一次，不影响后续 β_eff 计算。
   int debug_material_id = 1; // TODO: 根据模型实际材料 id 修改
@@ -150,6 +158,10 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
 
   std::fill(beta_i_.begin(), beta_i_.end(), 0.0);
   std::fill(numerators_.begin(), numerators_.end(), 0.0);
+  for (auto& numerator_by_energy : numerator_by_group_energy_) {
+    numerator_by_energy.assign(n_energy_groups_, 0.0);
+  }
+  denominator_by_group_energy_.assign(n_energy_groups_, 0.0);
   denominator_ = 0.0;
 
   // 计算网格单元体积
@@ -169,63 +181,61 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
   const double mcnp_beta_total = 0.00621;
 
   //==========================================================================
-  // 方法 E: 上游族解析 (upstream family-resolved adjoint)
-  //   利用传递函数 family 轴，从上游直接获取 prompt/delayed 重要性
-  //   传递函数按产额分份 ν_f/ν_t 记入各 family，故 I_delayed_k 已含 ν_{d,k}/ν_t
-  //   D = Σ_cell ΔV × I_total(cell) × F_total(cell)
-  //   N_k = Σ_cell ΔV × I_delayed_k(cell) × F_total(cell)  (用 F_total 避免
-  //   ν_{d,k} 双重计数)
+  // 主方法: Method E, upstream family/group response-weighted importance
   //==========================================================================
-  if (!has_upstream_family_data_) {
-    fatal_error("方法E需要上游族解析伴随通量数据 (family_resolved/)，"
-                "请确保 adjoint_flux.h5 包含该数据。");
+  if (!has_upstream_family_data_ || !upstream_family_group_data_used_) {
+    fatal_error("CLUTCH Method E beta_eff requires "
+                "family_resolved/*/flux_group_mean in adjoint_flux.h5. "
+                "The scalar flux_mean fields are diagnostic only.");
   }
 
   double denom_upstream = compute_denominator_upstream_family(flux, volume);
   std::array<double, N_DELAYED_GROUPS> num_upstream {};
   std::array<double, N_DELAYED_GROUPS> beta_upstream {};
   double beta_upstream_total = 0.0;
-  for (int i = 0; i < 8; ++i) {
-    num_upstream[i] =
-      compute_delayed_numerator_upstream_family(i, flux, volume);
+  for (int i = 0; i < N_DELAYED_GROUPS; ++i) {
+    num_upstream[i] = compute_delayed_numerator_upstream_family(i, flux, volume);
     beta_upstream[i] =
       (denom_upstream > 0.0) ? num_upstream[i] / denom_upstream : 0.0;
     beta_upstream_total += beta_upstream[i];
   }
 
-  // 缓存方法 E 结果
+  result_e_ = MethodResult {};
   result_e_.denominator = denom_upstream;
   result_e_.beta_total = beta_upstream_total;
-  for (int i = 0; i < 8; ++i) {
+  result_e_.available = true;
+  for (int i = 0; i < N_DELAYED_GROUPS; ++i) {
     result_e_.numerators[i] = num_upstream[i];
     result_e_.beta_i[i] = beta_upstream[i];
   }
 
-  // 以方法 E 作为主结果
   denominator_ = denom_upstream;
-  for (int i = 0; i < 8; ++i) {
+  for (int i = 0; i < N_DELAYED_GROUPS; ++i) {
     numerators_[i] = num_upstream[i];
     beta_i_[i] = beta_upstream[i];
   }
   beta_total_ = beta_upstream_total;
 
   if (denominator_ <= 0.0) {
-    fatal_error("方法E分母为零或负值，无法计算 β_eff。");
+    fatal_error("CLUTCH Method E denominator is zero or negative; cannot "
+                "compute beta_eff.");
   }
 
-  // 输出方法 E 结果表
-  std::cout << "\n  方法E (上游族解析): D = " << std::scientific
+  // 输出主方法结果表
+  std::cout << "\n  Method E: D = " << std::scientific
             << std::setprecision(4) << denom_upstream << std::endl;
-  std::cout << "\n  β_eff 计算结果 (方法E: 上游族解析):" << std::endl;
+  std::cout << "\n  β_eff 计算结果 (CLUTCH family/group Method E):"
+            << std::endl;
   std::cout << "  " << std::string(90, '-') << std::endl;
-  std::cout << "    先驱核群    方法E(上游)    MCNP参考      偏差(%)"
+  std::cout << "    先驱核群    Method E       MCNP参考      偏差(%)"
             << std::endl;
   std::cout << "  " << std::string(90, '-') << std::endl;
 
   for (int i = 0; i < 6; ++i) {
-    double err_e = (mcnp_beta[i] > 0)
-                     ? (beta_upstream[i] - mcnp_beta[i]) / mcnp_beta[i] * 100.0
-                     : 0.0;
+    double err_e =
+      (mcnp_beta[i] > 0)
+        ? (beta_upstream[i] - mcnp_beta[i]) / mcnp_beta[i] * 100.0
+        : 0.0;
     std::cout << "       " << (i + 1) << "        " << std::scientific
               << std::setprecision(5) << beta_upstream[i] << "      "
               << std::setprecision(5) << mcnp_beta[i] << "      " << std::fixed
@@ -250,8 +260,9 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
             << mcnp_beta_total << "      " << std::fixed << std::setprecision(2)
             << std::setw(7) << err_e_total << std::endl;
   std::cout << "  " << std::string(90, '-') << std::endl;
-  std::cout << "  (*) 方法E: 上游族解析，传递函数 family 轴直接给出 I_prompt/"
-               "I_delayed_k"
+  std::cout << "  (*) 主方法: group 为响应侧诱发裂变碰撞能群；"
+               "delayed group 已在 transfer-function family 轴分份，"
+               "因此后处理不引入 chi_d,k(E_birth)。"
             << std::endl;
 
   // 7. 输出结果到文件
@@ -369,7 +380,7 @@ void BetaEffective::read_adjoint_flux_data(const std::string& filename,
     read_dataset(file_id, "energy_edges", adjoint_energy_edges_);
   }
 
-  // 读取稀疏共轭通量数据
+  // 读取稀疏 response-weighted importance 数据
   std::vector<int> cell_indices;
   std::vector<double> adjoint_flux_values;
   std::vector<double> adjoint_group_values;
@@ -416,47 +427,101 @@ void BetaEffective::read_adjoint_flux_data(const std::string& filename,
 
   // ========== 读取 family_resolved/ 组 (Method E) ==========
   has_upstream_family_data_ = false;
+  upstream_family_group_data_used_ = false;
   cell_upstream_prompt_importance_.clear();
+  cell_upstream_prompt_importance_group_.clear();
   for (int k = 0; k < N_DELAYED_GROUPS; ++k) {
     cell_upstream_delayed_importance_[k].clear();
+    cell_upstream_delayed_importance_group_[k].clear();
   }
 
   if (object_exists(file_id, "family_resolved")) {
     hid_t fr_group = H5Gopen(file_id, "family_resolved", H5P_DEFAULT);
 
-    // Read prompt importance
-    if (object_exists(fr_group, "prompt")) {
-      hid_t pg = H5Gopen(fr_group, "prompt", H5P_DEFAULT);
-      vector<int> p_indices;
-      vector<double> p_mean;
-      read_dataset(pg, "cell_indices", p_indices);
-      read_dataset(pg, "flux_mean", p_mean);
-      for (size_t i = 0; i < p_indices.size(); ++i) {
-        cell_upstream_prompt_importance_[p_indices[i]] = p_mean[i];
-      }
-      H5Gclose(pg);
-    }
+    auto read_family_importance =
+      [&](const std::string& family_name,
+        std::unordered_map<int, double>& scalar_map,
+        std::unordered_map<int, std::vector<double>>& group_map,
+        bool required) {
+        if (!object_exists(fr_group, family_name.c_str())) {
+          if (required) {
+            fatal_error("family_resolved/" + family_name +
+                        " missing in adjoint_flux.h5.");
+          }
+          return;
+        }
 
-    // Read delayed_1..8 importance
+        hid_t fam_group =
+          H5Gopen(fr_group, family_name.c_str(), H5P_DEFAULT);
+        vector<int> indices;
+        vector<double> mean;
+        read_dataset(fam_group, "cell_indices", indices);
+        read_dataset(fam_group, "flux_mean", mean);
+        if (indices.size() != mean.size()) {
+          fatal_error("family_resolved/" + family_name +
+                      " cell_indices and flux_mean size mismatch.");
+        }
+        for (size_t i = 0; i < indices.size(); ++i) {
+          scalar_map[indices[i]] = mean[i];
+        }
+
+        if (adjoint_n_groups_ > 1) {
+          if (!object_exists(fam_group, "flux_group_mean")) {
+            fatal_error("family_resolved/" + family_name +
+                        "/flux_group_mean missing; Method E requires "
+                        "family-resolved group importance.");
+          }
+
+          vector<double> group_mean;
+          read_dataset(fam_group, "flux_group_mean", group_mean);
+          size_t expected =
+            indices.size() * static_cast<size_t>(adjoint_n_groups_);
+          if (group_mean.size() != expected) {
+            fatal_error("family_resolved/" + family_name +
+                        "/flux_group_mean size mismatch: expected "
+                        "n_cells * n_groups.");
+          }
+
+          for (size_t i = 0; i < indices.size(); ++i) {
+            std::vector<double> groups(adjoint_n_groups_, 0.0);
+            size_t offset = i * static_cast<size_t>(adjoint_n_groups_);
+            for (int g = 0; g < adjoint_n_groups_; ++g) {
+              groups[g] = group_mean[offset + g];
+            }
+            group_map[indices[i]] = std::move(groups);
+          }
+        }
+
+        H5Gclose(fam_group);
+      };
+
+    // Read prompt importance. Prompt family is required for the total source.
+    read_family_importance("prompt", cell_upstream_prompt_importance_,
+      cell_upstream_prompt_importance_group_, true);
+
+    // Read delayed_1..8 importance. Missing delayed families are treated as zero.
     for (int k = 0; k < N_DELAYED_GROUPS; ++k) {
       std::string dname = "delayed_" + std::to_string(k + 1);
-      if (object_exists(fr_group, dname.c_str())) {
-        hid_t dg = H5Gopen(fr_group, dname.c_str(), H5P_DEFAULT);
-        vector<int> d_indices;
-        vector<double> d_mean;
-        read_dataset(dg, "cell_indices", d_indices);
-        read_dataset(dg, "flux_mean", d_mean);
-        for (size_t i = 0; i < d_indices.size(); ++i) {
-          cell_upstream_delayed_importance_[k][d_indices[i]] = d_mean[i];
-        }
-        H5Gclose(dg);
+      read_family_importance(dname, cell_upstream_delayed_importance_[k],
+        cell_upstream_delayed_importance_group_[k], false);
+    }
+
+    if (adjoint_n_groups_ > 1) {
+      upstream_family_group_data_used_ =
+        !cell_upstream_prompt_importance_group_.empty();
+      if (!upstream_family_group_data_used_) {
+        fatal_error("family_resolved/prompt/flux_group_mean contains no "
+                    "group-resolved cells.");
       }
+    } else {
+      upstream_family_group_data_used_ = false;
     }
 
     H5Gclose(fr_group);
     has_upstream_family_data_ = true;
-    std::cout << "  [Method E] Family-resolved adjoint data loaded: "
+    std::cout << "  [Method E] Family-resolved importance data loaded: "
               << cell_upstream_prompt_importance_.size() << " prompt cells"
+              << (upstream_family_group_data_used_ ? " (group-resolved)" : "")
               << std::endl;
   }
 
@@ -647,6 +712,32 @@ void BetaEffective::write_to_file(const std::string& filename) const
     write_dataset(metadata_group, "energy_edges", energy_edges_common_);
   }
   write_attribute(metadata_group, "beta_eff_mode", "MATERIAL_DEPENDENT");
+  write_attribute(
+    metadata_group, "method", "clutch_family_group_method_e");
+  write_attribute(metadata_group, "beta_eff_formula",
+    "D=sum_c dV sum_g I_total(c,g) nu_t,g(c) Sigma_f,g(c) phi_g(c); "
+    "N_k=sum_c dV sum_g I_delayed_k(c,g) nu_t,g(c) Sigma_f,g(c) phi_g(c)");
+  write_attribute(metadata_group, "delayed_fraction_location",
+    "transfer_function_family_axis");
+  write_attribute(metadata_group, "importance_quantity",
+    "family-resolved response-weighted importance field from adjoint_flux.h5");
+  write_attribute(
+    metadata_group, "family_group_data_used", upstream_family_group_data_used_);
+  write_attribute(metadata_group, "source_importance_method",
+    "CLUTCH transfer-function convolution with fission-matrix source-state "
+    "importance");
+  write_attribute(metadata_group, "group_meaning",
+    "response-side induced-fission collision energy group, not fission "
+    "neutron birth energy");
+  write_attribute(metadata_group, "chi_birth_spectrum_used", false);
+  write_attribute(metadata_group, "chi_energy_dependence",
+    "chi_prompt/chi_delayed are not used in Method E postprocessing because "
+    "the group axis is response collision energy");
+  write_attribute(
+    metadata_group, "delayed_yield_location", "transfer_function_family_axis");
+  write_attribute(metadata_group, "batchwise_ratio_uncertainty", false);
+  write_attribute(metadata_group, "uncertainty_status",
+    "not computed; uncertainty dataset is a placeholder");
 
   // Phase 3: 添加参考能量和温度
   write_attribute(metadata_group, "ref_energy_ev", ref_energy_);
@@ -669,6 +760,51 @@ void BetaEffective::write_to_file(const std::string& filename) const
   // denominator - 分母项(单个值)
   std::vector<double> denom_vec = {denominator_};
   write_dataset(diag_group, "denominator", denom_vec);
+  write_dataset(
+    diag_group, "denominator_by_group_energy", denominator_by_group_energy_);
+  write_attribute(diag_group, "group_energy_diagnostic_meaning",
+    "response collision energy group contributions for the main Method E "
+    "formula");
+
+  std::vector<double> numerator_by_energy_flat;
+  numerator_by_energy_flat.reserve(
+    static_cast<size_t>(N_DELAYED_GROUPS) * n_energy_groups_);
+  for (int k = 0; k < N_DELAYED_GROUPS; ++k) {
+    numerator_by_energy_flat.insert(numerator_by_energy_flat.end(),
+      numerator_by_group_energy_[k].begin(),
+      numerator_by_group_energy_[k].end());
+  }
+  hsize_t numerator_dims[] {static_cast<hsize_t>(N_DELAYED_GROUPS),
+    static_cast<hsize_t>(n_energy_groups_)};
+  write_dataset_lowlevel(diag_group, 2, numerator_dims,
+    "numerator_by_group_energy", H5TypeMap<double>::type_id, H5S_ALL, false,
+    numerator_by_energy_flat.data());
+
+  double denominator_energy_sum = std::accumulate(
+    denominator_by_group_energy_.begin(), denominator_by_group_energy_.end(),
+    0.0);
+  std::vector<double> denominator_energy_sum_vec = {denominator_energy_sum};
+  write_dataset(
+    diag_group, "denominator_by_group_energy_sum", denominator_energy_sum_vec);
+  write_attribute(diag_group, "denominator_by_group_energy_abs_diff",
+    std::abs(denominator_energy_sum - denominator_));
+
+  std::vector<double> numerator_energy_sums(N_DELAYED_GROUPS, 0.0);
+  std::vector<double> numerator_energy_abs_diff(N_DELAYED_GROUPS, 0.0);
+  for (int k = 0; k < N_DELAYED_GROUPS; ++k) {
+    numerator_energy_sums[k] =
+      std::accumulate(numerator_by_group_energy_[k].begin(),
+        numerator_by_group_energy_[k].end(), 0.0);
+    numerator_energy_abs_diff[k] =
+      std::abs(numerator_energy_sums[k] - numerators_[k]);
+  }
+  write_dataset(
+    diag_group, "numerator_by_group_energy_sum", numerator_energy_sums);
+  write_dataset(
+    diag_group, "numerator_by_group_energy_abs_diff", numerator_energy_abs_diff);
+  write_attribute(diag_group, "energy_diagnostic_note",
+    "Energy-summed diagnostics should match numerator/denominator up to "
+    "floating-point summation differences.");
 
   // normalization_factor - 归一化因子(体积元)
   write_attribute(diag_group, "normalization_factor",
@@ -714,8 +850,10 @@ void BetaEffective::write_to_file(const std::string& filename) const
   {
     hid_t grp =
       H5Gcreate(mc_group, "method_e", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
-    write_attribute(
-      grp, "description", "Upstream family-resolved adjoint (TF family axis)");
+    write_attribute(grp, "description",
+      "Upstream family-resolved response-weighted importance "
+      "(TF family axis)");
+    write_attribute(grp, "available", result_e_.available);
     std::vector<double> bi(result_e_.beta_i.begin(), result_e_.beta_i.end());
     write_dataset(grp, "beta_i", bi);
     std::vector<double> bt = {result_e_.beta_total};
@@ -725,6 +863,10 @@ void BetaEffective::write_to_file(const std::string& filename) const
     write_dataset(grp, "numerator", num);
     std::vector<double> den = {result_e_.denominator};
     write_dataset(grp, "denominator", den);
+    write_attribute(grp, "formula",
+      "family-group Method E; delayed families already include nu_d,k/nu_t");
+    write_attribute(grp, "uses_birth_spectrum_chi", false);
+    write_attribute(grp, "delayed_yield_reapplied", false);
     H5Gclose(grp);
   }
 
@@ -738,62 +880,85 @@ void BetaEffective::write_to_file(const std::string& filename) const
 }
 
 //------------------------------------------------------------------------------
-// 方法 E 分母: D = Σ_cell ΔV × I_total(cell) × F_total(cell)
-// I_total = I_prompt + Σ_k I_delayed_k (来自上游族解析伴随通量)
-// I_prompt = φ†_prompt(cell), I_delayed_k = φ†_delayed_k(cell)
+// 方法 E 分母:
+//   D = Σ_cell ΔV × Σ_g I_total(cell,g) × F_total(cell,g)
+// I_total = I_prompt + Σ_k I_delayed_k (来自上游族解析 importance)
 //------------------------------------------------------------------------------
 double BetaEffective::compute_denominator_upstream_family(
-  const std::unordered_map<int, double>& flux, double volume) const
+  const std::unordered_map<int, double>& flux, double volume)
 {
   std::vector<double> terms;
-  terms.reserve(flux.size());
+  terms.reserve(flux.size() * static_cast<size_t>(n_energy_groups_));
+  denominator_by_group_energy_.assign(n_energy_groups_, 0.0);
+  std::vector<double> group_compensation(n_energy_groups_, 0.0);
+
+  auto add_group_term = [&](int g, double value) {
+    double y = value - group_compensation[g];
+    double t = denominator_by_group_energy_[g] + y;
+    group_compensation[g] = (t - denominator_by_group_energy_[g]) - y;
+    denominator_by_group_energy_[g] = t;
+  };
 
   for (const auto& [cell_idx, phi] : flux) {
+    (void)phi;
     auto it_data = cell_nuclear_data_.find(cell_idx);
     if (it_data == cell_nuclear_data_.end() || !it_data->second.is_fissionable)
       continue;
 
     const auto& nuc_data = it_data->second;
 
-    // I_total = I_prompt + Σ_k I_delayed_k (来自上游传递函数 family 轴)
-    double I_total = 0.0;
-    auto it_p = cell_upstream_prompt_importance_.find(cell_idx);
-    if (it_p != cell_upstream_prompt_importance_.end()) {
-      I_total += it_p->second;
-    }
-    for (int k = 0; k < N_DELAYED_GROUPS; ++k) {
-      auto it_d = cell_upstream_delayed_importance_[k].find(cell_idx);
-      if (it_d != cell_upstream_delayed_importance_[k].end()) {
-        I_total += it_d->second;
-      }
-    }
-
-    if (I_total <= 0.0)
-      continue;
-
-    // F_total = Σ_g ν_g × Σ_f,g × φ_g
     auto it_flux_groups = flux_group_map_.find(cell_idx);
-    if (it_flux_groups != flux_group_map_.end() &&
-        it_flux_groups->second.size() ==
-          static_cast<size_t>(n_energy_groups_) &&
-        nuc_data.sigma_f_groups.size() ==
-          static_cast<size_t>(n_energy_groups_) &&
-        nuc_data.nu_total_groups.size() ==
+    if (it_flux_groups == flux_group_map_.end() ||
+        it_flux_groups->second.size() !=
           static_cast<size_t>(n_energy_groups_)) {
-      const auto& fg = it_flux_groups->second;
-      double F_total = 0.0;
-      for (int g = 0; g < n_energy_groups_; ++g) {
-        F_total +=
-          nuc_data.nu_total_groups[g] * nuc_data.sigma_f_groups[g] * fg[g];
+      fatal_error("Missing group-resolved forward flux for fissionable cell " +
+                  std::to_string(cell_idx) + ".");
+    }
+    if (nuc_data.sigma_f_groups.size() !=
+          static_cast<size_t>(n_energy_groups_) ||
+        nuc_data.nu_total_groups.size() !=
+          static_cast<size_t>(n_energy_groups_)) {
+      fatal_error("Missing group-resolved nuclear data for fissionable cell " +
+                  std::to_string(cell_idx) + ".");
+    }
+
+    const auto& fg = it_flux_groups->second;
+    auto it_p_group = cell_upstream_prompt_importance_group_.find(cell_idx);
+    if (it_p_group != cell_upstream_prompt_importance_group_.end() &&
+        it_p_group->second.size() != static_cast<size_t>(n_energy_groups_)) {
+      fatal_error("Prompt family group importance size mismatch for cell " +
+                  std::to_string(cell_idx) + ".");
+    }
+
+    for (int g = 0; g < n_energy_groups_; ++g) {
+      double I_total = 0.0;
+      if (it_p_group != cell_upstream_prompt_importance_group_.end()) {
+        I_total += it_p_group->second[g];
       }
-      double term = volume * I_total * F_total;
-      if (term != 0.0)
+
+      for (int k = 0; k < N_DELAYED_GROUPS; ++k) {
+        auto it_d_group =
+          cell_upstream_delayed_importance_group_[k].find(cell_idx);
+        if (it_d_group == cell_upstream_delayed_importance_group_[k].end())
+          continue;
+        if (it_d_group->second.size() !=
+            static_cast<size_t>(n_energy_groups_)) {
+          fatal_error("Delayed family group importance size mismatch for cell " +
+                      std::to_string(cell_idx) + ".");
+        }
+        I_total += it_d_group->second[g];
+      }
+
+      if (I_total <= 0.0)
+        continue;
+
+      double F_total_g =
+        nuc_data.nu_total_groups[g] * nuc_data.sigma_f_groups[g] * fg[g];
+      double term = volume * I_total * F_total_g;
+      if (term != 0.0) {
         terms.push_back(term);
-    } else {
-      double term =
-        volume * I_total * nuc_data.nu_total * nuc_data.sigma_f * phi;
-      if (term != 0.0)
-        terms.push_back(term);
+        add_group_term(g, term);
+      }
     }
   }
 
@@ -801,54 +966,72 @@ double BetaEffective::compute_denominator_upstream_family(
 }
 
 //------------------------------------------------------------------------------
-// 方法 E 分子: N_k = Σ_cell ΔV × I_delayed_k(cell) × F_total(cell)
-// I_delayed_k 来自上游族解析伴随通量（传递函数 family 轴分辨）
+// 方法 E 分子:
+//   N_k = Σ_cell ΔV × Σ_g I_delayed_k(cell,g) × F_total(cell,g)
+// I_delayed_k 来自上游族解析 importance（传递函数 family 轴分辨）
 // 注意：I_delayed_k 已包含 ν_{d,k}/ν_t 产额分份权重，
 //       因此乘以 F_total（而非 F_{d,k}）以避免 ν_{d,k} 双重计数。
 //------------------------------------------------------------------------------
 double BetaEffective::compute_delayed_numerator_upstream_family(
-  int group, const std::unordered_map<int, double>& flux, double volume) const
+  int group, const std::unordered_map<int, double>& flux, double volume)
 {
   std::vector<double> terms;
-  terms.reserve(flux.size());
+  terms.reserve(flux.size() * static_cast<size_t>(n_energy_groups_));
+  numerator_by_group_energy_[group].assign(n_energy_groups_, 0.0);
+  std::vector<double> group_compensation(n_energy_groups_, 0.0);
+
+  auto add_group_term = [&](int g, double value) {
+    double y = value - group_compensation[g];
+    double t = numerator_by_group_energy_[group][g] + y;
+    group_compensation[g] = (t - numerator_by_group_energy_[group][g]) - y;
+    numerator_by_group_energy_[group][g] = t;
+  };
 
   for (const auto& [cell_idx, phi] : flux) {
-    // 查找上游族解析的 delayed-k 重要性
-    auto it_imp = cell_upstream_delayed_importance_[group].find(cell_idx);
-    if (it_imp == cell_upstream_delayed_importance_[group].end())
+    (void)phi;
+    // 查找上游族解析的 delayed-k 分群重要性
+    auto it_imp =
+      cell_upstream_delayed_importance_group_[group].find(cell_idx);
+    if (it_imp == cell_upstream_delayed_importance_group_[group].end())
       continue;
+    if (it_imp->second.size() != static_cast<size_t>(n_energy_groups_)) {
+      fatal_error("Delayed family group importance size mismatch for cell " +
+                  std::to_string(cell_idx) + ".");
+    }
 
     auto it_data = cell_nuclear_data_.find(cell_idx);
     if (it_data == cell_nuclear_data_.end() || !it_data->second.is_fissionable)
       continue;
 
     const auto& nuc_data = it_data->second;
-    double I_delayed_k = it_imp->second;
 
-    // F_total = Σ_g ν_total,g × Σ_{f,g} × φ_g
     auto it_flux_groups = flux_group_map_.find(cell_idx);
-    if (it_flux_groups != flux_group_map_.end() &&
-        it_flux_groups->second.size() ==
-          static_cast<size_t>(n_energy_groups_) &&
-        nuc_data.sigma_f_groups.size() ==
-          static_cast<size_t>(n_energy_groups_) &&
-        nuc_data.nu_total_groups.size() ==
+    if (it_flux_groups == flux_group_map_.end() ||
+        it_flux_groups->second.size() !=
           static_cast<size_t>(n_energy_groups_)) {
-      const auto& fg = it_flux_groups->second;
-      double F_total = 0.0;
-      for (int g = 0; g < n_energy_groups_; ++g) {
-        F_total +=
-          nuc_data.nu_total_groups[g] * nuc_data.sigma_f_groups[g] * fg[g];
+      fatal_error("Missing group-resolved forward flux for fissionable cell " +
+                  std::to_string(cell_idx) + ".");
+    }
+    if (nuc_data.sigma_f_groups.size() !=
+          static_cast<size_t>(n_energy_groups_) ||
+        nuc_data.nu_total_groups.size() !=
+          static_cast<size_t>(n_energy_groups_)) {
+      fatal_error("Missing group-resolved nuclear data for fissionable cell " +
+                  std::to_string(cell_idx) + ".");
+    }
+
+    const auto& fg = it_flux_groups->second;
+    const auto& I_delayed_k = it_imp->second;
+    for (int g = 0; g < n_energy_groups_; ++g) {
+      if (I_delayed_k[g] <= 0.0)
+        continue;
+      double F_total_g =
+        nuc_data.nu_total_groups[g] * nuc_data.sigma_f_groups[g] * fg[g];
+      double term = volume * I_delayed_k[g] * F_total_g;
+      if (term != 0.0) {
+        terms.push_back(term);
+        add_group_term(g, term);
       }
-      double term = volume * I_delayed_k * F_total;
-      if (term != 0.0)
-        terms.push_back(term);
-    } else {
-      // 无分群数据时的回退
-      double term =
-        volume * I_delayed_k * nuc_data.nu_total * nuc_data.sigma_f * phi;
-      if (term != 0.0)
-        terms.push_back(term);
     }
   }
 

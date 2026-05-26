@@ -17,7 +17,7 @@ void AdjointFlux::compute_from_files(const std::string& transfer_function_file,
   const std::string& fission_matrix_file, const std::string& output_file)
 {
   std::cout << "\n" << std::string(70, '=') << std::endl;
-  std::cout << "共轭通量计算" << std::endl;
+  std::cout << "Response-weighted importance computation" << std::endl;
   std::cout << std::string(70, '=') << std::endl;
 
   // 1. 读取传递函数数据
@@ -205,8 +205,9 @@ void AdjointFlux::compute_from_files(const std::string& transfer_function_file,
     }
   }
 
-  // 3. 计算共轭通量
-  std::cout << "\n计算共轭通量: Φ†(r) = Σ_{source_state} T(s→r) × I*(s)"
+  // 3. 计算 response-weighted importance
+  std::cout << "\n计算 response-weighted importance: "
+               "I_response(r,g) = Σ_{source_state} T(s→r,g) × I*(s)"
             << std::endl;
   if (effective_n_source_groups > 1) {
     std::cout << "  使用能量分辨伴随源: " << effective_n_source_groups
@@ -276,7 +277,8 @@ void AdjointFlux::compute_from_memory(
   }
 
   // -----------------------------------------------------------------------
-  // 计算 Φ†(r) = Σ_{source_state} T(source_state → r) × I*(source_state)
+  // 计算 I_response(r,g) =
+  //   Σ_{source_state} T(source_state → r,g) × I*(source_state)
   //
   // 若 effective_n_source_groups == 1：
   //   source_state == source_cell，与旧路径完全等价
@@ -352,7 +354,7 @@ void AdjointFlux::compute_from_memory(
 
   // 输出统计信息
   double density = 100.0 * nonzero_cells_ / n_cells_;
-  std::cout << "\n共轭通量统计:" << std::endl;
+  std::cout << "\nResponse-weighted importance statistics:" << std::endl;
   std::cout << "  非零单元: " << nonzero_cells_ << "/" << n_cells_ << " ("
             << std::fixed << std::setprecision(1) << density << "%)"
             << ", 最大值: " << std::scientific << std::setprecision(3)
@@ -401,7 +403,8 @@ double AdjointFlux::get_total_flux() const
 
 void AdjointFlux::write_to_file(const std::string& filename)
 {
-  std::cout << "\n写入共轭通量: " << filename << std::endl;
+  std::cout << "\n写入 response-weighted importance: " << filename
+            << std::endl;
 
   hid_t file_id = file_open(filename, 'w');
 
@@ -409,7 +412,8 @@ void AdjointFlux::write_to_file(const std::string& filename)
   write_attribute(file_id, "filetype", "adjoint_flux");
   write_attribute(file_id, "version", "1.0");
   write_attribute(file_id, "description",
-    "Adjoint flux computed from transfer function and adjoint source");
+    "Response-weighted importance computed from transfer function and "
+    "fission-matrix importance source; not true transport adjoint flux");
   write_attribute(file_id, "storage_format", "sparse");
 
   // 写入网格信息
@@ -490,7 +494,17 @@ void AdjointFlux::write_to_file(const std::string& filename)
       file_id, "family_resolved", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
     write_attribute(fr_group, "n_families", n_families_);
     write_attribute(fr_group, "description",
-      "Family-resolved adjoint flux: phi_dag_f(r) = sum_i T_f(i->r) * I*(i)");
+      "Family-resolved response-weighted importance: "
+      "I_f(r,g) = sum_i T_f(i->r,g) * I*(i)");
+    write_attribute(fr_group, "physical_quantity",
+      "response-weighted importance, not true transport adjoint flux");
+    write_attribute(fr_group, "group_meaning",
+      "response fission collision energy group; not fission neutron birth "
+      "energy");
+    write_attribute(fr_group, "delayed_family_weighting",
+      "prompt/delayed family contributions are yield-fractioned in the "
+      "transfer function by nu_family(E_collision)/nu_total(E_collision)");
+    write_attribute(fr_group, "not_true_transport_adjoint_flux", true);
     write_attribute(
       fr_group, "family_order", "prompt, delayed_1, ..., delayed_8");
 
@@ -558,12 +572,12 @@ void AdjointFlux::write_to_file(const std::string& filename)
   write_attribute(sem_group, "physical_quantity",
     "Response-weighted importance field, NOT true adjoint flux");
   write_attribute(sem_group, "definition",
-    "phi_dag(r) = sum_{source_state} T(source_state->r) * "
+    "I_response(r,g) = sum_{source_state} T(source_state->r,g) * "
     "I_star(source_state), "
     "where source_state = (source_cell, g_source) and I_star is the "
     "energy-resolved fission matrix eigenvector");
   write_attribute(sem_group, "group_meaning",
-    "Group data phi_dag_g(r) reflects collision-energy-resolved importance "
+    "Group data I_response_g(r) reflects collision-energy-resolved importance "
     "at response position r. The group index g refers to the energy of the "
     "neutron causing fission at r, not the birth energy of fission neutrons.");
   write_attribute(sem_group, "adjoint_source",

@@ -10,15 +10,15 @@
 namespace openmc {
 
 //! \class AdjointFlux
-//! \brief 共轭通量（伴随通量）计算器
+//! \brief response-weighted importance 计算器
 //!
 //! 物理意义：
-//!   Φ†(r) = Σ_i T(i -> r) × S†(i)
+//!   I_response(r) = Σ_i T(i -> r) × I*(i)
 //!
 //!   其中：
 //!   - T(i -> r): 传递函数，从源单元 i 到响应位置 r 的传递
 //!   - S†(i): 伴随源（重要性函数），源单元 i 的重要性
-//!   - Φ†(r): 共轭通量，位置 r 处的伴随通量
+//!   - I_response(r): 响应加权重要性场，不是真正的输运伴随通量
 //!
 //! 用途：
 //!   - 扰动理论分析
@@ -31,15 +31,15 @@ public:
   // 默认构造函数
   AdjointFlux() = default;
 
-  // 从 HDF5 文件计算共轭通量
+  // 从 HDF5 文件计算 response-weighted importance
   // transfer_function_file: 传递函数数据文件 (transfer_function_data.h5)
   // fission_matrix_file: 裂变矩阵文件，包含伴随源 (fission_matrix.h5)
-  // output_file: 输出的共轭通量文件 (adjoint_flux.h5)
+  // output_file: 输出的 importance 文件 (adjoint_flux.h5)
   void compute_from_files(const std::string& transfer_function_file,
     const std::string& fission_matrix_file,
     const std::string& output_file = "adjoint_flux.h5");
 
-  // 从内存中的数据计算共轭通量
+  // 从内存中的数据计算 response-weighted importance
   // transfer_functions: 稀疏传递函数 map<source_state, map<j_response, T>>
   //   source_state = source_cell * n_source_groups + g_source
   //   若 n_source_groups==1，source_state == source_cell（向后兼容）
@@ -90,8 +90,8 @@ public:
   }
 
 private:
-  // 共轭通量数据（稀疏存储）
-  // Key: 单元索引 j, Value: Φ†(j)
+  // Response-weighted importance 数据（稀疏存储）
+  // Key: 单元索引 j, Value: I_response(j,g)
   std::unordered_map<int, vector<double>> adjoint_flux_sparse_;
 
   // 网格参数
@@ -105,7 +105,8 @@ private:
   vector<double> energy_edges_;
   vector<double> group_total_flux_;
 
-  // Family-resolved adjoint flux: [family_index] -> (cell -> group_vector)
+  // Family-resolved response-weighted importance:
+  // [family_index] -> (cell -> group_vector)
   std::vector<std::unordered_map<int, vector<double>>> family_adjoint_flux_;
 
   // 统计信息

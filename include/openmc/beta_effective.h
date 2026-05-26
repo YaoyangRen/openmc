@@ -18,6 +18,7 @@ struct MethodResult {
   std::array<double, N_DELAYED_GROUPS> numerators {}; //!< 各组分子
   double denominator {0.0};                           //!< 分母
   double beta_total {0.0};                            //!< 总 β_eff
+  bool available {false};                             //!< 方法是否成功计算
 };
 
 // Forward declarations
@@ -34,11 +35,16 @@ enum class WeightingMode {
 //==============================================================================
 //! 有效缓发中子份额计算类
 //!
-//! 计算 β_eff = Σ_i β_i,eff，其中每个缓发群的有效份额为:
-//! β_i,eff = (分子_i) / (分母)
+//! Current main path uses family-resolved CLUTCH Method E on the response-side
+//! induced-fission collision energy group:
 //!
-//! 分子_i = ∫ φ*(r) χ_d,i ν_d,i(r) σ_f(r) φ(r) dr
-//! 分母 = ∫ φ*(r) χ_p ν(r) σ_f(r) φ(r) dr
+//! D   = sum_c dV sum_g I_total(c,g)     nu_t,g(c) Sigma_f,g(c) phi_g(c)
+//! N_k = sum_c dV sum_g I_delayed_k(c,g) nu_t,g(c) Sigma_f,g(c) phi_g(c)
+//!
+//! The delayed-family transfer function already contains the delayed-group
+//! split nu_d,k / nu_t. Therefore BetaEffective multiplies both numerator and
+//! denominator by the same total fission production term and does not apply
+//! chi_d,k(E_birth) in this response-energy-group postprocessing formula.
 //==============================================================================
 class BetaEffective {
 public:
@@ -56,7 +62,7 @@ public:
 
   //! 从 HDF5 文件计算 β_eff
   //! \param flux_file 正向通量文件 (flux_mesh.h5)
-  //! \param adjoint_flux_file 共轭通量文件 (adjoint_flux.h5)
+  //! \param adjoint_flux_file response-weighted importance 文件 (adjoint_flux.h5)
   //! \param output_file 输出文件 (beta_eff.h5)
   void compute_from_files(const std::string& flux_file,
     const std::string& adjoint_flux_file, const std::string& output_file);
@@ -76,18 +82,18 @@ public:
 
 private:
   //==========================================================================
-  // 方法 E: 上游族解析 (upstream family-resolved adjoint)
+  // Method E: upstream family-resolved response-weighted importance
   //==========================================================================
 
-  //! 方法 E 分母: D = Σ_cell ΔV × I_total(cell) × F_total(cell)
-  //! I_total = I_prompt + Σ_k I_delayed_k (来自上游族解析伴随通量)
+  //! 方法 E 分母: D = Σ_cell ΔV × Σ_g I_total(cell,g) × F_total(cell,g)
+  //! I_total = I_prompt + Σ_k I_delayed_k (来自上游族解析 importance)
   double compute_denominator_upstream_family(
-    const std::unordered_map<int, double>& flux, double volume) const;
+    const std::unordered_map<int, double>& flux, double volume);
 
-  //! 方法 E 分子: N_k = Σ_cell ΔV × I_delayed_k(cell) × F_{d,k}(cell)
-  //! I_delayed_k 来自上游族解析伴随通量 (传递函数 family 轴)
+  //! 方法 E 分子: N_k = Σ_cell ΔV × Σ_g I_delayed_k(cell,g) × F_total(cell,g)
+  //! I_delayed_k 来自上游族解析 importance (传递函数 family 轴)
   double compute_delayed_numerator_upstream_family(int group,
-    const std::unordered_map<int, double>& flux, double volume) const;
+    const std::unordered_map<int, double>& flux, double volume);
 
   //! 输出详细诊断信息
   void print_diagnostic_info(const std::unordered_map<int, double>& flux,
@@ -144,12 +150,12 @@ private:
     std::unordered_map<int, double>& flux_map, std::array<int, 3>& shape,
     double& pitch);
 
-  //! 从 HDF5 读取稀疏共轭通量数据
+  //! 从 HDF5 读取稀疏 response-weighted importance 数据
   void read_adjoint_flux_data(const std::string& filename,
     std::unordered_map<int, double>& adjoint_flux_map,
     std::array<int, 3>& shape, double& pitch);
 
-  //! 校验 (并必要时设置) 通量/共轭通量的能群一致性
+  //! 校验 (并必要时设置) 通量/importance 的能群一致性
   void validate_group_metadata();
 
   //! 根据正向通量文件构建能谱折算权重
@@ -197,11 +203,21 @@ private:
   //! 方法 E 结果缓存
   MethodResult result_e_; //!< 方法 E: 上游族解析
 
-  // Method E: 上游族解析伴随通量缓存
+  // Method E: 上游族解析 importance 缓存
   bool has_upstream_family_data_ {false};
+  bool upstream_family_group_data_used_ {false};
   std::unordered_map<int, double> cell_upstream_prompt_importance_;
   std::array<std::unordered_map<int, double>, N_DELAYED_GROUPS>
     cell_upstream_delayed_importance_;
+  std::unordered_map<int, std::vector<double>>
+    cell_upstream_prompt_importance_group_;
+  std::array<std::unordered_map<int, std::vector<double>>, N_DELAYED_GROUPS>
+    cell_upstream_delayed_importance_group_;
+
+  // Method E energy-group diagnostics
+  std::array<std::vector<double>, N_DELAYED_GROUPS>
+    numerator_by_group_energy_;
+  std::vector<double> denominator_by_group_energy_;
 
   // 网格信息(用于验证一致性)
   std::array<int, 3> grid_shape_;
