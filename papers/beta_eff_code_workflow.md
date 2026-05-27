@@ -2,27 +2,32 @@
 
 日期：2026-05-25
 
-更新：2026-05-26
+更新：2026-05-27
 
-当前 `BetaEffective` 主路径是 CLUTCH family/group Method E。关键语义是：
-
-- `adjoint_flux.h5/family_resolved/*/flux_group_mean` 的 `group` 是响应侧诱发裂变碰撞能群。
-- 该 `group` 不是裂变中子出生能群，所以 `BetaEffective` 不引入 `chi_d,k(E_birth)`。
-- delayed group 选择性已在 `GreenFunctionMesh` 的 family 轴通过 `nu_d,k / nu_t` 分份进入。
-- 因此分子和分母都乘同一个总裂变产生项 `nu_total_g * Sigma_f_g * phi_g`。
+当前 `BetaEffective` 主路径是 birth-energy source-state importance 方法。
+它读取 `fission_matrix.h5/adjoint_source_grouped` 得到 `I*(cell,g_birth)`，
+并在 `BetaEffective` 阶段显式折叠材料 `chi_prompt(g_birth)` 和
+`chi_delayed_k(g_birth)`。现有 CLUTCH family/group Method E 保留为
+`method_comparison/method_e` 对比输出。
 
 主公式为：
 
 ```text
-D   = sum_cell volume * sum_g I_total(cell,g)
-                            * nu_total_g(cell) * sigma_f_g(cell) * phi_g(cell)
+D = sum_cell volume * sum_gin sum_gbirth phi_gin * sigma_f_gin
+    * [nu_prompt_gin * chi_prompt_gbirth * I*(cell,gbirth)
+       + sum_k nu_delayed_k_gin * chi_delayed_k_gbirth * I*(cell,gbirth)]
 
-N_k = sum_cell volume * sum_g I_delayed_k(cell,g)
-                            * nu_total_g(cell) * sigma_f_g(cell) * phi_g(cell)
+W_t(cell,gin) = sum_gbirth [
+      nu_prompt_gin * chi_prompt_gbirth * I*(cell,gbirth)
+    + sum_k nu_delayed_k_gin * chi_delayed_k_gbirth * I*(cell,gbirth)]
 
-I_total(cell,g) = I_prompt(cell,g) + sum_k I_delayed_k(cell,g)
+N_k = sum_cell volume * sum_gin phi_gin * sigma_f_gin
+      * (nu_delayed_k_gin / nu_total_gin) * W_t(cell,gin)
+
 beta_k = N_k / D
 ```
+
+其中 `gin` 是诱发裂变入射能群，`gbirth` 是裂变中子出生能群。
 
 ## 1. 总体链路
 
@@ -53,95 +58,33 @@ last batch end
   |-- write flux_mesh.h5
   |
   |-- BetaEffective::compute_from_files()
-  |-- read flux_mesh.h5 + adjoint_flux.h5
+  |-- read flux_mesh.h5 + adjoint_flux.h5 + fission_matrix.h5
   |-- write beta_eff.h5
 ```
 
-`BetaEffective` 不直接读取 `fission_matrix.h5`。`fission_matrix.h5` 是生成
-`adjoint_flux.h5` 的上游输入。
+## 2. 输入数据
 
-## 2. FluxMesh 输入
-
-`flux_mesh.h5` 提供：
+`flux_mesh.h5` 提供正向多群通量：
 
 ```text
-grid_shape
-grid_pitch
-grid_lower_left
-n_groups
-energy_edges
-cell_indices
-flux_mean
-flux_group_mean
+flux_group_map_[cell][gin] = phi_gin(cell)
 ```
 
-`BetaEffective::read_flux_data()` 将 `flux_group_mean` 整理为：
+`fission_matrix.h5` 提供出生状态重要性：
 
 ```text
-flux_group_map_[cell][g] = phi_g(cell)
+adjoint_source_grouped[cell * n_groups + gbirth] = I*(cell,gbirth)
+source_energy_edges
+n_source_groups
+shape
+pitch
 ```
 
-当前主路径强制要求多群正向通量数据。
+`adjoint_flux.h5` 仍会读取，用于 Method E 对比输出。它的
+`family_resolved/*/flux_group_mean` 的 `group` 是响应侧诱发裂变碰撞能群，
+不是出生能群。
 
-## 3. AdjointFlux 输入
-
-`AdjointFlux` 读取：
-
-```text
-transfer_function_data.h5
-fission_matrix.h5
-```
-
-并计算 response-weighted importance：
-
-```text
-I_response(response_cell, family, group)
-  = sum_source_state T(source_state -> response_cell, family, group)
-                     * I*(source_state)
-```
-
-这里的 `group` 来自响应侧裂变碰撞能量。`family` 为：
-
-```text
-0      prompt
-1..8   delayed_1..delayed_8
-```
-
-`adjoint_flux.h5` 输出：
-
-```text
-family_resolved/
-  prompt/
-    cell_indices
-    flux_mean
-    flux_group_mean
-  delayed_1/
-    cell_indices
-    flux_mean
-    flux_group_mean
-  ...
-  delayed_8/
-    cell_indices
-    flux_mean
-    flux_group_mean
-```
-
-`BetaEffective` 正常路径读取 `family_resolved/*/flux_group_mean`。`flux_mean`
-只作为兼容和诊断标量保留；多群输入缺失 `flux_group_mean` 时直接报错。
-
-## 4. GreenFunction family 分份
-
-在 fission tally 中，`GreenFunctionMesh` 对响应侧裂变贡献按 family 分份：
-
-```text
-prompt    : contribution * (nu_prompt / nu_total)
-delayed_k : contribution * (nu_delayed_k / nu_total)
-```
-
-因此 `I_delayed_k(cell,g)` 已包含 delayed group `k` 的产额分份。
-`BetaEffective` 后处理阶段不能再乘 `nu_delayed_k` 或 `F_delayed_k`。
-
-## 5. BetaEffective 主流程
+## 3. BetaEffective 主流程
 
 入口：
 
@@ -153,46 +96,65 @@ BetaEffective::compute_from_files(
 步骤：
 
 1. 读取 `flux_mesh.h5` 的标量和多群正向通量。
-2. 读取 `adjoint_flux.h5` 的标量和 family-resolved 多群 importance。
-3. 校验网格、pitch、能群数和 `energy_edges` 一致。
-4. 通过几何采样构建 cell 到材料核数据映射。
-5. 使用 Method E family/group 公式计算 `D`、`N_k`、`beta_k`。
-6. 写出 `beta_eff.h5`。
+2. 读取 `adjoint_flux.h5` 的 response-weighted importance，用于 Method E 对比。
+3. 校验 `flux_mesh.h5` 和 `adjoint_flux.h5` 的网格、pitch、能群数和能群边界一致。
+4. 读取 `fission_matrix.h5/adjoint_source_grouped`，并校验 `shape`、`pitch`、`n_source_groups` 和 `source_energy_edges`。
+5. 通过几何采样构建 cell 到材料核数据映射。
+6. 先计算 Method E 对比结果并写入 `method_comparison/method_e`。
+7. 再计算 birth-energy 主结果并写入顶层 `beta_i` / `beta_total`。
+8. 写出 `beta_eff.h5`。
 
-## 6. 主算法
+## 4. 主算法
 
-分母函数：
+主分母函数：
 
 ```cpp
-compute_denominator_upstream_family(flux, volume)
+compute_denominator_birth_spectrum(flux, volume)
 ```
 
 离散公式：
 
 ```text
-D = sum_cell volume * sum_g I_total(cell,g)
-                         * nu_total_g * sigma_f_g * phi_g
+D = sum_cell volume * sum_gin sum_gbirth phi_gin * sigma_f_gin
+    * [nu_prompt_gin * chi_prompt_gbirth * I*(cell,gbirth)
+       + sum_k nu_delayed_k_gin * chi_delayed_k_gbirth * I*(cell,gbirth)]
+
+W_t(cell,gin) = sum_gbirth [
+      nu_prompt_gin * chi_prompt_gbirth * I*(cell,gbirth)
+    + sum_k nu_delayed_k_gin * chi_delayed_k_gbirth * I*(cell,gbirth)]
 ```
 
-分子函数：
+主分子函数：
 
 ```cpp
-compute_delayed_numerator_upstream_family(k, flux, volume)
+compute_delayed_numerator_birth_spectrum(k, flux, volume)
 ```
 
 离散公式：
 
 ```text
-N_k = sum_cell volume * sum_g I_delayed_k(cell,g)
-                           * nu_total_g * sigma_f_g * phi_g
+N_k = sum_cell volume * sum_gin phi_gin * sigma_f_gin
+      * (nu_delayed_k_gin / nu_total_gin) * W_t(cell,gin)
 ```
 
-这里 `g` 是响应侧诱发裂变碰撞能群，不是出生能群。`chi_prompt` 和
-`chi_delayed_k` 不进入这个后处理公式。
+## 5. Method E 对比路径
 
-## 7. 输出
+Method E 仍按响应侧碰撞能群计算：
 
-`beta_eff.h5` 主结果保持：
+```text
+D_e   = sum_cell volume * sum_g I_total(cell,g)
+                            * nu_total_g * sigma_f_g * phi_g
+
+N_e,k = sum_cell volume * sum_g I_delayed_k(cell,g)
+                            * nu_total_g * sigma_f_g * phi_g
+```
+
+这里 `I_delayed_k(cell,g)` 已经在 transfer-function family 轴包含
+`nu_delayed_k / nu_total` 分份，所以 Method E 后处理仍不再乘 `chi_d,k`。
+
+## 6. 输出
+
+`beta_eff.h5` 主结果：
 
 ```text
 beta_i
@@ -200,30 +162,34 @@ beta_total
 uncertainty
 diagnostics/numerator
 diagnostics/denominator
+diagnostics/numerator_by_group_energy[k,g_birth]
+diagnostics/denominator_by_group_energy[g_birth]
 ```
 
-新增或明确的诊断和元数据：
+关键 metadata：
 
 ```text
-diagnostics/numerator_by_group_energy[k,g]
-diagnostics/denominator_by_group_energy[g]
-diagnostics/numerator_by_group_energy_sum
-diagnostics/denominator_by_group_energy_sum
-metadata/method = clutch_family_group_method_e
-metadata/beta_eff_formula
-metadata/family_group_data_used = true
-metadata/delayed_fraction_location = transfer_function_family_axis
-metadata/group_meaning = response-side induced-fission collision energy group
-metadata/chi_birth_spectrum_used = false
+metadata/method = birth_spectrum_source_importance
+metadata/fission_matrix_file = fission_matrix.h5
+metadata/importance_quantity = fission-matrix source-state importance I*(cell,g_birth)
+metadata/group_meaning = fission neutron birth energy group for I*(cell,g_birth)
+metadata/chi_birth_spectrum_used = true
+metadata/delayed_fraction_location = yield_fraction_after_birth_importance_folding
+metadata/delayed_chi_separate_importance_weight_used = false
 metadata/batchwise_ratio_uncertainty = false
+```
+
+对比输出：
+
+```text
+method_comparison/birth_spectrum_source_importance/*
 method_comparison/method_e/*
 ```
 
-## 8. 当前重要事实
+## 7. 当前重要事实
 
-1. `BetaEffective` 只直接读取 `flux_mesh.h5` 和 `adjoint_flux.h5`。
-2. `family_resolved/*/flux_group_mean` 是主路径必需输入。
-3. `family_resolved/*/flux_mean` 不再作为正常多群计算的静默降级路径。
-4. `nu_delayed_k` 已在 transfer-function family 轴进入，后处理不重复乘。
-5. `chi_d,k(E_birth)` 不进入当前 Method E，因为当前 group 不是 birth energy。
-6. `uncertainty` 当前仍为占位零值，尚未实现 batch-wise ratio uncertainty。
+1. 顶层 `beta_i` / `beta_total` 使用 birth-energy 方法。
+2. `method_comparison/method_e` 保留 response-collision-group Method E。
+3. `diagnostics/*_by_group_energy` 在主结果下表示出生能群贡献。
+4. 第一版要求 `gin` 和 `g_birth` 使用同一套多群边界。
+5. `uncertainty` 仍为占位零值，尚未实现 batch-wise ratio uncertainty。

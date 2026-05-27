@@ -638,8 +638,8 @@ void finalize_batch()
     if (simulation::flux_mesh && settings::flux_mesh_on) {
       try {
         openmc::BetaEffective beta_calc;
-        beta_calc.compute_from_files(
-          "flux_mesh.h5", "adjoint_flux.h5", "beta_eff.h5");
+        beta_calc.compute_from_files("flux_mesh.h5", "adjoint_flux.h5",
+          "beta_eff.h5", "fission_matrix.h5");
 
       } catch (const std::exception& e) {
         std::cerr << "Warning: β_eff computation failed: " << e.what()

@@ -25,19 +25,20 @@
 namespace openmc {
 
 //------------------------------------------------------------------------------
-// 核心驱动函数：根据正向通量和 family-resolved response-weighted
-// importance 完成 CLUTCH Method E beta_eff 计算。这里的 group 是响应侧
-// 诱发裂变碰撞能群，不是裂变中子出生能群，因此不在后处理里乘
-// chi_d,k(E_birth)。
+// 核心驱动函数：根据正向通量、response-weighted importance 文件以及
+// fission-matrix source-state importance 完成 beta_eff 计算。当前主路径
+// 显式区分诱发裂变能量 gin 与裂变中子出生能量 gb：
 //
-//   D   = Σ_c ΔV Σ_g I_total(c,g)     ν_t,g Σ_f,g φ_g
-//   N_k = Σ_c ΔV Σ_g I_delayed_k(c,g) ν_t,g Σ_f,g φ_g
-//
-// I_delayed_k 已经在 GreenFunctionMesh 的 family 轴中包含 nu_d,k/nu_t
-// 分份，所以分子同样乘总裂变产生项，避免重复计数 delayed yield。
+//   D = Σ_c ΔV Σ_gin Σ_gb φ_gin Σ_f,gin [
+//         ν_p,gin χ_p,gb I*(c,gb)
+//       + Σ_k ν_d,k,gin χ_d,k,gb I*(c,gb)]
+//   W_t(c,gin) = the bracketed birth-spectrum-folded total source importance
+//   N_k = Σ_c ΔV Σ_gin φ_gin Σ_f,gin
+//         (ν_d,k,gin / ν_t,gin) W_t(c,gin)
 //------------------------------------------------------------------------------
 void BetaEffective::compute_from_files(const std::string& flux_file,
-  const std::string& adjoint_flux_file, const std::string& output_file)
+  const std::string& adjoint_flux_file, const std::string& output_file,
+  const std::string& fission_matrix_file)
 {
   std::cout << std::string(70, '=') << std::endl;
 
@@ -92,10 +93,13 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
 
   grid_shape_ = flux_shape;
   grid_pitch_ = flux_pitch;
+  fission_matrix_file_ = fission_matrix_file;
 
   // 校验多群信息，确保输入网格一致
   validate_group_metadata();
   initialize_flux_spectrum_weights();
+  read_fission_adjoint_source_data(
+    fission_matrix_file, flux_shape, flux_pitch);
 
   //============================这段代码用于调试=================================
   // 调试输出：基于核数据的材料 β_i（不含通量和 importance 权重）
@@ -181,71 +185,90 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
   const double mcnp_beta_total = 0.00621;
 
   //==========================================================================
-  // 主方法: Method E, upstream family/group response-weighted importance
+  // 对比方法: Method E, upstream family/group response-weighted importance
   //==========================================================================
-  if (!has_upstream_family_data_ || !upstream_family_group_data_used_) {
-    fatal_error("CLUTCH Method E beta_eff requires "
-                "family_resolved/*/flux_group_mean in adjoint_flux.h5. "
-                "The scalar flux_mean fields are diagnostic only.");
-  }
-
-  double denom_upstream = compute_denominator_upstream_family(flux, volume);
-  std::array<double, N_DELAYED_GROUPS> num_upstream {};
-  std::array<double, N_DELAYED_GROUPS> beta_upstream {};
-  double beta_upstream_total = 0.0;
-  for (int i = 0; i < N_DELAYED_GROUPS; ++i) {
-    num_upstream[i] = compute_delayed_numerator_upstream_family(i, flux, volume);
-    beta_upstream[i] =
-      (denom_upstream > 0.0) ? num_upstream[i] / denom_upstream : 0.0;
-    beta_upstream_total += beta_upstream[i];
-  }
-
   result_e_ = MethodResult {};
-  result_e_.denominator = denom_upstream;
-  result_e_.beta_total = beta_upstream_total;
-  result_e_.available = true;
-  for (int i = 0; i < N_DELAYED_GROUPS; ++i) {
-    result_e_.numerators[i] = num_upstream[i];
-    result_e_.beta_i[i] = beta_upstream[i];
+  if (has_upstream_family_data_ && upstream_family_group_data_used_) {
+    double denom_upstream = compute_denominator_upstream_family(flux, volume);
+    std::array<double, N_DELAYED_GROUPS> num_upstream {};
+    std::array<double, N_DELAYED_GROUPS> beta_upstream {};
+    double beta_upstream_total = 0.0;
+    for (int i = 0; i < N_DELAYED_GROUPS; ++i) {
+      num_upstream[i] =
+        compute_delayed_numerator_upstream_family(i, flux, volume);
+      beta_upstream[i] =
+        (denom_upstream > 0.0) ? num_upstream[i] / denom_upstream : 0.0;
+      beta_upstream_total += beta_upstream[i];
+    }
+
+    result_e_.denominator = denom_upstream;
+    result_e_.beta_total = beta_upstream_total;
+    result_e_.available = true;
+    for (int i = 0; i < N_DELAYED_GROUPS; ++i) {
+      result_e_.numerators[i] = num_upstream[i];
+      result_e_.beta_i[i] = beta_upstream[i];
+    }
   }
 
-  denominator_ = denom_upstream;
+  //==========================================================================
+  // 主方法: birth-energy source-state importance
+  //==========================================================================
+  double denom_birth = compute_denominator_birth_spectrum(flux, volume);
+  std::array<double, N_DELAYED_GROUPS> num_birth {};
+  std::array<double, N_DELAYED_GROUPS> beta_birth {};
+  double beta_birth_total = 0.0;
   for (int i = 0; i < N_DELAYED_GROUPS; ++i) {
-    numerators_[i] = num_upstream[i];
-    beta_i_[i] = beta_upstream[i];
+    num_birth[i] = compute_delayed_numerator_birth_spectrum(i, flux, volume);
+    beta_birth[i] = (denom_birth > 0.0) ? num_birth[i] / denom_birth : 0.0;
+    beta_birth_total += beta_birth[i];
   }
-  beta_total_ = beta_upstream_total;
+
+  result_birth_spectrum_ = MethodResult {};
+  result_birth_spectrum_.denominator = denom_birth;
+  result_birth_spectrum_.beta_total = beta_birth_total;
+  result_birth_spectrum_.available = true;
+  for (int i = 0; i < N_DELAYED_GROUPS; ++i) {
+    result_birth_spectrum_.numerators[i] = num_birth[i];
+    result_birth_spectrum_.beta_i[i] = beta_birth[i];
+  }
+
+  denominator_ = denom_birth;
+  for (int i = 0; i < N_DELAYED_GROUPS; ++i) {
+    numerators_[i] = num_birth[i];
+    beta_i_[i] = beta_birth[i];
+  }
+  beta_total_ = beta_birth_total;
 
   if (denominator_ <= 0.0) {
-    fatal_error("CLUTCH Method E denominator is zero or negative; cannot "
-                "compute beta_eff.");
+    fatal_error("Birth-energy beta_eff denominator is zero or negative; "
+                "cannot compute beta_eff.");
   }
 
   // 输出主方法结果表
-  std::cout << "\n  Method E: D = " << std::scientific
-            << std::setprecision(4) << denom_upstream << std::endl;
-  std::cout << "\n  β_eff 计算结果 (CLUTCH family/group Method E):"
+  std::cout << "\n  Birth-energy method: D = " << std::scientific
+            << std::setprecision(4) << denom_birth << std::endl;
+  std::cout << "\n  β_eff 计算结果 (birth-energy source importance):"
             << std::endl;
   std::cout << "  " << std::string(90, '-') << std::endl;
-  std::cout << "    先驱核群    Method E       MCNP参考      偏差(%)"
+  std::cout << "    先驱核群    birth-energy  MCNP参考      偏差(%)"
             << std::endl;
   std::cout << "  " << std::string(90, '-') << std::endl;
 
   for (int i = 0; i < 6; ++i) {
     double err_e =
       (mcnp_beta[i] > 0)
-        ? (beta_upstream[i] - mcnp_beta[i]) / mcnp_beta[i] * 100.0
+        ? (beta_birth[i] - mcnp_beta[i]) / mcnp_beta[i] * 100.0
         : 0.0;
     std::cout << "       " << (i + 1) << "        " << std::scientific
-              << std::setprecision(5) << beta_upstream[i] << "      "
+              << std::setprecision(5) << beta_birth[i] << "      "
               << std::setprecision(5) << mcnp_beta[i] << "      " << std::fixed
               << std::setprecision(2) << std::setw(7) << err_e << std::endl;
   }
   // 群7和群8（如有）
   for (int i = 6; i < 8; ++i) {
-    if (beta_upstream[i] > 1e-10) {
+    if (beta_birth[i] > 1e-10) {
       std::cout << "       " << (i + 1) << "        " << std::scientific
-                << std::setprecision(5) << beta_upstream[i]
+                << std::setprecision(5) << beta_birth[i]
                 << "           -            -" << std::endl;
     }
   }
@@ -253,16 +276,15 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
   std::cout << "  " << std::string(90, '-') << std::endl;
   double err_e_total =
     (mcnp_beta_total > 0)
-      ? (beta_upstream_total - mcnp_beta_total) / mcnp_beta_total * 100.0
+      ? (beta_birth_total - mcnp_beta_total) / mcnp_beta_total * 100.0
       : 0.0;
   std::cout << "      总计      " << std::scientific << std::setprecision(5)
-            << beta_upstream_total << "      " << std::setprecision(5)
+            << beta_birth_total << "      " << std::setprecision(5)
             << mcnp_beta_total << "      " << std::fixed << std::setprecision(2)
             << std::setw(7) << err_e_total << std::endl;
   std::cout << "  " << std::string(90, '-') << std::endl;
-  std::cout << "  (*) 主方法: group 为响应侧诱发裂变碰撞能群；"
-               "delayed group 已在 transfer-function family 轴分份，"
-               "因此后处理不引入 chi_d,k(E_birth)。"
+  std::cout << "  (*) 主方法: 使用 fission_matrix.h5 的 I*(cell,g_birth) "
+               "折叠总出生源重要性，再按 nu_d,k/nu_t 分配 delayed 组。"
             << std::endl;
 
   // 7. 输出结果到文件
@@ -530,6 +552,91 @@ void BetaEffective::read_adjoint_flux_data(const std::string& filename,
 
 //------------------------------------------------------------------------------
 
+void BetaEffective::read_fission_adjoint_source_data(
+  const std::string& filename, const std::array<int, 3>& expected_shape,
+  double expected_pitch)
+{
+  if (!file_exists(filename)) {
+    fatal_error("Fission matrix file does not exist: " + filename +
+                ". Birth-energy beta_eff requires adjoint_source_grouped.");
+  }
+
+  hid_t file_id = file_open(filename, 'r');
+
+  std::array<int, 3> fm_shape {};
+  read_dataset(file_id, "shape", fm_shape);
+  if (fm_shape != expected_shape) {
+    fatal_error("Grid shape mismatch between flux_mesh.h5 and " + filename +
+                ".");
+  }
+
+  if (!attribute_exists(file_id, "pitch")) {
+    fatal_error(filename + " missing required pitch attribute.");
+  }
+  double fm_pitch = 0.0;
+  read_attribute(file_id, "pitch", fm_pitch);
+  if (std::abs(fm_pitch - expected_pitch) > 1e-6) {
+    fatal_error("Grid pitch mismatch between flux_mesh.h5 and " + filename +
+                ".");
+  }
+
+  if (!attribute_exists(file_id, "n_source_groups")) {
+    fatal_error(filename + " missing required n_source_groups attribute.");
+  }
+  read_attribute(file_id, "n_source_groups", birth_source_n_groups_);
+  if (birth_source_n_groups_ != n_energy_groups_) {
+    fatal_error(filename +
+                " n_source_groups does not match beta_eff energy groups.");
+  }
+
+  if (!object_exists(file_id, "source_energy_edges")) {
+    fatal_error(filename + " missing required source_energy_edges dataset.");
+  }
+  birth_source_energy_edges_.clear();
+  read_dataset(file_id, "source_energy_edges", birth_source_energy_edges_);
+  if (!energy_edges_common_.empty()) {
+    if (birth_source_energy_edges_.size() != energy_edges_common_.size()) {
+      fatal_error(filename +
+                  " source energy grid size differs from flux energy grid.");
+    }
+    const double tol = 1e-8;
+    for (size_t i = 0; i < energy_edges_common_.size(); ++i) {
+      const double a = birth_source_energy_edges_[i];
+      const double b = energy_edges_common_[i];
+      if (std::abs(a - b) > tol * std::max(1.0, std::abs(a))) {
+        fatal_error(filename + " source energy grid mismatch at edge " +
+                    std::to_string(i) + ".");
+      }
+    }
+  }
+
+  if (!object_exists(file_id, "adjoint_source_grouped")) {
+    fatal_error(filename +
+                " missing required adjoint_source_grouped dataset.");
+  }
+  birth_adjoint_source_grouped_.clear();
+  read_dataset(file_id, "adjoint_source_grouped",
+    birth_adjoint_source_grouped_);
+
+  const size_t expected_size = static_cast<size_t>(expected_shape[0]) *
+                               static_cast<size_t>(expected_shape[1]) *
+                               static_cast<size_t>(expected_shape[2]) *
+                               static_cast<size_t>(n_energy_groups_);
+  if (birth_adjoint_source_grouped_.size() != expected_size) {
+    fatal_error(filename +
+                " adjoint_source_grouped size mismatch with "
+                "n_cells * n_energy_groups.");
+  }
+
+  has_birth_adjoint_source_ = true;
+  std::cout << "  Birth source importance loaded from " << filename << " ("
+            << birth_source_n_groups_ << " birth-energy groups)" << std::endl;
+
+  file_close(file_id);
+}
+
+//------------------------------------------------------------------------------
+
 void BetaEffective::validate_group_metadata()
 {
   const bool flux_multi = flux_has_group_data_ && flux_n_groups_ > 1;
@@ -696,6 +803,7 @@ void BetaEffective::write_to_file(const std::string& filename) const
 
   write_attribute(metadata_group, "flux_file", "flux_mesh.h5");
   write_attribute(metadata_group, "adjoint_flux_file", "adjoint_flux.h5");
+  write_attribute(metadata_group, "fission_matrix_file", fission_matrix_file_);
 
   // 记录计算时间(秒级时间戳)
   auto now = std::chrono::system_clock::now();
@@ -713,28 +821,31 @@ void BetaEffective::write_to_file(const std::string& filename) const
   }
   write_attribute(metadata_group, "beta_eff_mode", "MATERIAL_DEPENDENT");
   write_attribute(
-    metadata_group, "method", "clutch_family_group_method_e");
+    metadata_group, "method", "birth_spectrum_source_importance");
   write_attribute(metadata_group, "beta_eff_formula",
-    "D=sum_c dV sum_g I_total(c,g) nu_t,g(c) Sigma_f,g(c) phi_g(c); "
-    "N_k=sum_c dV sum_g I_delayed_k(c,g) nu_t,g(c) Sigma_f,g(c) phi_g(c)");
+    "D=sum_c dV sum_gin sum_gb phi_gin Sigma_f,gin "
+    "[nu_p,gin chi_p,gb I*(c,gb) + sum_k nu_d,k,gin chi_d,k,gb I*(c,gb)]; "
+    "N_k=sum_c dV sum_gin phi_gin Sigma_f,gin "
+    "(nu_d,k,gin/nu_t,gin) W_t(c,gin), where W_t is the bracketed "
+    "birth-spectrum-folded total source importance");
   write_attribute(metadata_group, "delayed_fraction_location",
-    "transfer_function_family_axis");
+    "yield_fraction_after_birth_importance_folding");
   write_attribute(metadata_group, "importance_quantity",
-    "family-resolved response-weighted importance field from adjoint_flux.h5");
+    "fission-matrix source-state importance I*(cell,g_birth)");
   write_attribute(
     metadata_group, "family_group_data_used", upstream_family_group_data_used_);
   write_attribute(metadata_group, "source_importance_method",
-    "CLUTCH transfer-function convolution with fission-matrix source-state "
-    "importance");
+    "energy-resolved fission matrix source-state importance");
   write_attribute(metadata_group, "group_meaning",
-    "response-side induced-fission collision energy group, not fission "
-    "neutron birth energy");
-  write_attribute(metadata_group, "chi_birth_spectrum_used", false);
+    "fission neutron birth energy group for I*(cell,g_birth)");
+  write_attribute(metadata_group, "chi_birth_spectrum_used", true);
   write_attribute(metadata_group, "chi_energy_dependence",
-    "chi_prompt/chi_delayed are not used in Method E postprocessing because "
-    "the group axis is response collision energy");
+    "material chi spectra collapsed/sampled by MaterialNuclearDataExtractor");
   write_attribute(
-    metadata_group, "delayed_yield_location", "transfer_function_family_axis");
+    metadata_group, "delayed_yield_location",
+    "yield_fraction_after_birth_importance_folding");
+  write_attribute(metadata_group,
+    "delayed_chi_separate_importance_weight_used", false);
   write_attribute(metadata_group, "batchwise_ratio_uncertainty", false);
   write_attribute(metadata_group, "uncertainty_status",
     "not computed; uncertainty dataset is a placeholder");
@@ -763,8 +874,7 @@ void BetaEffective::write_to_file(const std::string& filename) const
   write_dataset(
     diag_group, "denominator_by_group_energy", denominator_by_group_energy_);
   write_attribute(diag_group, "group_energy_diagnostic_meaning",
-    "response collision energy group contributions for the main Method E "
-    "formula");
+    "birth energy group contributions for the main birth-spectrum method");
 
   std::vector<double> numerator_by_energy_flat;
   numerator_by_energy_flat.reserve(
@@ -846,6 +956,32 @@ void BetaEffective::write_to_file(const std::string& filename) const
   hid_t mc_group = H5Gcreate(
     file_id, "method_comparison", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
 
+  // 主方法: birth-energy source-state importance
+  {
+    hid_t grp = H5Gcreate(mc_group, "birth_spectrum_source_importance",
+      H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+    write_attribute(grp, "description",
+      "Birth-spectrum folding of fission-matrix source-state importance");
+    write_attribute(grp, "available", result_birth_spectrum_.available);
+    std::vector<double> bi(result_birth_spectrum_.beta_i.begin(),
+      result_birth_spectrum_.beta_i.end());
+    write_dataset(grp, "beta_i", bi);
+    std::vector<double> bt = {result_birth_spectrum_.beta_total};
+    write_dataset(grp, "beta_total", bt);
+    std::vector<double> num(result_birth_spectrum_.numerators.begin(),
+      result_birth_spectrum_.numerators.end());
+    write_dataset(grp, "numerator", num);
+    std::vector<double> den = {result_birth_spectrum_.denominator};
+    write_dataset(grp, "denominator", den);
+    write_attribute(grp, "formula",
+      "D=sum phi Sigma_f W_t; N_k=sum phi Sigma_f "
+      "(nu_d,k/nu_t) W_t; W_t folds prompt and delayed birth spectra with I*");
+    write_attribute(grp, "uses_birth_spectrum_chi", true);
+    write_attribute(grp, "delayed_chi_separate_importance_weight_used", false);
+    write_attribute(grp, "importance_group_meaning", "birth energy group");
+    H5Gclose(grp);
+  }
+
   // 方法 E: 上游族解析 (upstream family-resolved)
   {
     hid_t grp =
@@ -877,6 +1013,219 @@ void BetaEffective::write_to_file(const std::string& filename) const
   std::cout << "  β_eff = " << std::fixed << std::setprecision(5) << beta_total_
             << " (基于" << unique_materials_.size() << "种裂变材料)"
             << std::endl;
+}
+
+//------------------------------------------------------------------------------
+
+// 主方法分母:
+//   D = Σ_c ΔV Σ_gin Σ_gb φ_gin Σ_f,gin [
+//       ν_p,gin χ_p,gb I*(c,gb)
+//     + Σ_k ν_d,k,gin χ_d,k,gb I*(c,gb)]
+//------------------------------------------------------------------------------
+double BetaEffective::compute_denominator_birth_spectrum(
+  const std::unordered_map<int, double>& flux, double volume)
+{
+  if (!has_birth_adjoint_source_) {
+    fatal_error("Birth-energy beta_eff requires source-state importance.");
+  }
+
+  std::vector<double> terms;
+  terms.reserve(flux.size() * static_cast<size_t>(n_energy_groups_) *
+                static_cast<size_t>(n_energy_groups_));
+  denominator_by_group_energy_.assign(n_energy_groups_, 0.0);
+  std::vector<double> group_compensation(n_energy_groups_, 0.0);
+
+  auto add_birth_group_term = [&](int g_birth, double value) {
+    double y = value - group_compensation[g_birth];
+    double t = denominator_by_group_energy_[g_birth] + y;
+    group_compensation[g_birth] =
+      (t - denominator_by_group_energy_[g_birth]) - y;
+    denominator_by_group_energy_[g_birth] = t;
+  };
+
+  for (const auto& [cell_idx, phi_scalar] : flux) {
+    (void)phi_scalar;
+    if (cell_idx < 0 ||
+        (static_cast<size_t>(cell_idx) + 1) *
+            static_cast<size_t>(n_energy_groups_) >
+          birth_adjoint_source_grouped_.size()) {
+      continue;
+    }
+
+    auto it_data = cell_nuclear_data_.find(cell_idx);
+    if (it_data == cell_nuclear_data_.end() || !it_data->second.is_fissionable)
+      continue;
+
+    const auto& nuc_data = it_data->second;
+    auto it_flux_groups = flux_group_map_.find(cell_idx);
+    if (it_flux_groups == flux_group_map_.end() ||
+        it_flux_groups->second.size() !=
+          static_cast<size_t>(n_energy_groups_)) {
+      fatal_error("Missing group-resolved forward flux for fissionable cell " +
+                  std::to_string(cell_idx) + ".");
+    }
+    if (nuc_data.sigma_f_groups.size() !=
+          static_cast<size_t>(n_energy_groups_) ||
+        nuc_data.nu_prompt_groups.size() !=
+          static_cast<size_t>(n_energy_groups_) ||
+        nuc_data.nu_delayed_groups.size() !=
+          static_cast<size_t>(n_energy_groups_ * N_DELAYED_GROUPS) ||
+        nuc_data.chi_prompt_groups.size() !=
+          static_cast<size_t>(n_energy_groups_) ||
+        nuc_data.chi_delayed_groups.size() !=
+          static_cast<size_t>(n_energy_groups_ * N_DELAYED_GROUPS)) {
+      fatal_error("Missing group-resolved birth-spectrum nuclear data for "
+                  "fissionable cell " +
+                  std::to_string(cell_idx) + ".");
+    }
+
+    const auto& fg = it_flux_groups->second;
+    for (int g_in = 0; g_in < n_energy_groups_; ++g_in) {
+      const double fission_rate = nuc_data.sigma_f_groups[g_in] * fg[g_in];
+      if (fission_rate == 0.0)
+        continue;
+
+      for (int g_birth = 0; g_birth < n_energy_groups_; ++g_birth) {
+        const size_t imp_index =
+          static_cast<size_t>(cell_idx) * n_energy_groups_ + g_birth;
+        const double I_birth = birth_adjoint_source_grouped_[imp_index];
+        if (I_birth <= 0.0)
+          continue;
+
+        double source_weight =
+          nuc_data.nu_prompt_groups[g_in] *
+          nuc_data.chi_prompt_groups[g_birth];
+        for (int d = 0; d < N_DELAYED_GROUPS; ++d) {
+          source_weight +=
+            nuc_data.nu_delayed_groups[delayed_offset(g_in, d)] *
+            nuc_data.chi_delayed_groups[delayed_offset(g_birth, d)];
+        }
+
+        const double term = volume * fission_rate * source_weight * I_birth;
+        if (term != 0.0) {
+          terms.push_back(term);
+          add_birth_group_term(g_birth, term);
+        }
+      }
+    }
+  }
+
+  return kahan_sum(terms);
+}
+
+//------------------------------------------------------------------------------
+// 主方法分子:
+//   W_t(c,gin) = Σ_gb [
+//       ν_p,gin χ_p,gb I*(c,gb)
+//     + Σ_d ν_d,d,gin χ_d,d,gb I*(c,gb)]
+//
+//   N_k = Σ_c ΔV Σ_gin φ_gin Σ_f,gin
+//         (ν_d,k,gin / ν_t,gin) W_t(c,gin)
+//
+// I*(cell,g_birth) comes from the fission-matrix source-state importance.
+// It is therefore used as the common total birth-source response. Splitting
+// the numerator with χ_d,k as a separate importance weight would over-penalize
+// delayed groups when the source-state field is not a true transport adjoint
+// for delayed birth-spectrum source states.
+//------------------------------------------------------------------------------
+double BetaEffective::compute_delayed_numerator_birth_spectrum(
+  int group, const std::unordered_map<int, double>& flux, double volume)
+{
+  if (!has_birth_adjoint_source_) {
+    fatal_error("Birth-energy beta_eff requires source-state importance.");
+  }
+  if (group < 0 || group >= N_DELAYED_GROUPS) {
+    fatal_error("Invalid delayed group index for birth-energy numerator.");
+  }
+
+  std::vector<double> terms;
+  terms.reserve(flux.size() * static_cast<size_t>(n_energy_groups_) *
+                static_cast<size_t>(n_energy_groups_));
+  numerator_by_group_energy_[group].assign(n_energy_groups_, 0.0);
+  std::vector<double> group_compensation(n_energy_groups_, 0.0);
+
+  auto add_birth_group_term = [&](int g_birth, double value) {
+    double y = value - group_compensation[g_birth];
+    double t = numerator_by_group_energy_[group][g_birth] + y;
+    group_compensation[g_birth] =
+      (t - numerator_by_group_energy_[group][g_birth]) - y;
+    numerator_by_group_energy_[group][g_birth] = t;
+  };
+
+  for (const auto& [cell_idx, phi_scalar] : flux) {
+    (void)phi_scalar;
+    if (cell_idx < 0 ||
+        (static_cast<size_t>(cell_idx) + 1) *
+            static_cast<size_t>(n_energy_groups_) >
+          birth_adjoint_source_grouped_.size()) {
+      continue;
+    }
+
+    auto it_data = cell_nuclear_data_.find(cell_idx);
+    if (it_data == cell_nuclear_data_.end() || !it_data->second.is_fissionable)
+      continue;
+
+    const auto& nuc_data = it_data->second;
+    auto it_flux_groups = flux_group_map_.find(cell_idx);
+    if (it_flux_groups == flux_group_map_.end() ||
+        it_flux_groups->second.size() !=
+          static_cast<size_t>(n_energy_groups_)) {
+      fatal_error("Missing group-resolved forward flux for fissionable cell " +
+                  std::to_string(cell_idx) + ".");
+    }
+    if (nuc_data.sigma_f_groups.size() !=
+          static_cast<size_t>(n_energy_groups_) ||
+        nuc_data.nu_total_groups.size() !=
+          static_cast<size_t>(n_energy_groups_) ||
+        nuc_data.nu_prompt_groups.size() !=
+          static_cast<size_t>(n_energy_groups_) ||
+        nuc_data.nu_delayed_groups.size() !=
+          static_cast<size_t>(n_energy_groups_ * N_DELAYED_GROUPS) ||
+        nuc_data.chi_prompt_groups.size() !=
+          static_cast<size_t>(n_energy_groups_) ||
+        nuc_data.chi_delayed_groups.size() !=
+          static_cast<size_t>(n_energy_groups_ * N_DELAYED_GROUPS)) {
+      fatal_error("Missing group-resolved birth-spectrum nuclear data for "
+                  "fissionable cell " +
+                  std::to_string(cell_idx) + ".");
+    }
+
+    const auto& fg = it_flux_groups->second;
+    for (int g_in = 0; g_in < n_energy_groups_; ++g_in) {
+      const double fission_rate = nuc_data.sigma_f_groups[g_in] * fg[g_in];
+      const double nu_delayed =
+        nuc_data.nu_delayed_groups[delayed_offset(g_in, group)];
+      const double nu_total = nuc_data.nu_total_groups[g_in];
+      if (fission_rate == 0.0 || nu_delayed == 0.0 || nu_total <= 0.0)
+        continue;
+      const double delayed_fraction = nu_delayed / nu_total;
+
+      for (int g_birth = 0; g_birth < n_energy_groups_; ++g_birth) {
+        const size_t imp_index =
+          static_cast<size_t>(cell_idx) * n_energy_groups_ + g_birth;
+        const double I_birth = birth_adjoint_source_grouped_[imp_index];
+        if (I_birth <= 0.0)
+          continue;
+
+        double source_weight =
+          nuc_data.nu_prompt_groups[g_in] *
+          nuc_data.chi_prompt_groups[g_birth];
+        for (int d = 0; d < N_DELAYED_GROUPS; ++d) {
+          source_weight +=
+            nuc_data.nu_delayed_groups[delayed_offset(g_in, d)] *
+            nuc_data.chi_delayed_groups[delayed_offset(g_birth, d)];
+        }
+        const double term =
+          volume * fission_rate * delayed_fraction * source_weight * I_birth;
+        if (term != 0.0) {
+          terms.push_back(term);
+          add_birth_group_term(g_birth, term);
+        }
+      }
+    }
+  }
+
+  return kahan_sum(terms);
 }
 
 //------------------------------------------------------------------------------

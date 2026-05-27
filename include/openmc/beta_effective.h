@@ -35,16 +35,17 @@ enum class WeightingMode {
 //==============================================================================
 //! 有效缓发中子份额计算类
 //!
-//! Current main path uses family-resolved CLUTCH Method E on the response-side
-//! induced-fission collision energy group:
+//! Current main path uses fission neutron birth-energy source importance:
 //!
-//! D   = sum_c dV sum_g I_total(c,g)     nu_t,g(c) Sigma_f,g(c) phi_g(c)
-//! N_k = sum_c dV sum_g I_delayed_k(c,g) nu_t,g(c) Sigma_f,g(c) phi_g(c)
+//! D = sum_c dV sum_gin sum_gb phi_gin Sigma_f,gin
+//!     [nu_p,gin chi_p,gb I*(c,gb)
+//!      + sum_k nu_d,k,gin chi_d,k,gb I*(c,gb)]
+//! W_t(c,gin) is the bracketed birth-spectrum-folded total source importance.
+//! N_k = sum_c dV sum_gin phi_gin Sigma_f,gin
+//!       (nu_d,k,gin / nu_t,gin) W_t(c,gin)
 //!
-//! The delayed-family transfer function already contains the delayed-group
-//! split nu_d,k / nu_t. Therefore BetaEffective multiplies both numerator and
-//! denominator by the same total fission production term and does not apply
-//! chi_d,k(E_birth) in this response-energy-group postprocessing formula.
+//! I*(c,gb) is read from fission_matrix.h5/adjoint_source_grouped. The
+//! response-collision-energy Method E path is retained as method comparison.
 //==============================================================================
 class BetaEffective {
 public:
@@ -65,7 +66,8 @@ public:
   //! \param adjoint_flux_file response-weighted importance 文件 (adjoint_flux.h5)
   //! \param output_file 输出文件 (beta_eff.h5)
   void compute_from_files(const std::string& flux_file,
-    const std::string& adjoint_flux_file, const std::string& output_file);
+    const std::string& adjoint_flux_file, const std::string& output_file,
+    const std::string& fission_matrix_file = "fission_matrix.h5");
 
   //! 获取特定缓发群的 β_i,eff
   //! \param group 缓发群索引 (0-7)
@@ -81,6 +83,18 @@ public:
   }
 
 private:
+  //==========================================================================
+  // Birth-energy source-state importance method (main result)
+  //==========================================================================
+
+  //! Main denominator: total birth source folded with I*(cell,g_birth)
+  double compute_denominator_birth_spectrum(
+    const std::unordered_map<int, double>& flux, double volume);
+
+  //! Main numerator: total birth-source importance apportioned by nu_d,k/nu_t
+  double compute_delayed_numerator_birth_spectrum(int group,
+    const std::unordered_map<int, double>& flux, double volume);
+
   //==========================================================================
   // Method E: upstream family-resolved response-weighted importance
   //==========================================================================
@@ -155,6 +169,10 @@ private:
     std::unordered_map<int, double>& adjoint_flux_map,
     std::array<int, 3>& shape, double& pitch);
 
+  //! Read source-state importance I*(cell,g_birth) from fission_matrix.h5
+  void read_fission_adjoint_source_data(const std::string& filename,
+    const std::array<int, 3>& expected_shape, double expected_pitch);
+
   //! 校验 (并必要时设置) 通量/importance 的能群一致性
   void validate_group_metadata();
 
@@ -204,6 +222,8 @@ private:
   MethodResult result_e_; //!< 方法 E: 上游族解析
 
   // Method E: 上游族解析 importance 缓存
+  MethodResult result_birth_spectrum_; //!< Main: birth-energy source method
+
   bool has_upstream_family_data_ {false};
   bool upstream_family_group_data_used_ {false};
   std::unordered_map<int, double> cell_upstream_prompt_importance_;
@@ -218,6 +238,13 @@ private:
   std::array<std::vector<double>, N_DELAYED_GROUPS>
     numerator_by_group_energy_;
   std::vector<double> denominator_by_group_energy_;
+
+  // Birth-energy source-state importance I*(cell,g_birth)
+  bool has_birth_adjoint_source_ {false};
+  int birth_source_n_groups_ {1};
+  std::vector<double> birth_source_energy_edges_;
+  std::vector<double> birth_adjoint_source_grouped_;
+  std::string fission_matrix_file_ {"fission_matrix.h5"};
 
   // 网格信息(用于验证一致性)
   std::array<int, 3> grid_shape_;
