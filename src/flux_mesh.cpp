@@ -85,6 +85,121 @@ void FluxMesh::accumulate(const std::array<double, 3>& position, double weight,
 
 //------------------------------------------------------------------------------
 
+void FluxMesh::accumulate_track(const std::array<double, 3>& start_position,
+  const std::array<double, 3>& direction, double weight, double distance,
+  double energy_eV, int mg_group)
+{
+  if (distance <= 0.0 || weight == 0.0) {
+    return;
+  }
+
+  int group = determine_group(energy_eV, mg_group);
+  if (group < 0) {
+    fatal_error("FluxMesh: unable to determine energy group for track-length "
+                "flux scoring.");
+  }
+
+  const auto& origin = grid_->origin();
+  const auto& upper_bound = grid_->upper_bound();
+  double pitch = grid_->pitch();
+  constexpr double eps = 1.0e-12;
+
+  double t_min = 0.0;
+  double t_max = distance;
+  for (int axis = 0; axis < 3; ++axis) {
+    double x0 = start_position[axis];
+    double u = direction[axis];
+    if (std::abs(u) < eps) {
+      if (x0 < origin[axis] || x0 >= upper_bound[axis]) {
+        return;
+      }
+      continue;
+    }
+
+    double t1 = (origin[axis] - x0) / u;
+    double t2 = (upper_bound[axis] - x0) / u;
+    if (t1 > t2) {
+      std::swap(t1, t2);
+    }
+    t_min = std::max(t_min, t1);
+    t_max = std::min(t_max, t2);
+    if (t_min >= t_max) {
+      return;
+    }
+  }
+
+  double t = std::max(0.0, t_min);
+  while (t < t_max - eps) {
+    double probe_t = std::min(t + eps * std::max(1.0, distance), t_max);
+    std::array<double, 3> probe {};
+    for (int axis = 0; axis < 3; ++axis) {
+      probe[axis] = start_position[axis] + probe_t * direction[axis];
+    }
+
+    int cell_index = position_to_index(probe);
+    if (cell_index < 0) {
+      t = probe_t;
+      continue;
+    }
+
+    auto grid_idx = index_to_grid(cell_index);
+    double next_t = t_max;
+    for (int axis = 0; axis < 3; ++axis) {
+      double u = direction[axis];
+      if (std::abs(u) < eps) {
+        continue;
+      }
+
+      double boundary_coord = 0.0;
+      if (u > 0.0) {
+        boundary_coord = origin[axis] + (grid_idx[axis] + 1) * pitch;
+        boundary_coord = std::min(boundary_coord, upper_bound[axis]);
+      } else {
+        boundary_coord = origin[axis] + grid_idx[axis] * pitch;
+        boundary_coord = std::max(boundary_coord, origin[axis]);
+      }
+
+      double boundary_t = (boundary_coord - start_position[axis]) / u;
+      if (boundary_t > t + eps) {
+        next_t = std::min(next_t, boundary_t);
+      }
+    }
+
+    if (next_t <= t + eps) {
+      next_t = std::min(t_max, t + eps * std::max(1.0, distance));
+    }
+
+    double segment = next_t - t;
+    if (segment > 0.0) {
+      add_contribution(cell_index, group, weight * segment);
+    }
+    t = next_t;
+  }
+}
+
+//------------------------------------------------------------------------------
+
+void FluxMesh::add_contribution(
+  int cell_index, int group, double contribution)
+{
+  if (cell_index < 0 || contribution == 0.0) {
+    return;
+  }
+
+#ifdef _OPENMP
+  int thread_id = omp_get_thread_num();
+#else
+  int thread_id = 0;
+#endif
+  auto& cell_vector = thread_flux_group_[thread_id][cell_index];
+  if (cell_vector.empty()) {
+    cell_vector = make_zero_group_vector();
+  }
+  cell_vector[group] += contribution;
+}
+
+//------------------------------------------------------------------------------
+
 void FluxMesh::end_batch(int batch)
 {
   // 首先合并所有线程的局部数据
@@ -163,12 +278,13 @@ void FluxMesh::finalize(int n_batches)
   std::cout << "  非零通量网格单元数: " << flux_sum_.size() << std::endl;
 
   if (n_accumulated_batches_ > 0 && !flux_sum_.empty()) {
+    double cell_volume = grid_->pitch() * grid_->pitch() * grid_->pitch();
     double total_flux_mean = 0.0;
     std::vector<double> group_totals(static_cast<size_t>(n_groups_), 0.0);
     std::vector<double> zero_vector = make_zero_group_vector();
 
     for (const auto& [cell_index, sum] : flux_sum_) {
-      double cell_mean = sum / n_accumulated_batches_;
+      double cell_mean = sum / n_accumulated_batches_ / cell_volume;
       total_flux_mean += cell_mean;
 
       if (n_groups_ > 0) {
@@ -176,7 +292,8 @@ void FluxMesh::finalize(int n_batches)
                                   ? flux_group_sum_.at(cell_index)
                                   : zero_vector;
         for (int g = 0; g < n_groups_; ++g) {
-          group_totals[g] += group_sum[g] / n_accumulated_batches_;
+          group_totals[g] +=
+            group_sum[g] / n_accumulated_batches_ / cell_volume;
         }
       }
     }
@@ -233,7 +350,8 @@ double FluxMesh::get_flux(int cell_index) const
 {
   auto it = flux_sum_.find(cell_index);
   if (it != flux_sum_.end() && n_accumulated_batches_ > 0) {
-    return it->second / n_accumulated_batches_;
+    double cell_volume = grid_->pitch() * grid_->pitch() * grid_->pitch();
+    return it->second / n_accumulated_batches_ / cell_volume;
   }
   return 0.0;
 }
@@ -318,6 +436,7 @@ void FluxMesh::write_hdf5(const std::string& filename, int n_batches) const
   const auto& origin = grid_->origin();
   const auto& upper_bound = grid_->upper_bound();
   double pitch = grid_->pitch();
+  double cell_volume = pitch * pitch * pitch;
   size_t n_cells = grid_->n_cells();
 
   // 写入网格参数
@@ -357,13 +476,14 @@ void FluxMesh::write_hdf5(const std::string& filename, int n_batches) const
 
   // 计算每个非零单元的均值和标准差
   for (const auto& [cell_index, sum] : flux_sum_) {
-    double mean = sum / n_accumulated_batches_;
+    double mean = sum / n_accumulated_batches_ / cell_volume;
     double sum_sq = flux_sum_sq_.at(cell_index);
     double variance = 0.0;
 
     // 计算标准差: σ = sqrt(E[X²] - E[X]²)
     if (n_accumulated_batches_ > 1) {
-      double mean_sq = sum_sq / n_accumulated_batches_;
+      double mean_sq =
+        sum_sq / n_accumulated_batches_ / (cell_volume * cell_volume);
       variance = mean_sq - mean * mean;
       // 防止数值误差导致负方差
       variance = std::max(variance, 0.0);
@@ -385,10 +505,12 @@ void FluxMesh::write_hdf5(const std::string& filename, int n_batches) const
                                    : zero_vector_sq;
 
       for (int g = 0; g < n_groups_; ++g) {
-        double group_mean = group_sum[g] / n_accumulated_batches_;
+        double group_mean =
+          group_sum[g] / n_accumulated_batches_ / cell_volume;
         double group_std = 0.0;
         if (n_accumulated_batches_ > 1) {
-          double mean_sq = group_sum_sq[g] / n_accumulated_batches_;
+          double mean_sq = group_sum_sq[g] / n_accumulated_batches_ /
+                           (cell_volume * cell_volume);
           double variance = mean_sq - group_mean * group_mean;
           group_std = std::sqrt(std::max(variance, 0.0));
         }

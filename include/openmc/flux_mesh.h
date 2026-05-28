@@ -33,6 +33,15 @@ public:
   void accumulate(const std::array<double, 3>& position, double weight,
     double distance, double energy_eV = -1.0, int mg_group = -1);
 
+  //! Accumulate a track-length segment, splitting it across mesh cells.
+  //! \param start_position Segment start position [x, y, z]
+  //! \param direction Unit direction vector [ux, uy, uz]
+  //! \param weight Particle weight over the segment
+  //! \param distance Segment length
+  void accumulate_track(const std::array<double, 3>& start_position,
+    const std::array<double, 3>& direction, double weight, double distance,
+    double energy_eV = -1.0, int mg_group = -1);
+
   //! 批次结束处理 - 累积批次统计
   //! \param batch 当前批次号
   void end_batch(int batch);
@@ -84,6 +93,7 @@ private:
   // 当前批次的累积数据(稀疏存储)
   std::vector<double> make_zero_group_vector() const;
   int determine_group(double energy_eV, int mg_group) const;
+  void add_contribution(int cell_index, int group, double contribution);
 
   // 能群配置
   std::vector<double> energy_edges_;

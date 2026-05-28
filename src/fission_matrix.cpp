@@ -261,7 +261,7 @@ void FissionMatrix::compute_adjoint_source(
     }
   }
 
-  std::cout << "\nPerforming power iteration..." << std::endl;
+  std::cout << "\nPerforming adjoint power iteration..." << std::endl;
   std::cout << "  Max iterations: " << max_iterations << std::endl;
   std::cout << "  Tolerance: " << tolerance << std::endl;
   std::cout << "  Normalized FM entries: " << normalized_matrix.size()
@@ -270,11 +270,11 @@ void FissionMatrix::compute_adjoint_source(
             << " / " << n_states << std::endl;
 
   // ---------------------------------------------------------------
-  // 4. 幂迭代
-  //    q(j)       = (1/k) Σ_{source_state} M_norm[source_state→j] ×
-  //    I*(source_state) I*_new(j,g) = q(j) × chi_empirical(g|j) 归一化 I*_new
+  // 4. Adjoint power iteration using the transpose operator:
+  //    R(j) = sum_g chi_empirical(j,g) * I*(j,g)
+  //    I*_new(s) = (1/k) * sum_j M_norm[s,j] * R(j)
   // ---------------------------------------------------------------
-  vector<double> q(n_cells, 0.0);
+  vector<double> response_importance(n_cells, 0.0);
   vector<double> I_new(n_states, 0.0);
   double max_delta = 0.0;
   adjoint_iterations_ = 0;
@@ -283,22 +283,22 @@ void FissionMatrix::compute_adjoint_source(
   const double inv_keff = 1.0 / keff;
 
   for (int iter = 0; iter < max_iterations; ++iter) {
-    // Step a: q(j) = (1/k) Σ M_norm[s→j] × I*(s)
-    std::fill(q.begin(), q.end(), 0.0);
+    // Step a: collapse I*(j,g) through the empirical fission spectrum.
+    std::fill(response_importance.begin(), response_importance.end(), 0.0);
+    for (size_t j = 0; j < n_cells; ++j) {
+      for (int g = 0; g < n_source_groups_; ++g) {
+        response_importance[j] +=
+          chi_empirical[j * n_source_groups_ + g] *
+          adjoint_source_grouped_[j * n_source_groups_ + g];
+      }
+    }
+
+    // Step b: apply the transpose of M_norm.
+    std::fill(I_new.begin(), I_new.end(), 0.0);
     for (const auto& [key, F_sj] : normalized_matrix) {
       size_t source_state = key / n_cells;
       size_t j = key % n_cells;
-      q[j] += F_sj * adjoint_source_grouped_[source_state];
-    }
-    for (auto& val : q)
-      val *= inv_keff;
-
-    // Step b: I*(j,g) = q(j) × chi_empirical(g|j)
-    for (size_t j = 0; j < n_cells; ++j) {
-      for (int g = 0; g < n_source_groups_; ++g) {
-        I_new[j * n_source_groups_ + g] =
-          q[j] * chi_empirical[j * n_source_groups_ + g];
-      }
+      I_new[source_state] += F_sj * response_importance[j] * inv_keff;
     }
 
     // Step c: 归一化
@@ -437,29 +437,29 @@ void FissionMatrix::perform_adjoint_iteration(
               << " entries, starting adjoint iteration..." << std::endl;
   }
 
-  vector<double> q(n_cells, 0.0);
+  vector<double> response_importance(n_cells, 0.0);
   vector<double> I_new(n_states, 0.0);
   double max_delta = 0.0;
   const double keff = reference_keff();
   const double inv_keff = 1.0 / keff;
 
   for (int iter = 0; iter < iterations; ++iter) {
-    // Step a: q(j) = (1/k) Σ M_norm[s→j] × I*(s)
-    std::fill(q.begin(), q.end(), 0.0);
+    // Step a: collapse I*(j,g) through the empirical fission spectrum.
+    std::fill(response_importance.begin(), response_importance.end(), 0.0);
+    for (size_t j = 0; j < n_cells; ++j) {
+      for (int g = 0; g < n_source_groups_; ++g) {
+        response_importance[j] +=
+          chi_empirical[j * n_source_groups_ + g] *
+          adjoint_source_grouped_[j * n_source_groups_ + g];
+      }
+    }
+
+    // Step b: apply the transpose of M_norm.
+    std::fill(I_new.begin(), I_new.end(), 0.0);
     for (const auto& [key, F_sj] : normalized_matrix) {
       size_t source_state = key / n_cells;
       size_t j = key % n_cells;
-      q[j] += F_sj * adjoint_source_grouped_[source_state];
-    }
-    for (auto& val : q)
-      val *= inv_keff;
-
-    // Step b: I*(j,g) = q(j) × chi_empirical(g|j)
-    for (size_t j = 0; j < n_cells; ++j) {
-      for (int g = 0; g < n_source_groups_; ++g) {
-        I_new[j * n_source_groups_ + g] =
-          q[j] * chi_empirical[j * n_source_groups_ + g];
-      }
+      I_new[source_state] += F_sj * response_importance[j] * inv_keff;
     }
 
     double sum_new = std::accumulate(I_new.begin(), I_new.end(), 0.0);

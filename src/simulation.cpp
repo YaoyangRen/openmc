@@ -437,14 +437,6 @@ void initialize_batch()
   // Add user tallies to active tallies list
   setup_active_tallies();
 
-  // Start new batch for transfer function mesh
-  if (settings::clutch_on) {
-    if (simulation::transfer_function_mesh) {
-      simulation::transfer_function_mesh->start_new_batch(
-        simulation::current_batch);
-    }
-  }
-
   // Start new batch for fission matrix
   // 选项 1: 仅在活跃代运行裂变矩阵
   // if (settings::clutch_on && simulation::current_batch >

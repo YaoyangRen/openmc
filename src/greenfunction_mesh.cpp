@@ -48,6 +48,8 @@ GreenFunctionMesh::GreenFunctionMesh(std::shared_ptr<SharedMeshGrid> grid,
 
   // 初始化源计数
   source_counts_.resize(spatial_size_, 0);
+  source_state_counts_.resize(
+    spatial_size_ * static_cast<size_t>(n_groups_), 0);
 
   // 稀疏存储：transfer_functions_sparse_ 和 cumulative_data_sparse_ 按需增长
 }
@@ -110,6 +112,10 @@ void GreenFunctionMesh::record_source_birth(
 
   // 增加该源单元的计数（仍然按 cell 计数，用于 source_counts_ 输出）
   source_counts_[i_source_cell]++;
+  if (source_state >= 0 &&
+      source_state < static_cast<int>(source_state_counts_.size())) {
+    source_state_counts_[source_state]++;
+  }
 }
 
 void GreenFunctionMesh::accumulate(const Position& r, double contribution,
@@ -382,6 +388,7 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(
 
   // 写入每个源单元的粒子计数
   write_dataset(file_id, "source_counts_per_cell", source_counts_);
+  write_dataset(file_id, "source_counts_per_state", source_state_counts_);
 
   // 为每个源状态创建一个组（稀疏格式）
   hid_t transfer_group = H5Gcreate(
@@ -400,10 +407,21 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(
     response_values.reserve(
       response_map.size() * static_cast<size_t>(N_FAMILIES) * n_groups_);
 
+    double source_count = 0.0;
+    if (i_source >= 0 &&
+        i_source < static_cast<int>(source_state_counts_.size()) &&
+        source_state_counts_[i_source] > 0) {
+      source_count = static_cast<double>(source_state_counts_[i_source]);
+    } else {
+      fatal_error("GreenFunctionMesh: transfer response exists for source "
+                  "state without a recorded source count.");
+    }
+
     for (const auto& [j_response, values] : response_map) {
       response_indices.push_back(j_response);
-      response_values.insert(
-        response_values.end(), values.begin(), values.end());
+      for (double value : values) {
+        response_values.push_back(value / source_count);
+      }
     }
 
     write_dataset(cell_group, "indices", response_indices);
@@ -413,6 +431,8 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(
     write_attribute(cell_group, "n_groups", n_groups_);
     write_attribute(cell_group, "source_cell", i_source / n_groups_);
     write_attribute(cell_group, "source_group", i_source % n_groups_);
+    write_attribute(cell_group, "source_count", source_count);
+    write_attribute(cell_group, "normalized_per_source_particle", true);
 
     H5Gclose(cell_group);
   }
@@ -425,6 +445,7 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(
   current_batch_transfer_data_sparse_.clear();
   cumulative_data_sparse_.clear();
   source_counts_.clear();
+  source_state_counts_.clear();
   particle_to_source_state_.clear();
 }
 

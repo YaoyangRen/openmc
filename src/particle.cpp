@@ -305,6 +305,11 @@ void Particle::event_advance()
   double distance =
     std::min({boundary().distance(), collision_distance(), distance_cutoff});
 
+  Position r_start = r();
+  Direction u_start = u();
+  double energy_start = E();
+  int group_start = g();
+
   // Advance particle in space and time
   this->move_distance(distance);
   double dt = distance / speed;
@@ -313,14 +318,15 @@ void Particle::event_advance()
 
   // Accumulate flux mesh (if enabled) - 在所有粒子移动时累积
   if (settings::flux_mesh_on && simulation::flux_mesh) {
-    std::array<double, 3> position = {r().x, r().y, r().z};
-    double energy_eV = E();
+    std::array<double, 3> position = {r_start.x, r_start.y, r_start.z};
+    std::array<double, 3> direction = {u_start.x, u_start.y, u_start.z};
+    double energy_eV = energy_start;
     int mg_group = -1;
     if (!settings::run_CE && type() == ParticleType::neutron) {
-      mg_group = g();
+      mg_group = group_start;
     }
-    simulation::flux_mesh->accumulate(
-      position, wgt(), distance, energy_eV, mg_group);
+    simulation::flux_mesh->accumulate_track(
+      position, direction, wgt(), distance, energy_eV, mg_group);
   }
 
   // Score track-length tallies

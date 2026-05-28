@@ -324,6 +324,7 @@ void AdjointFlux::compute_from_files(const std::string& transfer_function_file,
   compute_from_memory(transfer_functions, adjoint_source, shape_, origin_,
     pitch_, tf_n_groups, tf_n_families, std::move(tf_energy_edges),
     effective_n_source_groups);
+  upper_right_ = tf_grid.upper_right;
 
   // 4. 写入输出文件
   write_to_file(output_file);

@@ -95,6 +95,7 @@ private:
 
   // 每个源单元产生的源粒子计数 [nx*ny*nz]（用于 source_counts 输出）
   vector<int> source_counts_;
+  vector<int> source_state_counts_;
 
   // 源粒子ID到源状态索引的映射
   // source_state = source_cell * n_source_groups + g_source
