@@ -249,7 +249,9 @@ private:
   // 网格信息(用于验证一致性)
   std::array<int, 3> grid_shape_;
   double grid_pitch_;
+  std::array<double, 3> grid_pitch_vector_;
   std::array<double, 3> grid_lower_left_; //!< 网格左下角坐标
+  std::array<double, 3> grid_upper_right_;
 
   // Phase 2.2: 材料相关核数据 (几何查询)
   std::unordered_map<int, MaterialNuclearData>

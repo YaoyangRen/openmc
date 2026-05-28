@@ -554,6 +554,12 @@ void FissionMatrix::finalize(const std::string& filename)
   // 写入网格信息
   write_dataset(file_id, "origin", grid_->origin());
   write_dataset(file_id, "shape", grid_->shape());
+  std::array<double, 3> grid_pitch {
+    grid_->pitch(), grid_->pitch(), grid_->pitch()};
+  write_dataset(file_id, "grid_shape", grid_->shape());
+  write_dataset(file_id, "grid_lower_left", grid_->origin());
+  write_dataset(file_id, "grid_upper_right", grid_->upper_bound());
+  write_dataset(file_id, "grid_pitch", grid_pitch);
 
   // 准备稀疏矩阵的COO格式数据: (row=source_state, col=fission_cell, value)
   vector<int> rows;

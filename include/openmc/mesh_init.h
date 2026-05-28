@@ -24,7 +24,10 @@ public:
   static std::shared_ptr<SharedMeshGrid> create(double resolution,
     bool auto_bounds = true,
     const std::array<double, 3>& manual_lower = {0.0, 0.0, 0.0},
-    const std::array<double, 3>& manual_upper = {10.0, 10.0, 10.0});
+    const std::array<double, 3>& manual_upper = {10.0, 10.0, 10.0},
+    bool has_manual_bounds = true);
+
+  static std::shared_ptr<SharedMeshGrid> create_from_settings();
 
   // Getter 方法
   const std::array<int, 3>& shape() const { return shape_; }
@@ -41,10 +44,12 @@ public:
   void print_info(const std::string& label = "Shared Mesh Grid") const;
 
 private:
+  bool has_manual_bounds_ {false};
+
   // 私有构造函数（通过 create() 工厂方法创建）
   SharedMeshGrid(double resolution, bool auto_bounds,
     const std::array<double, 3>& manual_lower,
-    const std::array<double, 3>& manual_upper);
+    const std::array<double, 3>& manual_upper, bool has_manual_bounds);
 
   // 初始化网格（从根宇宙或手动边界计算网格参数）
   void initialize();
@@ -56,6 +61,7 @@ private:
   double pitch_ {0.0};                                // 网格分辨率 (cm)
   double inv_pitch_ {0.0};                            // 分辨率的倒数
   size_t n_cells_ {0};                                // 总单元数
+  std::string bounds_source_ {"unset"};               // Mesh bounds source
 
   // 配置参数
   bool auto_bounds_ {true};            // 是否自动获取边界

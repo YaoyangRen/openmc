@@ -178,6 +178,11 @@ extern double weight_cutoff;       //!< Weight cutoff for Russian roulette
 extern double weight_survive;      //!< Survival weight after Russian roulette
 extern vector<double>
   kinetics_energy_edges; //!< Energy group edges for kinetics outputs ryy add
+extern double kinetics_mesh_pitch;     //!< Shared kinetics mesh pitch [cm]
+extern bool kinetics_mesh_auto_bounds; //!< Use geometry bounding box?
+extern bool kinetics_mesh_has_bounds;  //!< Manual kinetics mesh bounds provided?
+extern array<double, 3> kinetics_mesh_lower_left; //!< Manual mesh lower bound
+extern array<double, 3> kinetics_mesh_upper_right; //!< Manual mesh upper bound
 
 // Adjoint source controls ryy add
 extern std::string

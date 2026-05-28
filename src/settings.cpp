@@ -146,6 +146,11 @@ int verbosity {7};
 double weight_cutoff {0.25};
 double weight_survive {1.0};
 vector<double> kinetics_energy_edges;
+double kinetics_mesh_pitch {1.0};
+bool kinetics_mesh_auto_bounds {true};
+bool kinetics_mesh_has_bounds {false};
+array<double, 3> kinetics_mesh_lower_left {0.0, 0.0, 0.0};
+array<double, 3> kinetics_mesh_upper_right {10.0, 10.0, 10.0};
 
 std::string adjoint_initial_guess {"uniform"};
 int adjoint_max_iterations {1};
@@ -732,6 +737,59 @@ void read_settings_xml(pugi::xml_node root)
     kinetics_energy_edges.clear();
   }
 
+  kinetics_mesh_pitch = 1.0;
+  kinetics_mesh_auto_bounds = true;
+  kinetics_mesh_has_bounds = false;
+  kinetics_mesh_lower_left = {0.0, 0.0, 0.0};
+  kinetics_mesh_upper_right = {10.0, 10.0, 10.0};
+
+  if (check_for_node(root, "kinetics_mesh")) {
+    xml_node mesh_node = root.child("kinetics_mesh");
+
+    if (check_for_node(mesh_node, "pitch")) {
+      kinetics_mesh_pitch = std::stod(get_node_value(mesh_node, "pitch"));
+      if (kinetics_mesh_pitch <= 0.0) {
+        fatal_error("<kinetics_mesh>/<pitch> must be positive.");
+      }
+    }
+
+    if (check_for_node(mesh_node, "auto_bounds")) {
+      kinetics_mesh_auto_bounds =
+        get_node_value_bool(mesh_node, "auto_bounds");
+    }
+
+    bool has_lower = check_for_node(mesh_node, "lower_left");
+    bool has_upper = check_for_node(mesh_node, "upper_right");
+    if (has_lower != has_upper) {
+      fatal_error("<kinetics_mesh> requires both <lower_left> and "
+                  "<upper_right> when manual bounds are specified.");
+    }
+
+    if (has_lower) {
+      auto lower = get_node_array<double>(mesh_node, "lower_left");
+      auto upper = get_node_array<double>(mesh_node, "upper_right");
+      if (lower.size() != 3 || upper.size() != 3) {
+        fatal_error("<kinetics_mesh>/<lower_left> and <upper_right> must "
+                    "each contain exactly three values.");
+      }
+
+      for (int i = 0; i < 3; ++i) {
+        if (upper[i] <= lower[i]) {
+          fatal_error("<kinetics_mesh>/<upper_right> values must be greater "
+                      "than <lower_left> values on every axis.");
+        }
+        kinetics_mesh_lower_left[i] = lower[i];
+        kinetics_mesh_upper_right[i] = upper[i];
+      }
+      kinetics_mesh_has_bounds = true;
+    }
+
+    if (!kinetics_mesh_auto_bounds && !kinetics_mesh_has_bounds) {
+      fatal_error("<kinetics_mesh> requires <lower_left> and <upper_right> "
+                  "when <auto_bounds> is false.");
+    }
+  }
+
   // Particle trace
   if (check_for_node(root, "trace")) {
     auto temp = get_node_array<int64_t>(root, "trace");
@@ -1252,6 +1310,11 @@ void free_memory_settings()
   settings::source_write_surf_id.clear();
   settings::res_scat_nuclides.clear();
   settings::kinetics_energy_edges.clear();
+  settings::kinetics_mesh_pitch = 1.0;
+  settings::kinetics_mesh_auto_bounds = true;
+  settings::kinetics_mesh_has_bounds = false;
+  settings::kinetics_mesh_lower_left = {0.0, 0.0, 0.0};
+  settings::kinetics_mesh_upper_right = {10.0, 10.0, 10.0};
 }
 
 //==============================================================================

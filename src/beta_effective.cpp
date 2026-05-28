@@ -24,6 +24,150 @@
 
 namespace openmc {
 
+namespace {
+
+struct KineticsGridMetadata {
+  std::array<int, 3> shape {};
+  std::array<double, 3> lower_left {};
+  std::array<double, 3> upper_right {};
+  std::array<double, 3> pitch {};
+  bool has_explicit_upper_right {false};
+};
+
+bool close_enough(double a, double b)
+{
+  double scale = std::max({1.0, std::abs(a), std::abs(b)});
+  return std::abs(a - b) <= 1.0e-8 * scale;
+}
+
+void check_positive_grid(const KineticsGridMetadata& grid,
+  const std::string& filename)
+{
+  for (int axis = 0; axis < 3; ++axis) {
+    if (grid.shape[axis] <= 0) {
+      fatal_error(filename + " has invalid grid_shape value on axis " +
+                  std::to_string(axis) + ".");
+    }
+    if (grid.pitch[axis] <= 0.0) {
+      fatal_error(filename + " has non-positive grid_pitch value on axis " +
+                  std::to_string(axis) + ".");
+    }
+    if (grid.upper_right[axis] <= grid.lower_left[axis]) {
+      fatal_error(filename +
+                  " has grid_upper_right <= grid_lower_left on axis " +
+                  std::to_string(axis) + ".");
+    }
+  }
+}
+
+void require_isotropic_pitch(
+  const KineticsGridMetadata& grid, const std::string& filename)
+{
+  for (int axis = 1; axis < 3; ++axis) {
+    if (!close_enough(grid.pitch[axis], grid.pitch[0])) {
+      fatal_error(filename +
+                  " has anisotropic grid_pitch; beta_eff currently requires "
+                  "a single isotropic kinetics mesh pitch.");
+    }
+  }
+}
+
+bool uses_legacy_derived_upper_right(const KineticsGridMetadata& grid)
+{
+  for (int axis = 0; axis < 3; ++axis) {
+    double derived =
+      grid.lower_left[axis] + grid.shape[axis] * grid.pitch[axis];
+    if (!close_enough(grid.upper_right[axis], derived)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+KineticsGridMetadata read_kinetics_grid_metadata(
+  hid_t file_id, const std::string& filename)
+{
+  KineticsGridMetadata grid;
+
+  if (object_exists(file_id, "grid_shape")) {
+    read_dataset(file_id, "grid_shape", grid.shape);
+  } else if (object_exists(file_id, "shape")) {
+    read_dataset(file_id, "shape", grid.shape);
+  } else {
+    fatal_error(filename + " missing grid_shape dataset.");
+  }
+
+  if (object_exists(file_id, "grid_pitch")) {
+    read_dataset(file_id, "grid_pitch", grid.pitch);
+  } else if (attribute_exists(file_id, "pitch")) {
+    double pitch = 0.0;
+    read_attribute(file_id, "pitch", pitch);
+    grid.pitch = {pitch, pitch, pitch};
+  } else {
+    fatal_error(filename + " missing grid_pitch dataset.");
+  }
+
+  if (object_exists(file_id, "grid_lower_left")) {
+    read_dataset(file_id, "grid_lower_left", grid.lower_left);
+  } else if (object_exists(file_id, "origin")) {
+    read_dataset(file_id, "origin", grid.lower_left);
+  } else {
+    fatal_error(filename + " missing grid_lower_left dataset.");
+  }
+
+  if (object_exists(file_id, "grid_upper_right")) {
+    read_dataset(file_id, "grid_upper_right", grid.upper_right);
+    grid.has_explicit_upper_right = true;
+  } else {
+    // Legacy files did not store upper_right explicitly.
+    grid.upper_right = {grid.lower_left[0] + grid.shape[0] * grid.pitch[0],
+      grid.lower_left[1] + grid.shape[1] * grid.pitch[1],
+      grid.lower_left[2] + grid.shape[2] * grid.pitch[2]};
+  }
+
+  check_positive_grid(grid, filename);
+  require_isotropic_pitch(grid, filename);
+  return grid;
+}
+
+void validate_matching_grid(const KineticsGridMetadata& reference,
+  const std::string& reference_name, const KineticsGridMetadata& candidate,
+  const std::string& candidate_name)
+{
+  for (int axis = 0; axis < 3; ++axis) {
+    if (candidate.shape[axis] != reference.shape[axis]) {
+      fatal_error("Kinetics grid mismatch between " + reference_name +
+                  " and " + candidate_name + ": grid_shape differs on axis " +
+                  std::to_string(axis) + ".");
+    }
+    if (!close_enough(candidate.pitch[axis], reference.pitch[axis])) {
+      fatal_error("Kinetics grid mismatch between " + reference_name +
+                  " and " + candidate_name + ": grid_pitch differs on axis " +
+                  std::to_string(axis) + ".");
+    }
+    if (!close_enough(candidate.lower_left[axis], reference.lower_left[axis])) {
+      fatal_error("Kinetics grid mismatch between " + reference_name +
+                  " and " + candidate_name +
+                  ": grid_lower_left differs on axis " +
+                  std::to_string(axis) + ".");
+    }
+    bool compare_upper_right =
+      reference.has_explicit_upper_right &&
+      candidate.has_explicit_upper_right &&
+      !uses_legacy_derived_upper_right(reference) &&
+      !uses_legacy_derived_upper_right(candidate);
+    if (compare_upper_right &&
+        !close_enough(candidate.upper_right[axis], reference.upper_right[axis])) {
+      fatal_error("Kinetics grid mismatch between " + reference_name +
+                  " and " + candidate_name +
+                  ": grid_upper_right differs on axis " +
+                  std::to_string(axis) + ".");
+    }
+  }
+}
+
+} // namespace
+
 //------------------------------------------------------------------------------
 // 核心驱动函数：根据正向通量、response-weighted importance 文件以及
 // fission-matrix source-state importance 完成 beta_eff 计算。当前主路径
@@ -76,21 +220,6 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
             << adjoint_shape[2] << ", 间距: " << adjoint_pitch << " cm"
             << ", 非零单元: " << adjoint_flux.size() << std::endl;
 
-  // 3. 验证网格一致性：β_eff 依赖逐单元的 φ-φ* 内积，因此两张网格必须完全
-  //    对齐（尺寸、pitch 以及多群能量边界）。
-  if (flux_shape != adjoint_shape ||
-      std::abs(flux_pitch - adjoint_pitch) > 1e-6) {
-    fatal_error(
-      "Grid mismatch between flux and response-weighted importance!\n" +
-      std::string("  Flux grid: ") + std::to_string(flux_shape[0]) + "x" +
-      std::to_string(flux_shape[1]) + "x" + std::to_string(flux_shape[2]) +
-      ", pitch=" + std::to_string(flux_pitch) + "\n" +
-      std::string("  Adjoint grid: ") + std::to_string(adjoint_shape[0]) + "x" +
-      std::to_string(adjoint_shape[1]) + "x" +
-      std::to_string(adjoint_shape[2]) +
-      ", pitch=" + std::to_string(adjoint_pitch));
-  }
-
   grid_shape_ = flux_shape;
   grid_pitch_ = flux_pitch;
   fission_matrix_file_ = fission_matrix_file;
@@ -100,65 +229,6 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
   initialize_flux_spectrum_weights();
   read_fission_adjoint_source_data(
     fission_matrix_file, flux_shape, flux_pitch);
-
-  //============================这段代码用于调试=================================
-  // 调试输出：基于核数据的材料 β_i（不含通量和 importance 权重）
-  // 用户可以根据材料 id 调整此处参数，用于与 MCNP 的材料 β_i 对比。
-  // 这里只打印一次，不影响后续 β_eff 计算。
-  int debug_material_id = 1; // TODO: 根据模型实际材料 id 修改
-  try {
-    auto debug_data = extract_material_nuclear_data(debug_material_id);
-    if (debug_data.is_fissionable && !debug_data.sigma_f_groups.empty() &&
-        !debug_data.nu_total_groups.empty() &&
-        !debug_data.nu_delayed_groups.empty()) {
-      const int G = static_cast<int>(debug_data.sigma_f_groups.size());
-      const int I = N_DELAYED_GROUPS;
-
-      std::vector<double> num(I, 0.0);
-      double den = 0.0;
-
-      for (int g = 0; g < G; ++g) {
-        double SigmaF = debug_data.sigma_f_groups[g];
-        double nu_tot = debug_data.nu_total_groups[g];
-        if (SigmaF <= 0.0)
-          continue;
-
-        den += nu_tot * SigmaF;
-
-        for (int i = 0; i < I; ++i) {
-          int off = delayed_offset(g, i);
-          if (off >= 0 &&
-              off < static_cast<int>(debug_data.nu_delayed_groups.size())) {
-            double nu_d = debug_data.nu_delayed_groups[off];
-            num[i] += nu_d * SigmaF;
-          }
-        }
-      }
-
-      std::cout << "\n[DEBUG] Library-based beta_i for material "
-                << debug_data.material_name << " (id=" << debug_material_id
-                << ")" << std::endl;
-      double beta_sum = 0.0;
-      for (int i = 0; i < I; ++i) {
-        double beta_i = (den > 0.0) ? num[i] / den : 0.0;
-        beta_sum += beta_i;
-        std::cout << "  group " << (i + 1)
-                  << ": beta_i = " << std::setprecision(8) << beta_i
-                  << std::endl;
-      }
-      std::cout << "  total beta = " << std::setprecision(8) << beta_sum << "\n"
-                << std::endl;
-    } else {
-      std::cout << "\n[DEBUG] Material id " << debug_material_id
-                << " is non-fissionable or missing group data; "
-                << "skip library beta_i debug.\n";
-    }
-  } catch (const std::exception& e) {
-    std::cout
-      << "\n[DEBUG] Failed to compute library-based beta_i for material "
-      << debug_material_id << ": " << e.what() << "\n";
-  }
-  //=============================================================================
 
   std::fill(beta_i_.begin(), beta_i_.end(), 0.0);
   std::fill(numerators_.begin(), numerators_.end(), 0.0);
@@ -307,19 +377,15 @@ void BetaEffective::read_flux_data(const std::string& filename,
   flux_has_group_data_ = false;
   flux_n_groups_ = 1;
 
-  // 读取网格参数
-  std::array<int, 3> grid_shape;
-  read_dataset(file_id, "grid_shape", grid_shape);
-  shape = grid_shape;
-
-  std::array<double, 3> grid_pitch_array;
-  read_dataset(file_id, "grid_pitch", grid_pitch_array);
-  pitch = grid_pitch_array[0]; // 假设各向同性
-
-  // 读取网格左下角坐标
-  if (object_exists(file_id, "grid_lower_left")) {
-    read_dataset(file_id, "grid_lower_left", grid_lower_left_);
-  }
+  // 读取并保存标准网格元数据。flux_mesh.h5 是 beta 计算的参考网格。
+  auto grid = read_kinetics_grid_metadata(file_id, filename);
+  shape = grid.shape;
+  pitch = grid.pitch[0];
+  grid_shape_ = grid.shape;
+  grid_pitch_ = grid.pitch[0];
+  grid_pitch_vector_ = grid.pitch;
+  grid_lower_left_ = grid.lower_left;
+  grid_upper_right_ = grid.upper_right;
 
   if (object_exists(file_id, "n_groups")) {
     read_dataset(file_id, "n_groups", flux_n_groups_);
@@ -378,22 +444,13 @@ void BetaEffective::read_adjoint_flux_data(const std::string& filename,
   adjoint_has_group_data_ = false;
   adjoint_n_groups_ = 1;
 
-  // 读取网格参数
-  std::array<int, 3> grid_shape;
-  if (object_exists(file_id, "grid_shape")) {
-    read_dataset(file_id, "grid_shape", grid_shape);
-  } else {
-    read_dataset(file_id, "shape", grid_shape);
-  }
-  shape = grid_shape;
-
-  if (object_exists(file_id, "grid_pitch")) {
-    std::array<double, 3> grid_pitch_array;
-    read_dataset(file_id, "grid_pitch", grid_pitch_array);
-    pitch = grid_pitch_array[0];
-  } else {
-    read_attribute(file_id, "pitch", pitch);
-  }
+  // 读取标准网格元数据，并与 flux_mesh.h5 的参考网格逐项校验。
+  auto grid = read_kinetics_grid_metadata(file_id, filename);
+  KineticsGridMetadata flux_grid {
+    grid_shape_, grid_lower_left_, grid_upper_right_, grid_pitch_vector_, true};
+  validate_matching_grid(flux_grid, "flux_mesh.h5", grid, filename);
+  shape = grid.shape;
+  pitch = grid.pitch[0];
 
   if (object_exists(file_id, "n_groups")) {
     read_dataset(file_id, "n_groups", adjoint_n_groups_);
@@ -553,8 +610,7 @@ void BetaEffective::read_adjoint_flux_data(const std::string& filename,
 //------------------------------------------------------------------------------
 
 void BetaEffective::read_fission_adjoint_source_data(
-  const std::string& filename, const std::array<int, 3>& expected_shape,
-  double expected_pitch)
+  const std::string& filename, const std::array<int, 3>&, double)
 {
   if (!file_exists(filename)) {
     fatal_error("Fission matrix file does not exist: " + filename +
@@ -563,22 +619,10 @@ void BetaEffective::read_fission_adjoint_source_data(
 
   hid_t file_id = file_open(filename, 'r');
 
-  std::array<int, 3> fm_shape {};
-  read_dataset(file_id, "shape", fm_shape);
-  if (fm_shape != expected_shape) {
-    fatal_error("Grid shape mismatch between flux_mesh.h5 and " + filename +
-                ".");
-  }
-
-  if (!attribute_exists(file_id, "pitch")) {
-    fatal_error(filename + " missing required pitch attribute.");
-  }
-  double fm_pitch = 0.0;
-  read_attribute(file_id, "pitch", fm_pitch);
-  if (std::abs(fm_pitch - expected_pitch) > 1e-6) {
-    fatal_error("Grid pitch mismatch between flux_mesh.h5 and " + filename +
-                ".");
-  }
+  auto grid = read_kinetics_grid_metadata(file_id, filename);
+  KineticsGridMetadata flux_grid {
+    grid_shape_, grid_lower_left_, grid_upper_right_, grid_pitch_vector_, true};
+  validate_matching_grid(flux_grid, "flux_mesh.h5", grid, filename);
 
   if (!attribute_exists(file_id, "n_source_groups")) {
     fatal_error(filename + " missing required n_source_groups attribute.");
@@ -618,9 +662,9 @@ void BetaEffective::read_fission_adjoint_source_data(
   read_dataset(file_id, "adjoint_source_grouped",
     birth_adjoint_source_grouped_);
 
-  const size_t expected_size = static_cast<size_t>(expected_shape[0]) *
-                               static_cast<size_t>(expected_shape[1]) *
-                               static_cast<size_t>(expected_shape[2]) *
+  const size_t expected_size = static_cast<size_t>(grid.shape[0]) *
+                               static_cast<size_t>(grid.shape[1]) *
+                               static_cast<size_t>(grid.shape[2]) *
                                static_cast<size_t>(n_energy_groups_);
   if (birth_adjoint_source_grouped_.size() != expected_size) {
     fatal_error(filename +
@@ -856,6 +900,9 @@ void BetaEffective::write_to_file(const std::string& filename) const
   write_attribute(metadata_group, "n_delayed_groups", 8); // Phase 3: 支持8组
 
   write_dataset(metadata_group, "grid_shape", grid_shape_);
+  write_dataset(metadata_group, "grid_lower_left", grid_lower_left_);
+  write_dataset(metadata_group, "grid_upper_right", grid_upper_right_);
+  write_dataset(metadata_group, "grid_pitch", grid_pitch_vector_);
   write_attribute(metadata_group, "grid_pitch", grid_pitch_);
 
   H5Gclose(metadata_group);
@@ -1426,8 +1473,8 @@ MaterialNuclearData BetaEffective::extract_material_nuclear_data(
 void BetaEffective::build_cell_material_map(
   const std::unordered_map<int, double>& flux)
 {
-  std::cout << "  构建单元-材料映射 (" << flux.size() << " 个网格单元)..."
-            << std::endl;
+  std::cout << "  几何划分: " << flux.size() << " 个有通量网格单元, "
+            << n_sample_points_ << " 点采样/单元" << std::endl;
 
   cell_to_material_.clear();
   cell_nuclear_data_.clear();
@@ -1439,20 +1486,17 @@ void BetaEffective::build_cell_material_map(
     return;
   }
 
-  std::cout << "  材料库: " << model::materials.size() << " 种材料"
-            << std::endl;
-
   // ===== 在并行区域之前预先提取所有裂变材料的核数据 =====
   // 这是线程安全的关键：所有核数据库访问都在单线程中完成
   std::unordered_map<int, MaterialNuclearData> global_material_cache;
-  std::cout << "  预提取裂变材料核数据..." << std::endl;
   for (const auto& mat_ptr : model::materials) {
     if (mat_ptr && mat_ptr->fissionable()) {
       int mat_id = mat_ptr->id();
       global_material_cache[mat_id] = extract_material_nuclear_data(mat_id);
     }
   }
-  std::cout << "  已提取 " << global_material_cache.size() << " 种裂变材料数据"
+  std::cout << "  材料: total=" << model::materials.size()
+            << ", fissionable=" << global_material_cache.size()
             << std::endl;
 
   // 线程局部缓存和统计
@@ -1506,6 +1550,7 @@ void BetaEffective::build_cell_material_map(
       int fissionable_hits = 0;     // 裂变材料命中次数
       int non_fissionable_hits = 0; // 非裂变材料命中次数
       int void_hits = 0;            // 空白区域命中次数
+      int failed_hits = 0;          // 几何查询失败次数
 
       // 对每个网格单元执行 1/8/27 点采样来估计材料体积分数。
       // 采样点越多，异质结构估计越精准，但也需要更多 `exhaustive_find_cell`
@@ -1527,6 +1572,7 @@ void BetaEffective::build_cell_material_map(
         geom.u() = Direction {0.0, 0.0, 1.0};
 
         if (!exhaustive_find_cell(geom)) {
+          failed_hits++;
           continue; // 几何查询失败
         }
 
@@ -1567,7 +1613,10 @@ void BetaEffective::build_cell_material_map(
       // 处理采样结果
       if (fissionable_hits == 0) {
         // 没有裂变材料命中
-        if (void_hits > 0 && non_fissionable_hits == 0) {
+        if (failed_hits == n_sample_points_) {
+          // 所有采样点都无法定位到几何单元
+          local_data.geometry_failed_count++;
+        } else if (void_hits > 0 && non_fissionable_hits == 0) {
           // 纯空白单元
           local_data.void_count++;
         } else {
@@ -1644,24 +1693,37 @@ void BetaEffective::build_cell_material_map(
   }
 
   // 输出统计信息
-  std::cout << "  几何查询结果: 裂变单元 " << fissionable_count << ", 非裂变 "
-            << non_fissionable_count << ", 空白 " << void_count << ", 材料种类 "
-            << unique_materials_.size() << std::endl;
+  int homogeneous_count = fissionable_count - n_heterogeneous_cells_;
+  std::cout << "  几何划分结果: 裂变 " << fissionable_count << " (同质 "
+            << homogeneous_count << ", 混合 " << n_heterogeneous_cells_
+            << "), 非裂变 " << non_fissionable_count << ", 空白 "
+            << void_count << ", 失败 " << geometry_failed_count
+            << ", 裂变材料种类 " << unique_materials_.size() << std::endl;
+
+  if (!material_hit_counts.empty()) {
+    std::vector<std::pair<int, int>> material_hits(
+      material_hit_counts.begin(), material_hit_counts.end());
+    std::sort(material_hits.begin(), material_hits.end());
+
+    std::cout << "  裂变材料样本命中:";
+    int printed = 0;
+    for (const auto& [mat_id, count] : material_hits) {
+      if (printed >= 8) {
+        std::cout << " ...";
+        break;
+      }
+      std::cout << " id=" << mat_id << "(" << count << ")";
+      ++printed;
+    }
+    std::cout << std::endl;
+  }
 }
 
 //------------------------------------------------------------------------------
 
 std::array<double, 3> BetaEffective::mesh_index_to_position(int mesh_idx) const
 {
-  // 将一维索引转换为三维坐标
-  int nx = grid_shape_[0];
-  int ny = grid_shape_[1];
-  int nz = grid_shape_[2];
-
-  int iz = mesh_idx / (nx * ny);
-  int remainder = mesh_idx % (nx * ny);
-  int iy = remainder / nx;
-  int ix = remainder % nx;
+  auto [ix, iy, iz] = get_grid_indices(mesh_idx);
 
   // 计算单元中心位置
   // 假设网格从 lower_left 开始，每个单元大小为 grid_pitch_
@@ -1679,12 +1741,16 @@ std::array<int, 3> BetaEffective::get_grid_indices(int cell_idx) const
   int nx = grid_shape_[0];
   int ny = grid_shape_[1];
   int nz = grid_shape_[2];
+  int n_cells = nx * ny * nz;
+  if (cell_idx < 0 || cell_idx >= n_cells) {
+    fatal_error("Invalid kinetics mesh cell index: " + std::to_string(cell_idx));
+  }
 
-  // 从一维索引反推三维索引 (row-major order: z,y,x)
-  int iz = cell_idx / (nx * ny);
-  int remainder = cell_idx % (nx * ny);
-  int iy = remainder / nx;
-  int ix = remainder % nx;
+  // Must match FissionMatrix/FluxMesh: index = (ix * ny + iy) * nz + iz.
+  int iz = cell_idx % nz;
+  int remainder = cell_idx / nz;
+  int iy = remainder % ny;
+  int ix = remainder / ny;
 
   return {ix, iy, iz};
 }

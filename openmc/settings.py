@@ -89,6 +89,9 @@ class Settings:
     ifp_n_generation : int
         Number of generations to consider for the Iterated Fission Probability
         method.
+    kinetics_mesh : dict
+        Shared mesh settings for kinetics/beta-effective outputs. Accepted keys
+        are 'pitch', 'auto_bounds', 'lower_left', and 'upper_right'.
     max_lost_particles : int
         Maximum number of lost particles
 
@@ -358,6 +361,7 @@ class Settings:
         # Energy mode subelement
         self._energy_mode = None
         self._max_order = None
+        self._kinetics_mesh = None
 
         # Source subelement
         self._source = cv.CheckedList(SourceBase, 'source distributions')
@@ -574,6 +578,60 @@ class Settings:
             cv.check_greater_than('maximum scattering order', max_order, 0,
                                   True)
         self._max_order = max_order
+
+    @property
+    def kinetics_mesh(self) -> dict:
+        return self._kinetics_mesh
+
+    @kinetics_mesh.setter
+    def kinetics_mesh(self, kinetics_mesh: Mapping | None):
+        if kinetics_mesh is None:
+            self._kinetics_mesh = None
+            return
+
+        cv.check_type('kinetics mesh', kinetics_mesh, Mapping)
+        allowed_keys = {'pitch', 'auto_bounds', 'lower_left', 'upper_right'}
+        mesh = {}
+
+        for key, value in kinetics_mesh.items():
+            cv.check_value('kinetics mesh key', key, allowed_keys)
+            if key == 'pitch':
+                if isinstance(value, bool):
+                    raise TypeError('Unable to set kinetics mesh pitch to a bool')
+                cv.check_type('kinetics mesh pitch', value, Real)
+                cv.check_greater_than('kinetics mesh pitch', value, 0.0)
+                mesh[key] = float(value)
+            elif key == 'auto_bounds':
+                cv.check_type('kinetics mesh auto_bounds', value, bool)
+                mesh[key] = value
+            else:
+                cv.check_iterable_type(f'kinetics mesh {key}', value, Real)
+                cv.check_length(f'kinetics mesh {key}', value, 3)
+                mesh[key] = [float(x) for x in value]
+
+        has_lower = 'lower_left' in mesh
+        has_upper = 'upper_right' in mesh
+        if has_lower != has_upper:
+            raise ValueError(
+                'kinetics_mesh requires both lower_left and upper_right when '
+                'manual bounds are specified'
+            )
+
+        if has_lower:
+            for lower, upper in zip(mesh['lower_left'], mesh['upper_right']):
+                if upper <= lower:
+                    raise ValueError(
+                        'kinetics_mesh upper_right values must be greater than '
+                        'lower_left values on every axis'
+                    )
+
+        if mesh.get('auto_bounds') is False and not has_lower:
+            raise ValueError(
+                'kinetics_mesh requires lower_left and upper_right when '
+                'auto_bounds is False'
+            )
+
+        self._kinetics_mesh = mesh
 
     @property
     def source(self) -> list[SourceBase]:
@@ -1439,6 +1497,23 @@ class Settings:
                 subelement.text = str(value) if key != 'survival_normalization' \
                     else str(value).lower()
 
+    def _create_kinetics_mesh_subelement(self, root):
+        if self._kinetics_mesh is None:
+            return
+
+        element = ET.SubElement(root, 'kinetics_mesh')
+        for key in ('pitch', 'auto_bounds', 'lower_left', 'upper_right'):
+            if key not in self._kinetics_mesh:
+                continue
+            subelement = ET.SubElement(element, key)
+            value = self._kinetics_mesh[key]
+            if key in ('lower_left', 'upper_right'):
+                subelement.text = ' '.join(str(x) for x in value)
+            elif isinstance(value, bool):
+                subelement.text = str(value).lower()
+            else:
+                subelement.text = str(value)
+
     def _create_entropy_mesh_subelement(self, root, mesh_memo=None):
         if self.entropy_mesh is None:
             return
@@ -1903,6 +1978,34 @@ class Settings:
                     else:
                         self.cutoff[key] = float(value)
 
+    def _kinetics_mesh_from_xml_element(self, root):
+        elem = root.find('kinetics_mesh')
+        if elem is None:
+            return
+
+        kinetics_mesh = {}
+        text = get_text(elem, 'pitch')
+        if text is not None:
+            kinetics_mesh['pitch'] = float(text)
+
+        text = get_text(elem, 'auto_bounds')
+        if text is not None:
+            text = text.lower()
+            if text not in ('true', 'false'):
+                raise ValueError(
+                    'kinetics_mesh auto_bounds must be true or false'
+                )
+            kinetics_mesh['auto_bounds'] = text == 'true'
+
+        lower_left = get_elem_list(elem, 'lower_left', float)
+        upper_right = get_elem_list(elem, 'upper_right', float)
+        if lower_left is not None:
+            kinetics_mesh['lower_left'] = lower_left
+        if upper_right is not None:
+            kinetics_mesh['upper_right'] = upper_right
+
+        self.kinetics_mesh = kinetics_mesh
+
     def _entropy_mesh_from_xml_element(self, root, meshes):
         text = get_text(root, 'entropy_mesh')
         if text is None:
@@ -2167,6 +2270,7 @@ class Settings:
         self._create_stride_subelement(element)
         self._create_survival_biasing_subelement(element)
         self._create_cutoff_subelement(element)
+        self._create_kinetics_mesh_subelement(element)
         self._create_entropy_mesh_subelement(element, mesh_memo)
         self._create_trigger_subelement(element)
         self._create_no_reduce_subelement(element)
@@ -2277,6 +2381,7 @@ class Settings:
         settings._stride_from_xml_element(elem)
         settings._survival_biasing_from_xml_element(elem)
         settings._cutoff_from_xml_element(elem)
+        settings._kinetics_mesh_from_xml_element(elem)
         settings._entropy_mesh_from_xml_element(elem, meshes)
         settings._trigger_from_xml_element(elem)
         settings._no_reduce_from_xml_element(elem)

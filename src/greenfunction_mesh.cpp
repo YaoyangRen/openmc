@@ -29,11 +29,7 @@ GreenFunctionMesh::GreenFunctionMesh(std::shared_ptr<SharedMeshGrid> grid,
     max_batches_(max_batches), energy_edges_(std::move(energy_edges))
 {
   // 计算上边界（用于输出）
-  const auto& origin = grid_->origin();
-  const auto& shape = grid_->shape();
-  double pitch = grid_->pitch();
-  upper_bound_ = {origin[0] + shape[0] * pitch, origin[1] + shape[1] * pitch,
-    origin[2] + shape[2] * pitch};
+  upper_bound_ = grid_->upper_bound();
 
   spatial_size_ = grid_->n_cells();
 
@@ -310,6 +306,12 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(
   write_attribute(file_id, "pitch", grid_->pitch());
   write_dataset(file_id, "origin", grid_->origin());
   write_dataset(file_id, "shape", grid_->shape());
+  std::array<double, 3> grid_pitch {
+    grid_->pitch(), grid_->pitch(), grid_->pitch()};
+  write_dataset(file_id, "grid_shape", grid_->shape());
+  write_dataset(file_id, "grid_lower_left", grid_->origin());
+  write_dataset(file_id, "grid_upper_right", grid_->upper_bound());
+  write_dataset(file_id, "grid_pitch", grid_pitch);
   write_attribute(file_id, "n_source_states", n_source_states);
   write_attribute(file_id, "n_source_groups", n_groups_);
   write_attribute(file_id, "total_source_particles", total_source_particles);

@@ -97,6 +97,7 @@ private:
   // 网格参数
   std::array<int, 3> shape_ {0, 0, 0};
   std::array<double, 3> origin_ {0.0, 0.0, 0.0};
+  std::array<double, 3> upper_right_ {0.0, 0.0, 0.0};
   double pitch_ {0.0};
   size_t n_cells_ {0};
   int n_groups_ {1};

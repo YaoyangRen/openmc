@@ -31,6 +31,12 @@ def test_export_to_xml(run_in_tmpdir):
                 'energy_positron': 1.0e-5, 'time_neutron': 1.0e-5,
                 'time_photon': 1.0e-5, 'time_electron': 1.0e-5,
                 'time_positron': 1.0e-5}
+    s.kinetics_mesh = {
+        'pitch': 0.5,
+        'auto_bounds': False,
+        'lower_left': (-3., -2., -1.),
+        'upper_right': (3., 2., 1.)
+    }
     mesh = openmc.RegularMesh()
     mesh.lower_left = (-10., -10., -10.)
     mesh.upper_right = (10., 10., 10.)
@@ -105,6 +111,12 @@ def test_export_to_xml(run_in_tmpdir):
                         'energy_electron': 1.0e-5, 'energy_positron': 1.0e-5,
                         'time_neutron': 1.0e-5, 'time_photon': 1.0e-5,
                         'time_electron': 1.0e-5, 'time_positron': 1.0e-5}
+    assert s.kinetics_mesh == {
+        'pitch': 0.5,
+        'auto_bounds': False,
+        'lower_left': [-3., -2., -1.],
+        'upper_right': [3., 2., 1.]
+    }
     assert isinstance(s.entropy_mesh, openmc.RegularMesh)
     assert s.entropy_mesh.lower_left == [-10., -10., -10.]
     assert s.entropy_mesh.upper_right == [10., 10., 10.]

@@ -13,6 +13,108 @@
 
 namespace openmc {
 
+namespace {
+
+struct KineticsGridMetadata {
+  std::array<int, 3> shape {};
+  std::array<double, 3> lower_left {};
+  std::array<double, 3> upper_right {};
+  std::array<double, 3> pitch {};
+  bool has_explicit_upper_right {false};
+};
+
+bool close_enough(double a, double b)
+{
+  double scale = std::max({1.0, std::abs(a), std::abs(b)});
+  return std::abs(a - b) <= 1.0e-8 * scale;
+}
+
+KineticsGridMetadata read_kinetics_grid_metadata(
+  hid_t file_id, const std::string& filename)
+{
+  KineticsGridMetadata grid;
+
+  if (object_exists(file_id, "grid_shape")) {
+    read_dataset(file_id, "grid_shape", grid.shape);
+  } else {
+    read_dataset(file_id, "shape", grid.shape);
+  }
+
+  if (object_exists(file_id, "grid_lower_left")) {
+    read_dataset(file_id, "grid_lower_left", grid.lower_left);
+  } else {
+    read_dataset(file_id, "origin", grid.lower_left);
+  }
+
+  if (object_exists(file_id, "grid_pitch")) {
+    read_dataset(file_id, "grid_pitch", grid.pitch);
+  } else {
+    double pitch = 0.0;
+    read_attribute(file_id, "pitch", pitch);
+    grid.pitch = {pitch, pitch, pitch};
+  }
+
+  if (object_exists(file_id, "grid_upper_right")) {
+    read_dataset(file_id, "grid_upper_right", grid.upper_right);
+    grid.has_explicit_upper_right = true;
+  } else {
+    grid.upper_right = {grid.lower_left[0] + grid.shape[0] * grid.pitch[0],
+      grid.lower_left[1] + grid.shape[1] * grid.pitch[1],
+      grid.lower_left[2] + grid.shape[2] * grid.pitch[2]};
+  }
+
+  for (int axis = 0; axis < 3; ++axis) {
+    if (grid.shape[axis] <= 0 || grid.pitch[axis] <= 0.0 ||
+        grid.upper_right[axis] <= grid.lower_left[axis]) {
+      fatal_error(filename + " has invalid kinetics grid metadata.");
+    }
+    if (!close_enough(grid.pitch[axis], grid.pitch[0])) {
+      fatal_error(filename +
+                  " has anisotropic grid_pitch; adjoint flux currently "
+                  "requires a single isotropic kinetics mesh pitch.");
+    }
+  }
+
+  return grid;
+}
+
+bool uses_legacy_derived_upper_right(const KineticsGridMetadata& grid)
+{
+  for (int axis = 0; axis < 3; ++axis) {
+    double derived =
+      grid.lower_left[axis] + grid.shape[axis] * grid.pitch[axis];
+    if (!close_enough(grid.upper_right[axis], derived)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void validate_matching_grid(const KineticsGridMetadata& reference,
+  const std::string& reference_name, const KineticsGridMetadata& candidate,
+  const std::string& candidate_name)
+{
+  for (int axis = 0; axis < 3; ++axis) {
+    bool compare_upper_right =
+      reference.has_explicit_upper_right &&
+      candidate.has_explicit_upper_right &&
+      !uses_legacy_derived_upper_right(reference) &&
+      !uses_legacy_derived_upper_right(candidate);
+    if (candidate.shape[axis] != reference.shape[axis] ||
+        !close_enough(candidate.pitch[axis], reference.pitch[axis]) ||
+        !close_enough(candidate.lower_left[axis], reference.lower_left[axis]) ||
+        (compare_upper_right &&
+          !close_enough(
+            candidate.upper_right[axis], reference.upper_right[axis]))) {
+      fatal_error("Kinetics grid mismatch between " + reference_name +
+                  " and " + candidate_name + " on axis " +
+                  std::to_string(axis) + ".");
+    }
+  }
+}
+
+} // namespace
+
 void AdjointFlux::compute_from_files(const std::string& transfer_function_file,
   const std::string& fission_matrix_file, const std::string& output_file)
 {
@@ -32,9 +134,11 @@ void AdjointFlux::compute_from_files(const std::string& transfer_function_file,
   hid_t tf_file = file_open(transfer_function_file, 'r');
 
   // 读取网格参数
-  read_dataset(tf_file, "origin", origin_);
-  read_dataset(tf_file, "shape", shape_);
-  read_attribute(tf_file, "pitch", pitch_);
+  auto tf_grid = read_kinetics_grid_metadata(tf_file, transfer_function_file);
+  shape_ = tf_grid.shape;
+  origin_ = tf_grid.lower_left;
+  upper_right_ = tf_grid.upper_right;
+  pitch_ = tf_grid.pitch[0];
 
   int tf_n_groups = 1;
   int tf_n_families = 1;
@@ -145,6 +249,9 @@ void AdjointFlux::compute_from_files(const std::string& transfer_function_file,
   }
 
   hid_t fm_file = file_open(fission_matrix_file, 'r');
+  auto fm_grid = read_kinetics_grid_metadata(fm_file, fission_matrix_file);
+  validate_matching_grid(
+    tf_grid, transfer_function_file, fm_grid, fission_matrix_file);
 
   // 检查是否存在伴随源
   if (!object_exists(fm_file, "adjoint_source")) {
@@ -234,6 +341,8 @@ void AdjointFlux::compute_from_memory(
   shape_ = shape;
   origin_ = origin;
   pitch_ = pitch;
+  upper_right_ = {origin_[0] + shape_[0] * pitch_,
+    origin_[1] + shape_[1] * pitch_, origin_[2] + shape_[2] * pitch_};
   n_cells_ = static_cast<size_t>(shape[0]) * shape[1] * shape[2];
   n_groups_ = n_groups > 0 ? n_groups : 1;
   n_families_ = n_families > 1 ? n_families : 1;
@@ -419,6 +528,8 @@ void AdjointFlux::write_to_file(const std::string& filename)
   // 写入网格信息
   write_dataset(file_id, "origin", origin_);
   write_dataset(file_id, "grid_shape", shape_);
+  write_dataset(file_id, "grid_lower_left", origin_);
+  write_dataset(file_id, "grid_upper_right", upper_right_);
   std::array<double, 3> grid_pitch_array {pitch_, pitch_, pitch_};
   write_dataset(file_id, "grid_pitch", grid_pitch_array);
   write_attribute(file_id, "n_cells", static_cast<int>(n_cells_));
