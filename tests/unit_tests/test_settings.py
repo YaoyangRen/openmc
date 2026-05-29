@@ -37,6 +37,12 @@ def test_export_to_xml(run_in_tmpdir):
         'lower_left': (-3., -2., -1.),
         'upper_right': (3., 2., 1.)
     }
+    s.kinetics_energy_edges = [1.0e-5, 1.0e-1, 1.0]
+    s.adjoint_source = {
+        'initial_guess': 'uniform',
+        'max_iterations': 100,
+        'tolerance': 1.0e-8
+    }
     mesh = openmc.RegularMesh()
     mesh.lower_left = (-10., -10., -10.)
     mesh.upper_right = (10., 10., 10.)
@@ -117,6 +123,12 @@ def test_export_to_xml(run_in_tmpdir):
         'lower_left': [-3., -2., -1.],
         'upper_right': [3., 2., 1.]
     }
+    assert s.kinetics_energy_edges == [1.0e-5, 1.0e-1, 1.0]
+    assert s.adjoint_source == {
+        'initial_guess': 'uniform',
+        'max_iterations': 100,
+        'tolerance': 1.0e-8
+    }
     assert isinstance(s.entropy_mesh, openmc.RegularMesh)
     assert s.entropy_mesh.lower_left == [-10., -10., -10.]
     assert s.entropy_mesh.upper_right == [10., 10., 10.]
@@ -157,3 +169,58 @@ def test_export_to_xml(run_in_tmpdir):
     assert s.random_ray['ray_source'].space.lower_left == [-1., -1., -1.]
     assert s.random_ray['ray_source'].space.upper_right == [1., 1., 1.]
     assert s.source_rejection_fraction == 0.01
+
+
+def test_enable_clutch(run_in_tmpdir):
+    openmc.reset_auto_ids()
+    model = openmc.Model()
+    model.enable_clutch(
+        kinetics_energy_edges=[1.0e-5, 1.0e-1, 1.0],
+        kinetics_mesh={
+            'pitch': 1.0,
+            'auto_bounds': False,
+            'lower_left': (-10., -10., -10.),
+            'upper_right': (10., 10., 10.)
+        },
+        adjoint_source={
+            'initial_guess': 'forward',
+            'max_iterations': 25,
+            'tolerance': 1.0e-6
+        }
+    )
+
+    assert model.settings.kinetics_energy_edges == [1.0e-5, 1.0e-1, 1.0]
+    assert model.settings.adjoint_source == {
+        'initial_guess': 'forward',
+        'max_iterations': 25,
+        'tolerance': 1.0e-6
+    }
+    assert len(model.tallies) == 1
+    assert model.tallies[0].scores == [
+        'ifp-time-numerator', 'ifp-beta-numerator', 'ifp-denominator',
+        'clutch-test', 'greenfunction'
+    ]
+
+    model.settings.export_to_xml()
+    model.tallies.export_to_xml()
+
+    settings = openmc.Settings.from_xml()
+    assert settings.kinetics_energy_edges == [1.0e-5, 1.0e-1, 1.0]
+    assert settings.kinetics_mesh == {
+        'pitch': 1.0,
+        'auto_bounds': False,
+        'lower_left': [-10., -10., -10.],
+        'upper_right': [10., 10., 10.]
+    }
+    assert settings.adjoint_source == {
+        'initial_guess': 'forward',
+        'max_iterations': 25,
+        'tolerance': 1.0e-6
+    }
+
+    tallies = openmc.Tallies.from_xml()
+    assert len(tallies) == 1
+    assert tallies[0].scores == [
+        'ifp-time-numerator', 'ifp-beta-numerator', 'ifp-denominator',
+        'clutch-test', 'greenfunction'
+    ]

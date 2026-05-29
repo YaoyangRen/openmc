@@ -92,6 +92,11 @@ class Settings:
     kinetics_mesh : dict
         Shared mesh settings for kinetics/beta-effective outputs. Accepted keys
         are 'pitch', 'auto_bounds', 'lower_left', and 'upper_right'.
+    kinetics_energy_edges : iterable of float
+        Energy group boundaries used for kinetics/beta-effective outputs.
+    adjoint_source : dict
+        Iteration controls for the fission-matrix source-state importance.
+        Accepted keys are 'initial_guess', 'max_iterations', and 'tolerance'.
     max_lost_particles : int
         Maximum number of lost particles
 
@@ -361,7 +366,9 @@ class Settings:
         # Energy mode subelement
         self._energy_mode = None
         self._max_order = None
+        self._kinetics_energy_edges = None
         self._kinetics_mesh = None
+        self._adjoint_source = None
 
         # Source subelement
         self._source = cv.CheckedList(SourceBase, 'source distributions')
@@ -580,6 +587,33 @@ class Settings:
         self._max_order = max_order
 
     @property
+    def kinetics_energy_edges(self) -> list[float]:
+        return self._kinetics_energy_edges
+
+    @kinetics_energy_edges.setter
+    def kinetics_energy_edges(self, edges: Iterable[Real] | None):
+        if edges is None:
+            self._kinetics_energy_edges = None
+            return
+
+        edges = list(edges)
+        cv.check_iterable_type('kinetics energy edges', edges, Real)
+        cv.check_length('kinetics energy edges', edges, 2, None)
+        for value in edges:
+            if isinstance(value, bool):
+                raise TypeError('Unable to set kinetics energy edge to a bool')
+            cv.check_greater_than('kinetics energy edge', value, 0.0)
+        edges = [float(x) for x in edges]
+        for lower, upper in zip(edges[:-1], edges[1:]):
+            if upper <= lower:
+                raise ValueError(
+                    'kinetics_energy_edges values must be sorted in ascending '
+                    'order'
+                )
+
+        self._kinetics_energy_edges = edges
+
+    @property
     def kinetics_mesh(self) -> dict:
         return self._kinetics_mesh
 
@@ -632,6 +666,43 @@ class Settings:
             )
 
         self._kinetics_mesh = mesh
+
+    @property
+    def adjoint_source(self) -> dict:
+        return self._adjoint_source
+
+    @adjoint_source.setter
+    def adjoint_source(self, adjoint_source: Mapping | None):
+        if adjoint_source is None:
+            self._adjoint_source = None
+            return
+
+        cv.check_type('adjoint source', adjoint_source, Mapping)
+        allowed_keys = {'initial_guess', 'max_iterations', 'tolerance'}
+        source = {}
+
+        for key, value in adjoint_source.items():
+            cv.check_value('adjoint source key', key, allowed_keys)
+            if key == 'initial_guess':
+                cv.check_type('adjoint source initial_guess', value, str)
+                value = value.lower()
+                cv.check_value('adjoint source initial_guess', value,
+                               {'uniform', 'forward'})
+                source[key] = value
+            elif key == 'max_iterations':
+                cv.check_type('adjoint source max_iterations', value, Integral)
+                cv.check_greater_than(
+                    'adjoint source max_iterations', value, 0)
+                source[key] = int(value)
+            elif key == 'tolerance':
+                if isinstance(value, bool):
+                    raise TypeError(
+                        'Unable to set adjoint source tolerance to a bool')
+                cv.check_type('adjoint source tolerance', value, Real)
+                cv.check_greater_than('adjoint source tolerance', value, 0.0)
+                source[key] = float(value)
+
+        self._adjoint_source = source
 
     @property
     def source(self) -> list[SourceBase]:
@@ -1497,6 +1568,13 @@ class Settings:
                 subelement.text = str(value) if key != 'survival_normalization' \
                     else str(value).lower()
 
+    def _create_kinetics_energy_edges_subelement(self, root):
+        if self._kinetics_energy_edges is None:
+            return
+
+        element = ET.SubElement(root, 'kinetics_energy_edges')
+        element.text = ' '.join(str(x) for x in self._kinetics_energy_edges)
+
     def _create_kinetics_mesh_subelement(self, root):
         if self._kinetics_mesh is None:
             return
@@ -1513,6 +1591,17 @@ class Settings:
                 subelement.text = str(value).lower()
             else:
                 subelement.text = str(value)
+
+    def _create_adjoint_source_subelement(self, root):
+        if self._adjoint_source is None:
+            return
+
+        element = ET.SubElement(root, 'adjoint_source')
+        for key in ('initial_guess', 'max_iterations', 'tolerance'):
+            if key not in self._adjoint_source:
+                continue
+            subelement = ET.SubElement(element, key)
+            subelement.text = str(self._adjoint_source[key])
 
     def _create_entropy_mesh_subelement(self, root, mesh_memo=None):
         if self.entropy_mesh is None:
@@ -1978,6 +2067,12 @@ class Settings:
                     else:
                         self.cutoff[key] = float(value)
 
+    def _kinetics_energy_edges_from_xml_element(self, root):
+        elem = root.find('kinetics_energy_edges')
+        if elem is not None:
+            text = ' '.join(elem.itertext())
+            self.kinetics_energy_edges = [float(x) for x in text.split()]
+
     def _kinetics_mesh_from_xml_element(self, root):
         elem = root.find('kinetics_mesh')
         if elem is None:
@@ -2005,6 +2100,24 @@ class Settings:
             kinetics_mesh['upper_right'] = upper_right
 
         self.kinetics_mesh = kinetics_mesh
+
+    def _adjoint_source_from_xml_element(self, root):
+        elem = root.find('adjoint_source')
+        if elem is None:
+            return
+
+        adjoint_source = {}
+        text = get_text(elem, 'initial_guess')
+        if text is not None:
+            adjoint_source['initial_guess'] = text
+        text = get_text(elem, 'max_iterations')
+        if text is not None:
+            adjoint_source['max_iterations'] = int(text)
+        text = get_text(elem, 'tolerance')
+        if text is not None:
+            adjoint_source['tolerance'] = float(text)
+
+        self.adjoint_source = adjoint_source
 
     def _entropy_mesh_from_xml_element(self, root, meshes):
         text = get_text(root, 'entropy_mesh')
@@ -2270,7 +2383,9 @@ class Settings:
         self._create_stride_subelement(element)
         self._create_survival_biasing_subelement(element)
         self._create_cutoff_subelement(element)
+        self._create_kinetics_energy_edges_subelement(element)
         self._create_kinetics_mesh_subelement(element)
+        self._create_adjoint_source_subelement(element)
         self._create_entropy_mesh_subelement(element, mesh_memo)
         self._create_trigger_subelement(element)
         self._create_no_reduce_subelement(element)
@@ -2381,7 +2496,9 @@ class Settings:
         settings._stride_from_xml_element(elem)
         settings._survival_biasing_from_xml_element(elem)
         settings._cutoff_from_xml_element(elem)
+        settings._kinetics_energy_edges_from_xml_element(elem)
         settings._kinetics_mesh_from_xml_element(elem)
+        settings._adjoint_source_from_xml_element(elem)
         settings._entropy_mesh_from_xml_element(elem, meshes)
         settings._trigger_from_xml_element(elem)
         settings._no_reduce_from_xml_element(elem)

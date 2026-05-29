@@ -32,6 +32,14 @@ _PRODUCT_TYPES = ['tensor', 'entrywise']
 _SCORE_CLASSES = (str, openmc.CrossScore, openmc.AggregateScore)
 _NUCLIDE_CLASSES = (str, openmc.CrossNuclide, openmc.AggregateNuclide)
 _FILTER_CLASSES = (openmc.Filter, openmc.CrossFilter, openmc.AggregateFilter)
+_CLUTCH_IFP_SCORES = (
+    'ifp-time-numerator',
+    'ifp-beta-numerator',
+    'ifp-denominator',
+    'clutch-test',
+    'greenfunction',
+)
+_CLUTCH_SCORES = ('clutch-test', 'greenfunction')
 
 # Valid types of estimators
 ESTIMATOR_TYPES = {'tracklength', 'collision', 'analog'}
@@ -3238,6 +3246,57 @@ class Tallies(cv.CheckedList):
 
         """
         super().insert(index, item)
+
+    def add_clutch_tally(self, tally_id=1, name='scores', include_ifp=True):
+        """Add or update the tally required to enable CLUTCH/beta outputs.
+
+        The C++ input reader enables CLUTCH when it sees either the
+        ``clutch-test`` or ``greenfunction`` score. This helper creates the
+        corresponding scores used by the beta-effective workflow.
+
+        Parameters
+        ----------
+        tally_id : int or None
+            Tally ID to use when a new tally is created. Defaults to 1 to match
+            the simple XML examples.
+        name : str
+            Tally name to use when a new tally is created.
+        include_ifp : bool
+            Whether to include the IFP scores alongside the CLUTCH scores.
+
+        Returns
+        -------
+        openmc.Tally
+            The created or updated tally.
+
+        """
+        scores = list(_CLUTCH_IFP_SCORES if include_ifp else _CLUTCH_SCORES)
+        clutch_scores = set(_CLUTCH_SCORES)
+
+        target = None
+        for tally in self:
+            if any(str(score) in clutch_scores for score in tally.scores):
+                target = tally
+                break
+            if name and tally.name == name:
+                target = tally
+                break
+            if tally_id is not None and tally.id == tally_id:
+                target = tally
+                break
+
+        if target is None:
+            target = Tally(tally_id=tally_id, name=name)
+            target.scores = scores
+            self.append(target)
+        else:
+            if name and not target.name:
+                target.name = name
+            for score in scores:
+                if score not in target.scores:
+                    target.scores.append(score)
+
+        return target
 
     def merge_tallies(self):
         """Merge any mergeable tallies together. Note that n-way merges are

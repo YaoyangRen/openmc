@@ -159,6 +159,61 @@ class Model:
         except ImportError:
             return False
 
+    def enable_clutch(
+        self,
+        kinetics_energy_edges: Iterable[float] | None = None,
+        kinetics_mesh: dict | None = None,
+        adjoint_source: dict | None = None,
+        include_ifp: bool = True,
+        tally_id: int | None = 1,
+        tally_name: str = 'scores',
+    ) -> openmc.Tally:
+        """Configure XML inputs needed for CLUTCH/beta-effective outputs.
+
+        This method sets the kinetics settings on :attr:`settings` and adds the
+        tally scores that cause the C++ input reader to enable CLUTCH. It is a
+        Python-side convenience layer; the generated XML remains the standard
+        ``settings.xml`` and ``tallies.xml`` format used by OpenMC.
+
+        Parameters
+        ----------
+        kinetics_energy_edges : iterable of float, optional
+            Energy boundaries for kinetics/beta-effective multi-group outputs.
+        kinetics_mesh : dict, optional
+            Shared kinetics mesh settings. Accepted keys are ``pitch``,
+            ``auto_bounds``, ``lower_left``, and ``upper_right``.
+        adjoint_source : dict, optional
+            Fission-matrix source importance iteration controls. If omitted,
+            the current default is used: uniform initial guess, 100 iterations,
+            and tolerance of 1e-8.
+        include_ifp : bool
+            Whether to include the IFP scores in the generated tally.
+        tally_id : int or None
+            ID for a newly-created CLUTCH tally.
+        tally_name : str
+            Name for a newly-created CLUTCH tally.
+
+        Returns
+        -------
+        openmc.Tally
+            The created or updated CLUTCH tally.
+
+        """
+        if kinetics_energy_edges is not None:
+            self.settings.kinetics_energy_edges = kinetics_energy_edges
+        if kinetics_mesh is not None:
+            self.settings.kinetics_mesh = kinetics_mesh
+        controls = {
+            'initial_guess': 'uniform',
+            'max_iterations': 100,
+            'tolerance': 1.0e-8,
+        }
+        if adjoint_source is not None:
+            controls.update(adjoint_source)
+        self.settings.adjoint_source = controls
+        return self.tallies.add_clutch_tally(
+            tally_id=tally_id, name=tally_name, include_ifp=include_ifp)
+
     @property
     @lru_cache(maxsize=None)
     def _materials_by_id(self) -> dict:
