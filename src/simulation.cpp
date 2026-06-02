@@ -584,6 +584,10 @@ void finalize_batch()
     std::cout << "FINALIZING FISSION MATRIX (End of Inactive Batches)"
               << std::endl;
 
+    // Merge the last inactive batch before solving the adjoint source so the
+    // stored matrix and adjoint_source_grouped are based on the same data.
+    simulation::fission_matrix->start_new_batch(-1);
+
     // 计算伴随源分布（使用累积的FM）
     simulation::fission_matrix->compute_adjoint_source(
       settings::adjoint_initial_guess, settings::adjoint_max_iterations,
@@ -593,8 +597,10 @@ void finalize_batch()
     simulation::fission_matrix->finalize("fission_matrix.h5");
   }
 
-  // Finalize flux mesh at each batch (if enabled)
-  if (simulation::flux_mesh && settings::flux_mesh_on) {
+  // Finalize flux mesh only for active batches so inactive batches do not
+  // enter the batch average.
+  const bool active_batch = simulation::current_batch > settings::n_inactive;
+  if (simulation::flux_mesh && settings::flux_mesh_on && active_batch) {
     simulation::flux_mesh->end_batch(simulation::current_batch);
   }
 
@@ -627,7 +633,7 @@ void finalize_batch()
     }
     // 输出通量分布数据
     if (simulation::flux_mesh && settings::flux_mesh_on) {
-      simulation::flux_mesh->finalize(settings::n_batches);
+      simulation::flux_mesh->finalize(settings::n_batches - settings::n_inactive);
     }
     // 计算有效缓发中子份额 β_eff
     if (simulation::flux_mesh && settings::flux_mesh_on) {
@@ -732,9 +738,29 @@ void initialize_history(Particle& p, int64_t index_source)
   // set identifier for particle
   p.id() = simulation::work_index[mpi::rank] + index_source;
 
-  // 设置源粒子ID，对于新的历史，源粒子ID就是自己的ID
-  if (p.source_particle_id() == -1) {
-    p.source_particle_id() = p.id();
+  // Use the current history ID for source-state response attribution. Banked
+  // source sites may carry parent IDs, but the fission matrix row is the
+  // current source site that starts this history.
+  p.source_particle_id() = p.id();
+
+  if (simulation::fission_matrix &&
+      simulation::current_batch <= settings::n_inactive) {
+    if (settings::run_CE) {
+      simulation::fission_matrix->record_source_birth(
+        p.r(), p.source_particle_id(), p.E(), -1, p.wgt());
+    } else {
+      simulation::fission_matrix->record_source_birth(
+        p.r(), p.source_particle_id(), -1.0, p.g(), p.wgt());
+    }
+  }
+  if (simulation::transfer_function_mesh) {
+    if (settings::run_CE) {
+      simulation::transfer_function_mesh->record_source_birth(
+        p.r(), p.source_particle_id(), p.E(), -1);
+    } else {
+      simulation::transfer_function_mesh->record_source_birth(
+        p.r(), p.source_particle_id(), -1.0, p.g());
+    }
   }
 
   // set progeny count to zero

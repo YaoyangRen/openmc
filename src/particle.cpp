@@ -169,28 +169,6 @@ void Particle::from_source(const SourceSite* src)
   }
   // 对于新的源粒子，源粒子ID在initialize_history中设置
 
-  // 记录源粒子的出生位置到裂变矩阵
-  if (simulation::fission_matrix && source_particle_id() != -1) {
-    if (settings::run_CE) {
-      simulation::fission_matrix->record_source_birth(
-        src->r, source_particle_id(), src->E, -1);
-    } else {
-      simulation::fission_matrix->record_source_birth(
-        src->r, source_particle_id(), -1.0, static_cast<int>(src->E));
-    }
-  }
-
-  // 记录源粒子的出生位置到传递函数网格
-  if (simulation::transfer_function_mesh && source_particle_id() != -1) {
-    if (settings::run_CE) {
-      simulation::transfer_function_mesh->record_source_birth(
-        src->r, source_particle_id(), src->E, -1);
-    } else {
-      simulation::transfer_function_mesh->record_source_birth(
-        src->r, source_particle_id(), -1.0, static_cast<int>(src->E));
-    }
-  }
-
   if (settings::run_CE) {
     E() = src->E;
     g() = 0;
@@ -316,8 +294,9 @@ void Particle::event_advance()
   this->time() += dt;
   this->lifetime() += dt;
 
-  // Accumulate flux mesh (if enabled) - 在所有粒子移动时累积
-  if (settings::flux_mesh_on && simulation::flux_mesh) {
+  // Accumulate flux mesh only for active batches.
+  const bool active_batch = simulation::current_batch > settings::n_inactive;
+  if (settings::flux_mesh_on && simulation::flux_mesh && active_batch) {
     std::array<double, 3> position = {r_start.x, r_start.y, r_start.z};
     std::array<double, 3> direction = {u_start.x, u_start.y, u_start.z};
     double energy_eV = energy_start;

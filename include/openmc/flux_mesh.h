@@ -47,7 +47,7 @@ public:
   void end_batch(int batch);
 
   //! 模拟结束处理 - 输出结果到 HDF5 文件
-  //! \param n_batches 总批次数
+  //! \param n_batches active batch count
   void finalize(int n_batches);
 
   //! 重置所有累积数据
@@ -81,7 +81,7 @@ private:
 
   //! 输出到 HDF5 文件
   //! \param filename HDF5 文件名
-  //! \param n_batches 总批次数
+  //! \param n_batches active batch count
   void write_hdf5(const std::string& filename, int n_batches) const;
 
   //! 合并所有线程的局部数据到批次累积

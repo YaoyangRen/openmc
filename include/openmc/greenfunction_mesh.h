@@ -11,6 +11,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace openmc {
 
@@ -100,6 +101,7 @@ private:
   // 源粒子ID到源状态索引的映射
   // source_state = source_cell * n_source_groups + g_source
   std::unordered_map<int64_t, int> particle_to_source_state_;
+  std::unordered_set<int64_t> counted_source_particles_;
 
   // 累积所有源单元的传递函数（总的传递函数，稀疏存储）
   std::unordered_map<int, std::vector<double>> cumulative_data_sparse_;

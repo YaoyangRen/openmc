@@ -347,7 +347,6 @@ void AdjointFlux::compute_from_memory(
   n_cells_ = static_cast<size_t>(shape[0]) * shape[1] * shape[2];
   n_groups_ = n_groups > 0 ? n_groups : 1;
   n_families_ = n_families > 1 ? n_families : 1;
-  has_family_data_ = (n_families_ > 1);
   energy_edges_ = std::move(energy_edges);
   int effective_n_source_groups = (n_source_groups > 1) ? n_source_groups : 1;
 
@@ -367,10 +366,6 @@ void AdjointFlux::compute_from_memory(
 
   // 清空之前的结果
   adjoint_flux_sparse_.clear();
-  family_adjoint_flux_.clear();
-  if (has_family_data_) {
-    family_adjoint_flux_.resize(n_families_);
-  }
 
   // 验证伴随源尺寸
   size_t expected_adj_size = n_cells_ * effective_n_source_groups;
@@ -423,16 +418,11 @@ void AdjointFlux::compute_from_memory(
         total_flux = make_zero_group_vector();
       }
 
-      if (has_family_data_) {
+      if (n_families_ > 1) {
         for (int f = 0; f < n_families_; ++f) {
-          auto& family_flux = family_adjoint_flux_[f][j_response];
-          if (family_flux.empty()) {
-            family_flux = make_zero_group_vector();
-          }
           for (int g = 0; g < n_groups_; ++g) {
             size_t idx = static_cast<size_t>(f) * n_groups_ + g;
             double contrib = T_values[idx] * importance;
-            family_flux[g] += contrib;
             total_flux[g] += contrib;
           }
         }
@@ -469,6 +459,11 @@ void AdjointFlux::compute_from_memory(
             << std::fixed << std::setprecision(1) << density << "%)"
             << ", 最大值: " << std::scientific << std::setprecision(3)
             << max_flux_ << ", 总通量: " << total_flux_ << std::endl;
+  if (nonzero_cells_ == 0 && !transfer_functions.empty()) {
+    warning("Response-weighted importance is zero. The transfer-function "
+            "source states did not overlap positive fission-matrix source "
+            "importance states for this run.");
+  }
 }
 
 vector<double> AdjointFlux::get_adjoint_flux_dense() const
@@ -600,84 +595,6 @@ void AdjointFlux::write_to_file(const std::string& filename)
     write_dataset(file_id, "group_total_flux", group_total_flux_);
   }
 
-  // ========== family_resolved/ 组 ==========
-  if (has_family_data_ && !family_adjoint_flux_.empty()) {
-    hid_t fr_group = H5Gcreate(
-      file_id, "family_resolved", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
-    write_attribute(fr_group, "n_families", n_families_);
-    write_attribute(fr_group, "description",
-      "Family-resolved response-weighted importance: "
-      "I_f(r,g) = sum_i T_f(i->r,g) * I*(i)");
-    write_attribute(fr_group, "physical_quantity",
-      "response-weighted importance, not true transport adjoint flux");
-    write_attribute(fr_group, "group_meaning",
-      "response fission collision energy group; not fission neutron birth "
-      "energy");
-    write_attribute(fr_group, "delayed_family_weighting",
-      "prompt/delayed family contributions are yield-fractioned in the "
-      "transfer function by nu_family(E_collision)/nu_total(E_collision)");
-    write_attribute(fr_group, "not_true_transport_adjoint_flux", true);
-    write_attribute(
-      fr_group, "family_order", "prompt, delayed_1, ..., delayed_8");
-
-    const char* family_names[] = {"prompt", "delayed_1", "delayed_2",
-      "delayed_3", "delayed_4", "delayed_5", "delayed_6", "delayed_7",
-      "delayed_8"};
-
-    for (int f = 0; f < n_families_ && f < 9; ++f) {
-      const auto& family_data = family_adjoint_flux_[f];
-      if (family_data.empty())
-        continue;
-
-      hid_t fam_group = H5Gcreate(
-        fr_group, family_names[f], H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
-
-      // Collect data
-      vector<int> f_indices;
-      vector<double> f_mean;
-      vector<double> f_group_vals;
-
-      for (const auto& [j, fv] : family_data) {
-        f_indices.push_back(j);
-        double total = std::accumulate(fv.begin(), fv.end(), 0.0);
-        f_mean.push_back(total);
-        f_group_vals.insert(f_group_vals.end(), fv.begin(), fv.end());
-      }
-
-      // Sort by cell index
-      vector<size_t> si(f_indices.size());
-      std::iota(si.begin(), si.end(), 0);
-      std::sort(si.begin(), si.end(), [&f_indices](size_t a, size_t b) {
-        return f_indices[a] < f_indices[b];
-      });
-
-      vector<int> s_idx(f_indices.size());
-      vector<double> s_mean(f_mean.size());
-      vector<double> s_grp(f_group_vals.size());
-      for (size_t i = 0; i < si.size(); ++i) {
-        s_idx[i] = f_indices[si[i]];
-        s_mean[i] = f_mean[si[i]];
-        size_t src = si[i] * static_cast<size_t>(n_groups_);
-        size_t dst = i * static_cast<size_t>(n_groups_);
-        std::copy_n(f_group_vals.begin() + src, n_groups_, s_grp.begin() + dst);
-      }
-
-      write_dataset(fam_group, "cell_indices", s_idx);
-      write_dataset(fam_group, "flux_mean", s_mean);
-      if (n_groups_ > 1) {
-        write_dataset(fam_group, "flux_group_mean", s_grp);
-      }
-      write_attribute(fam_group, "n_cells", static_cast<int>(f_indices.size()));
-
-      H5Gclose(fam_group);
-    }
-
-    H5Gclose(fr_group);
-
-    std::cout << "  Family-resolved: " << n_families_ << " families written"
-              << std::endl;
-  }
-
   // ========== 语义元数据 ==========
   hid_t sem_group = H5Gcreate(
     file_id, "semantic_metadata", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
@@ -697,9 +614,9 @@ void AdjointFlux::write_to_file(const std::string& filename)
     "source_state = source_cell * n_source_groups + g_source. "
     "If n_source_groups=1, collapses to scalar I_star(cell).");
   write_attribute(sem_group, "improvement_over_v4",
-    "Source energy dimension added: transfer functions now indexed by "
-    "source_state=(cell,g_source) rather than source_cell. "
-    "Adjoint source I*(cell,g) = I*(cell) * chi_empirical(g|cell). "
+    "Source energy dimension added: transfer functions and fission matrix "
+    "importance are indexed by source_state=(cell,g_source). "
+    "The fission matrix records sampled child source states directly. "
     "Convolution: Phi_dag(r) = sum_{cell,g} T(cell,g->r) * I*(cell,g).");
   H5Gclose(sem_group);
 

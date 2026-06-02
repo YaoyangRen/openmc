@@ -105,12 +105,6 @@ void create_fission_sites(Particle& p)
   double nu_t = p.wgt() / simulation::keff * weight * p.macro_xs().nu_fission /
                 p.macro_xs().total;
 
-  // 记录裂变事件到裂变矩阵
-  if (simulation::fission_matrix && p.source_particle_id() != -1) {
-    simulation::fission_matrix->record_fission_event(
-      p.r(), nu_t, p.source_particle_id());
-  }
-
   // Sample the number of neutrons produced
   int nu = static_cast<int>(nu_t);
   if (prn(p.current_seed()) <= (nu_t - int(nu_t))) {
@@ -194,8 +188,18 @@ void create_fission_sites(Particle& p)
         // Break out of loop as no more sites can be added to fission bank
         break;
       }
+      if (simulation::fission_matrix && p.source_particle_id() != -1 &&
+          simulation::current_batch <= settings::n_inactive) {
+        simulation::fission_matrix->record_fission_site(site.r, site.wgt,
+          p.source_particle_id(), -1.0, static_cast<int>(site.E));
+      }
     } else {
       p.secondary_bank().push_back(site);
+      if (simulation::fission_matrix && p.source_particle_id() != -1 &&
+          simulation::current_batch <= settings::n_inactive) {
+        simulation::fission_matrix->record_fission_site(site.r, site.wgt,
+          p.source_particle_id(), -1.0, static_cast<int>(site.E));
+      }
     }
 
     // Set the delayed group on the particle as well

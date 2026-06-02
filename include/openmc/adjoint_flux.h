@@ -80,15 +80,6 @@ public:
   double get_max_value() const;
   double get_total_flux() const;
 
-  // Family-resolved accessors
-  bool has_family_data() const { return has_family_data_; }
-  int n_families() const { return n_families_; }
-  const std::vector<std::unordered_map<int, vector<double>>>&
-  get_family_adjoint_flux() const
-  {
-    return family_adjoint_flux_;
-  }
-
 private:
   // Response-weighted importance 数据（稀疏存储）
   // Key: 单元索引 j, Value: I_response(j,g)
@@ -102,13 +93,8 @@ private:
   size_t n_cells_ {0};
   int n_groups_ {1};
   int n_families_ {1};
-  bool has_family_data_ {false};
   vector<double> energy_edges_;
   vector<double> group_total_flux_;
-
-  // Family-resolved response-weighted importance:
-  // [family_index] -> (cell -> group_vector)
-  std::vector<std::unordered_map<int, vector<double>>> family_adjoint_flux_;
 
   // 统计信息
   double max_flux_ {0.0};

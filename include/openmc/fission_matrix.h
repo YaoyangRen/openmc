@@ -27,11 +27,11 @@ public:
   // energy: CE 模式下源粒子出生能量 (eV)；MG 模式下置 -1 并传入 mg_group
   // mg_group: MG 模式下出生群号；CE 模式下置 -1
   void record_source_birth(const Position& r, int64_t source_particle_id,
-    double energy = -1.0, int mg_group = -1);
+    double energy = -1.0, int mg_group = -1, double source_weight = 1.0);
 
-  // 记录裂变事件（裂变位置和产生的中子数）
-  void record_fission_event(
-    const Position& r, double nu_fission, int64_t source_particle_id);
+  // Record one sampled fission source site into the source-state matrix.
+  void record_fission_site(const Position& r, double source_weight,
+    int64_t source_particle_id, double energy = -1.0, int mg_group = -1);
 
   // 开始新batch
   void start_new_batch(int batch_id);
@@ -109,7 +109,7 @@ private:
   };
 
   // 使用map存储当前batch的稀疏数据
-  // key = source_state * n_cells + fission_cell
+  // key = parent_source_state * n_source_states + child_source_state
   std::unordered_map<size_t, double> current_batch_sparse_;
 
   // 累积的稀疏矩阵数据

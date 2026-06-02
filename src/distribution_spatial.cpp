@@ -222,9 +222,10 @@ Position SphericalIndependent::sample(uint64_t* seed) const
 MeshSpatial::MeshSpatial(pugi::xml_node node)
 {
 
-  if (get_node_value(node, "type", true, true) != "mesh") {
+  const auto type = get_node_value(node, "type", true, true);
+  if (type != "mesh") {
     fatal_error(fmt::format(
-      "Incorrect spatial type '{}' for a MeshSpatial distribution"));
+      "Incorrect spatial type '{}' for a MeshSpatial distribution", type));
   }
 
   // No in-tet distributions implemented, could include distributions for the

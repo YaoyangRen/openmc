@@ -78,8 +78,12 @@ FissionMatrix::FissionMatrix(std::shared_ptr<SharedMeshGrid> grid,
 }
 
 void FissionMatrix::record_source_birth(
-  const Position& r, int64_t source_particle_id, double energy, int mg_group)
+  const Position& r, int64_t source_particle_id, double energy, int mg_group,
+  double source_weight)
 {
+  if (!std::isfinite(source_weight) || source_weight <= 0.0)
+    return;
+
   int cell = position_to_index(r);
   if (cell < 0)
     return;
@@ -89,19 +93,21 @@ void FissionMatrix::record_source_birth(
 
   std::lock_guard<std::mutex> lock(data_mutex_);
   source_birth_states_[source_particle_id] = source_state;
-  current_batch_source_counts_[source_state] += 1.0;
+  current_batch_source_counts_[source_state] += source_weight;
   total_sources_++;
 }
 
-void FissionMatrix::record_fission_event(
-  const Position& r, double nu_fission, int64_t source_particle_id)
+void FissionMatrix::record_fission_site(const Position& r, double source_weight,
+  int64_t source_particle_id, double energy, int mg_group)
 {
-  if (nu_fission <= 0.0)
+  if (!std::isfinite(source_weight) || source_weight <= 0.0)
     return;
 
-  int fission_cell = position_to_index(r);
-  if (fission_cell < 0)
+  int child_cell = position_to_index(r);
+  if (child_cell < 0)
     return;
+  int child_group = determine_source_group(energy, mg_group);
+  int child_source_state = cell_group_to_state(child_cell, child_group);
 
   std::lock_guard<std::mutex> lock(data_mutex_);
   auto it = source_birth_states_.find(source_particle_id);
@@ -109,10 +115,12 @@ void FissionMatrix::record_fission_event(
     return;
 
   int source_state = it->second;
-  // key = source_state * n_cells + fission_cell
-  size_t key =
-    static_cast<size_t>(source_state) * grid_->n_cells() + fission_cell;
-  current_batch_sparse_[key] += nu_fission;
+  size_t n_source_states =
+    grid_->n_cells() * static_cast<size_t>(n_source_groups_);
+  // key = parent_source_state * n_source_states + child_source_state
+  size_t key = static_cast<size_t>(source_state) * n_source_states +
+               static_cast<size_t>(child_source_state);
+  current_batch_sparse_[key] += source_weight;
   total_fissions_++;
 }
 
@@ -172,34 +180,9 @@ void FissionMatrix::compute_adjoint_source(
   const size_t n_states = n_cells * static_cast<size_t>(n_source_groups_);
 
   // ---------------------------------------------------------------
-  // 1. 预计算经验裂变谱 chi_empirical[j*n_groups+g]
-  //    = source_counts_[j*n_groups+g] / Σ_g source_counts_[j*n_groups+g]
-  //    仅在 n_source_groups_ > 1 时有意义
-  // ---------------------------------------------------------------
-  vector<double> chi_empirical(n_states, 0.0);
-  for (size_t j = 0; j < n_cells; ++j) {
-    double sum_g = 0.0;
-    for (int g = 0; g < n_source_groups_; ++g) {
-      sum_g += source_counts_[j * n_source_groups_ + g];
-    }
-    if (sum_g > 0.0) {
-      for (int g = 0; g < n_source_groups_; ++g) {
-        chi_empirical[j * n_source_groups_ + g] =
-          source_counts_[j * n_source_groups_ + g] / sum_g;
-      }
-    } else {
-      // 该 cell 没有源粒子，平均分配
-      for (int g = 0; g < n_source_groups_; ++g) {
-        chi_empirical[j * n_source_groups_ + g] =
-          1.0 / static_cast<double>(n_source_groups_);
-      }
-    }
-  }
-
-  // ---------------------------------------------------------------
-  // 2. 归一化裂变矩阵
-  //    M_norm[source_state → fission_cell] = M[...] /
-  //    source_counts_[source_state]
+  // 1. Normalize the source-state fission matrix:
+  //    M_norm[parent_source_state -> child_source_state]
+  //      = M[...] / source_counts_[parent_source_state]
   // ---------------------------------------------------------------
   std::unordered_map<size_t, double> normalized_matrix;
   normalized_matrix.reserve(fission_matrix_sparse_.size());
@@ -211,7 +194,7 @@ void FissionMatrix::compute_adjoint_source(
   }
 
   for (const auto& [key, value] : fission_matrix_sparse_) {
-    size_t source_state = key / n_cells;
+    size_t source_state = key / n_states;
     double sc = source_counts_[source_state];
     if (sc > 0.0) {
       normalized_matrix[key] = value / sc;
@@ -227,7 +210,7 @@ void FissionMatrix::compute_adjoint_source(
   std::cout << "  Initial guess: " << initial_guess << std::endl;
 
   // ---------------------------------------------------------------
-  // 3. 初始化 I*(source_state)
+  // 2. Initialize I*(source_state)
   // ---------------------------------------------------------------
   if (initial_guess == "uniform") {
     double uniform = 1.0 / static_cast<double>(n_states);
@@ -270,11 +253,10 @@ void FissionMatrix::compute_adjoint_source(
             << " / " << n_states << std::endl;
 
   // ---------------------------------------------------------------
-  // 4. Adjoint power iteration using the transpose operator:
-  //    R(j) = sum_g chi_empirical(j,g) * I*(j,g)
-  //    I*_new(s) = (1/k) * sum_j M_norm[s,j] * R(j)
+  // 3. Adjoint power iteration using the transpose operator:
+  //    I*_new(parent) =
+  //      (1/k) * sum_child M_norm[parent,child] * I*(child)
   // ---------------------------------------------------------------
-  vector<double> response_importance(n_cells, 0.0);
   vector<double> I_new(n_states, 0.0);
   double max_delta = 0.0;
   adjoint_iterations_ = 0;
@@ -283,22 +265,12 @@ void FissionMatrix::compute_adjoint_source(
   const double inv_keff = 1.0 / keff;
 
   for (int iter = 0; iter < max_iterations; ++iter) {
-    // Step a: collapse I*(j,g) through the empirical fission spectrum.
-    std::fill(response_importance.begin(), response_importance.end(), 0.0);
-    for (size_t j = 0; j < n_cells; ++j) {
-      for (int g = 0; g < n_source_groups_; ++g) {
-        response_importance[j] +=
-          chi_empirical[j * n_source_groups_ + g] *
-          adjoint_source_grouped_[j * n_source_groups_ + g];
-      }
-    }
-
-    // Step b: apply the transpose of M_norm.
     std::fill(I_new.begin(), I_new.end(), 0.0);
     for (const auto& [key, F_sj] : normalized_matrix) {
-      size_t source_state = key / n_cells;
-      size_t j = key % n_cells;
-      I_new[source_state] += F_sj * response_importance[j] * inv_keff;
+      size_t source_state = key / n_states;
+      size_t child_state = key % n_states;
+      I_new[source_state] +=
+        F_sj * adjoint_source_grouped_[child_state] * inv_keff;
     }
 
     // Step c: 归一化
@@ -396,27 +368,10 @@ void FissionMatrix::perform_adjoint_iteration(
   const size_t n_cells = grid_->n_cells();
   const size_t n_states = n_cells * static_cast<size_t>(n_source_groups_);
 
-  // 预计算经验裂变谱
-  vector<double> chi_empirical(n_states, 0.0);
-  for (size_t j = 0; j < n_cells; ++j) {
-    double sum_g = 0.0;
-    for (int g = 0; g < n_source_groups_; ++g)
-      sum_g += source_to_use[j * n_source_groups_ + g];
-    if (sum_g > 0.0) {
-      for (int g = 0; g < n_source_groups_; ++g)
-        chi_empirical[j * n_source_groups_ + g] =
-          source_to_use[j * n_source_groups_ + g] / sum_g;
-    } else {
-      for (int g = 0; g < n_source_groups_; ++g)
-        chi_empirical[j * n_source_groups_ + g] =
-          1.0 / static_cast<double>(n_source_groups_);
-    }
-  }
-
-  // 归一化裂变矩阵
+  // Normalize the source-state fission matrix.
   std::unordered_map<size_t, double> normalized_matrix;
   for (const auto& [key, value] : matrix_to_use) {
-    size_t source_state = key / n_cells;
+    size_t source_state = key / n_states;
     double sc = source_to_use[source_state];
     if (sc > 0.0) {
       normalized_matrix[key] = value / sc;
@@ -437,29 +392,18 @@ void FissionMatrix::perform_adjoint_iteration(
               << " entries, starting adjoint iteration..." << std::endl;
   }
 
-  vector<double> response_importance(n_cells, 0.0);
   vector<double> I_new(n_states, 0.0);
   double max_delta = 0.0;
   const double keff = reference_keff();
   const double inv_keff = 1.0 / keff;
 
   for (int iter = 0; iter < iterations; ++iter) {
-    // Step a: collapse I*(j,g) through the empirical fission spectrum.
-    std::fill(response_importance.begin(), response_importance.end(), 0.0);
-    for (size_t j = 0; j < n_cells; ++j) {
-      for (int g = 0; g < n_source_groups_; ++g) {
-        response_importance[j] +=
-          chi_empirical[j * n_source_groups_ + g] *
-          adjoint_source_grouped_[j * n_source_groups_ + g];
-      }
-    }
-
-    // Step b: apply the transpose of M_norm.
     std::fill(I_new.begin(), I_new.end(), 0.0);
     for (const auto& [key, F_sj] : normalized_matrix) {
-      size_t source_state = key / n_cells;
-      size_t j = key % n_cells;
-      I_new[source_state] += F_sj * response_importance[j] * inv_keff;
+      size_t source_state = key / n_states;
+      size_t child_state = key % n_states;
+      I_new[source_state] +=
+        F_sj * adjoint_source_grouped_[child_state] * inv_keff;
     }
 
     double sum_new = std::accumulate(I_new.begin(), I_new.end(), 0.0);
@@ -520,12 +464,13 @@ void FissionMatrix::finalize(const std::string& filename)
   size_t n_source_states = n_cells * static_cast<size_t>(n_source_groups_);
   size_t sparse_elements = fission_matrix_sparse_.size();
   std::cout << "\nFission Matrix: " << sparse_elements << " non-zero elements ("
-            << n_source_states << "×" << n_cells
-            << " source_state×fission_cell grid) -> " << filename << std::endl;
+            << n_source_states << "x" << n_source_states
+            << " parent_source_state x child_source_state grid) -> "
+            << filename << std::endl;
   std::unordered_map<size_t, double> normalized_sparse;
 
   for (const auto& [key, value] : fission_matrix_sparse_) {
-    size_t source_state = key / n_cells;
+    size_t source_state = key / n_source_states;
     double source_total = source_counts_[source_state];
     if (source_total > 0.0) {
       normalized_sparse[key] = value / source_total;
@@ -537,7 +482,7 @@ void FissionMatrix::finalize(const std::string& filename)
 
   // 写入文件属性
   write_attribute(file_id, "filetype", "fission_matrix_sparse");
-  write_attribute(file_id, "version", "3.0"); // 新版本：源状态扩展
+  write_attribute(file_id, "version", "4.0");
   write_attribute(file_id, "storage_format", "COO");
   write_attribute(file_id, "pitch", grid_->pitch());
   write_attribute(file_id, "n_realizations", n_realizations_);
@@ -547,9 +492,11 @@ void FissionMatrix::finalize(const std::string& filename)
     file_id, "total_sources", static_cast<int64_t>(total_sources_.load()));
   write_attribute(file_id, "n_cells", static_cast<int>(n_cells));
   write_attribute(file_id, "nnz", static_cast<int64_t>(sparse_elements));
-  // 行维度 = n_source_states；列维度 = n_cells
+  // Both COO axes use source_state = cell * n_source_groups + g_source.
   write_attribute(file_id, "row_dim", static_cast<int>(n_source_states));
-  write_attribute(file_id, "col_dim", static_cast<int>(n_cells));
+  write_attribute(file_id, "col_dim", static_cast<int>(n_source_states));
+  write_attribute(file_id, "matrix_semantics",
+    "row=parent_source_state, col=child_source_state");
 
   // 写入网格信息
   write_dataset(file_id, "origin", grid_->origin());
@@ -561,7 +508,7 @@ void FissionMatrix::finalize(const std::string& filename)
   write_dataset(file_id, "grid_upper_right", grid_->upper_bound());
   write_dataset(file_id, "grid_pitch", grid_pitch);
 
-  // 准备稀疏矩阵的COO格式数据: (row=source_state, col=fission_cell, value)
+  // COO data: row=parent source_state, col=sampled child source_state.
   vector<int> rows;
   vector<int> cols;
   vector<double> values_raw;
@@ -573,8 +520,8 @@ void FissionMatrix::finalize(const std::string& filename)
   values_normalized.reserve(sparse_elements);
 
   for (const auto& [key, value] : fission_matrix_sparse_) {
-    size_t source_state = key / n_cells;
-    size_t col = key % n_cells;
+    size_t source_state = key / n_source_states;
+    size_t col = key % n_source_states;
     rows.push_back(static_cast<int>(source_state));
     cols.push_back(static_cast<int>(col));
     values_raw.push_back(value);

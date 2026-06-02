@@ -108,13 +108,16 @@ void GreenFunctionMesh::record_source_birth(
   int source_state = i_source_cell * n_groups_ + g_source;
 
   // 记录源粒子到源状态的映射
+  std::lock_guard<std::mutex> lock(data_mutex_);
   particle_to_source_state_[source_particle_id] = source_state;
 
   // 增加该源单元的计数（仍然按 cell 计数，用于 source_counts_ 输出）
-  source_counts_[i_source_cell]++;
-  if (source_state >= 0 &&
-      source_state < static_cast<int>(source_state_counts_.size())) {
-    source_state_counts_[source_state]++;
+  if (counted_source_particles_.insert(source_particle_id).second) {
+    source_counts_[i_source_cell]++;
+    if (source_state >= 0 &&
+        source_state < static_cast<int>(source_state_counts_.size())) {
+      source_state_counts_[source_state]++;
+    }
   }
 }
 
@@ -136,6 +139,7 @@ void GreenFunctionMesh::accumulate(const Position& r, double contribution,
   }
 
   // 查找源状态 (source_state = source_cell * n_source_groups + g_source)
+  std::lock_guard<std::mutex> lock(data_mutex_);
   auto it = particle_to_source_state_.find(source_particle_id);
   if (it == particle_to_source_state_.end()) {
     // 这个粒子没有记录源位置，忽略
@@ -143,6 +147,17 @@ void GreenFunctionMesh::accumulate(const Position& r, double contribution,
   }
 
   int i_source = it->second; // source_state
+  if (counted_source_particles_.insert(source_particle_id).second) {
+    int i_source_cell = i_source / n_groups_;
+    if (i_source_cell >= 0 &&
+        i_source_cell < static_cast<int>(source_counts_.size())) {
+      source_counts_[i_source_cell]++;
+    }
+    if (i_source >= 0 &&
+        i_source < static_cast<int>(source_state_counts_.size())) {
+      source_state_counts_[i_source]++;
+    }
+  }
 
   // 计算响应位置的单元索引
   int j_response = position_to_cell_index(r);
@@ -165,8 +180,6 @@ void GreenFunctionMesh::accumulate(const Position& r, double contribution,
 
   // 稀疏存储：只在有贡献时才创建条目
   {
-    std::lock_guard<std::mutex> lock(data_mutex_);
-
     auto& response_map = current_batch_transfer_data_sparse_[i_source];
     auto& group_vector = response_map[j_response];
     if (group_vector.empty()) {
@@ -207,6 +220,7 @@ void GreenFunctionMesh::start_new_batch(int batch_id)
   current_batch_transfer_data_sparse_.clear();
   // 清空源粒子→源状态映射，避免内存持续增长
   particle_to_source_state_.clear();
+  counted_source_particles_.clear();
 }
 
 const vector<double>& GreenFunctionMesh::get_source_cell_data(
@@ -447,6 +461,7 @@ void GreenFunctionMesh::finalize_greenfunction_mesh(
   source_counts_.clear();
   source_state_counts_.clear();
   particle_to_source_state_.clear();
+  counted_source_particles_.clear();
 }
 
 std::vector<double> GreenFunctionMesh::make_zero_group_vector() const

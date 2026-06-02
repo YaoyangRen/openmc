@@ -178,12 +178,6 @@ void create_fission_sites(Particle& p, int i_nuclide, const Reaction& rx)
                 p.neutron_xs(i_nuclide).nu_fission /
                 p.neutron_xs(i_nuclide).total;
 
-  // 记录裂变事件到裂变矩阵
-  if (simulation::fission_matrix && p.source_particle_id() != -1) {
-    simulation::fission_matrix->record_fission_event(
-      p.r(), nu_t, p.source_particle_id());
-  }
-
   // Sample the number of neutrons produced
   int nu = static_cast<int>(nu_t);
   if (prn(p.current_seed()) <= (nu_t - nu))
@@ -251,12 +245,22 @@ void create_fission_sites(Particle& p, int i_nuclide, const Reaction& rx)
       if (settings::ifp_on) {
         ifp(p, site, idx);
       }
+      if (simulation::fission_matrix && p.source_particle_id() != -1 &&
+          simulation::current_batch <= settings::n_inactive) {
+        simulation::fission_matrix->record_fission_site(
+          site.r, site.wgt, p.source_particle_id(), site.E, -1);
+      }
       // CLUTCH TEST
       if (settings::clutch_on) {
         CLUTCH_TEST();
       }
     } else {
       p.secondary_bank().push_back(site);
+      if (simulation::fission_matrix && p.source_particle_id() != -1 &&
+          simulation::current_batch <= settings::n_inactive) {
+        simulation::fission_matrix->record_fission_site(
+          site.r, site.wgt, p.source_particle_id(), site.E, -1);
+      }
     }
 
     // Set the delayed group on the particle as well
