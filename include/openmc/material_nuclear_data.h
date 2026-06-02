@@ -2,6 +2,7 @@
 #define OPENMC_MATERIAL_NUCLEAR_DATA_H
 
 #include <array>
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -11,6 +12,23 @@ namespace openmc {
 //! 常量定义
 //==============================================================================
 constexpr int N_DELAYED_GROUPS = 8; //!< 缓发中子群数（与 ENDF 一致）
+
+inline size_t prompt_source_offset(
+  int n_energy_groups, int incident_group, int birth_group)
+{
+  return static_cast<size_t>(incident_group) *
+           static_cast<size_t>(n_energy_groups) +
+         static_cast<size_t>(birth_group);
+}
+
+inline size_t delayed_source_offset(int n_energy_groups, int incident_group,
+  int delayed_group, int birth_group)
+{
+  return (static_cast<size_t>(incident_group) * N_DELAYED_GROUPS +
+           static_cast<size_t>(delayed_group)) *
+           static_cast<size_t>(n_energy_groups) +
+         static_cast<size_t>(birth_group);
+}
 
 //==============================================================================
 //! 材料核数据结构
@@ -33,10 +51,17 @@ struct MaterialNuclearData {
   std::vector<double> chi_prompt_groups;  //!< χ_prompt,g
   std::vector<double> chi_delayed_groups; //!< χ_delayed,g,i (flat)
 
+  std::vector<double> prompt_prod_groups;  //!< P_prompt(g_in,g_birth)
+  std::vector<double> delayed_prod_groups; //!< P_delayed(g_in,d,g_birth)
+  double fissionable_volume_fraction {1.0};
+
   int material_id {-1};        //!< 材料ID
   std::string material_name;   //!< 材料名称
   bool is_fissionable {false}; //!< 是否可裂变
 };
+
+void derive_diagnostic_nuclear_data_from_source_terms(MaterialNuclearData& data,
+  int n_energy_groups, const std::vector<double>& collapse_weights = {});
 
 //==============================================================================
 //! 核素级核数据结构（用于中间计算）
@@ -107,6 +132,10 @@ public:
     std::vector<double>& chi_prompt_groups,
     std::vector<double>& chi_delayed_groups) const;
 
+  bool compute_fission_source_terms(int material_id,
+    std::vector<double>& prompt_prod_groups,
+    std::vector<double>& delayed_prod_groups) const;
+
   //! 根据能量返回所属能群索引
   int group_index_from_energy(double energy_eV) const;
 
@@ -129,6 +158,14 @@ private:
     double macro_sigma_f, std::vector<double>& chi_prompt_acc,
     std::vector<double>& chi_delayed_acc, bool& prompt_sampled,
     std::array<bool, 8>& delayed_sampled) const;
+
+  bool sample_nuclide_spectrum_matrices(int nuc_idx, int material_id,
+    std::vector<double>& chi_prompt_matrix,
+    std::vector<double>& chi_delayed_matrix,
+    std::vector<bool>& prompt_sampled,
+    std::vector<std::array<bool, 8>>& delayed_sampled) const;
+
+  double representative_incident_energy(int energy_group) const;
 
   //! 通量加权平均（将群值折合为标量）
   double flux_weighted_average(const std::vector<double>& per_group,

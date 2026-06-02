@@ -37,12 +37,11 @@ enum class WeightingMode {
 //!
 //! Current main path uses fission neutron birth-energy source importance:
 //!
-//! D = sum_c dV sum_gin sum_gb phi_gin Sigma_f,gin
-//!     [nu_p,gin chi_p,gb I*(c,gb)
-//!      + sum_k nu_d,k,gin chi_d,k,gb I*(c,gb)]
-//! W_t(c,gin) is the bracketed birth-spectrum-folded total source importance.
-//! N_k = sum_c dV sum_gin phi_gin Sigma_f,gin
-//!       (nu_d,k,gin / nu_t,gin) W_t(c,gin)
+//! D = sum_c dV sum_gin sum_gb phi(c,gin) I*(c,gb)
+//!     [P_prompt(c,gin,gb) + sum_k P_delayed(c,gin,k,gb)]
+//! N_k = sum_c dV sum_gin f_k(c,gin) sum_gb phi(c,gin) I*(c,gb)
+//!     [P_prompt(c,gin,gb) + sum_j P_delayed(c,gin,j,gb)]
+//! where f_k is computed from the strict delayed production matrix.
 //!
 //! I*(c,gb) is read from fission_matrix.h5/adjoint_source_grouped. The
 //! response-collision-energy Method E path is retained as method comparison.
@@ -91,7 +90,7 @@ private:
   double compute_denominator_birth_spectrum(
     const std::unordered_map<int, double>& flux, double volume);
 
-  //! Main numerator: total birth-source importance apportioned by nu_d,k/nu_t
+  //! Main numerator: delayed-k source production folded with I*(cell,g_birth)
   double compute_delayed_numerator_birth_spectrum(int group,
     const std::unordered_map<int, double>& flux, double volume);
 

@@ -353,8 +353,8 @@ void BetaEffective::compute_from_files(const std::string& flux_file,
             << mcnp_beta_total << "      " << std::fixed << std::setprecision(2)
             << std::setw(7) << err_e_total << std::endl;
   std::cout << "  " << std::string(90, '-') << std::endl;
-  std::cout << "  (*) 主方法: 使用 fission_matrix.h5 的 I*(cell,g_birth) "
-               "折叠总出生源重要性，再按 nu_d,k/nu_t 分配 delayed 组。"
+  std::cout << "  (*) 主方法: 使用严格 P_prompt/P_delayed 源项矩阵，"
+               "I*(cell,g_birth) 折叠总出生源，再按严格迟发源项份额分组。"
             << std::endl;
 
   // 7. 输出结果到文件
@@ -857,7 +857,7 @@ void BetaEffective::write_to_file(const std::string& filename) const
 
   // 额外的元数据
   std::string nuclear_data_source =
-    "Phase 3 - Dynamic extraction from OpenMC library";
+    "Strict source-production matrices extracted from OpenMC nuclear data";
   write_attribute(metadata_group, "nuclear_data_source", nuclear_data_source);
   write_attribute(metadata_group, "energy_groups", n_energy_groups_);
   if (!energy_edges_common_.empty()) {
@@ -867,13 +867,12 @@ void BetaEffective::write_to_file(const std::string& filename) const
   write_attribute(
     metadata_group, "method", "birth_spectrum_source_importance");
   write_attribute(metadata_group, "beta_eff_formula",
-    "D=sum_c dV sum_gin sum_gb phi_gin Sigma_f,gin "
-    "[nu_p,gin chi_p,gb I*(c,gb) + sum_k nu_d,k,gin chi_d,k,gb I*(c,gb)]; "
-    "N_k=sum_c dV sum_gin phi_gin Sigma_f,gin "
-    "(nu_d,k,gin/nu_t,gin) W_t(c,gin), where W_t is the bracketed "
-    "birth-spectrum-folded total source importance");
+    "D=sum_c dV sum_gin sum_gb phi(c,gin) I*(c,gb) "
+    "[P_prompt(c,gin,gb)+sum_k P_delayed(c,gin,k,gb)]; "
+    "N_k=sum_c dV sum_gin f_k(c,gin) sum_gb phi(c,gin) I*(c,gb) "
+    "[P_prompt(c,gin,gb)+sum_j P_delayed(c,gin,j,gb)]");
   write_attribute(metadata_group, "delayed_fraction_location",
-    "yield_fraction_after_birth_importance_folding");
+    "strict_source_matrix_fraction_after_total_source_folding");
   write_attribute(metadata_group, "importance_quantity",
     "fission-matrix source-state importance I*(cell,g_birth)");
   write_attribute(
@@ -884,10 +883,10 @@ void BetaEffective::write_to_file(const std::string& filename) const
     "fission neutron birth energy group for I*(cell,g_birth)");
   write_attribute(metadata_group, "chi_birth_spectrum_used", true);
   write_attribute(metadata_group, "chi_energy_dependence",
-    "material chi spectra collapsed/sampled by MaterialNuclearDataExtractor");
+    "incident-group to birth-group source production matrices");
   write_attribute(
     metadata_group, "delayed_yield_location",
-    "yield_fraction_after_birth_importance_folding");
+    "strict_source_matrix_fraction_after_total_source_folding");
   write_attribute(metadata_group,
     "delayed_chi_separate_importance_weight_used", false);
   write_attribute(metadata_group, "batchwise_ratio_uncertainty", false);
@@ -971,6 +970,8 @@ void BetaEffective::write_to_file(const std::string& filename) const
   std::vector<int> material_ids;
   std::vector<double> material_nu_total;
   std::vector<double> material_sigma_f;
+  std::vector<double> material_prompt_source_total;
+  std::vector<double> material_delayed_source_total;
   std::vector<int> material_cell_counts; // Phase 2.2: 每个材料的单元数
 
   // 统计材料分布
@@ -983,6 +984,12 @@ void BetaEffective::write_to_file(const std::string& filename) const
     material_ids.push_back(mat_data.material_id);
     material_nu_total.push_back(mat_data.nu_total);
     material_sigma_f.push_back(mat_data.sigma_f);
+    material_prompt_source_total.push_back(std::accumulate(
+      mat_data.prompt_prod_groups.begin(), mat_data.prompt_prod_groups.end(),
+      0.0));
+    material_delayed_source_total.push_back(std::accumulate(
+      mat_data.delayed_prod_groups.begin(), mat_data.delayed_prod_groups.end(),
+      0.0));
     material_cell_counts.push_back(mat_counts[mat_data.material_id]);
   }
 
@@ -990,6 +997,10 @@ void BetaEffective::write_to_file(const std::string& filename) const
     write_dataset(diag_group, "material_ids", material_ids);
     write_dataset(diag_group, "material_nu_total", material_nu_total);
     write_dataset(diag_group, "material_sigma_f", material_sigma_f);
+    write_dataset(
+      diag_group, "material_prompt_source_total", material_prompt_source_total);
+    write_dataset(diag_group, "material_delayed_source_total",
+      material_delayed_source_total);
     write_dataset(diag_group, "material_cell_counts", material_cell_counts);
     write_attribute(
       diag_group, "n_unique_materials", static_cast<int>(material_ids.size()));
@@ -1021,8 +1032,8 @@ void BetaEffective::write_to_file(const std::string& filename) const
     std::vector<double> den = {result_birth_spectrum_.denominator};
     write_dataset(grp, "denominator", den);
     write_attribute(grp, "formula",
-      "D=sum phi Sigma_f W_t; N_k=sum phi Sigma_f "
-      "(nu_d,k/nu_t) W_t; W_t folds prompt and delayed birth spectra with I*");
+      "D=sum phi I* [P_prompt+sum_k P_delayed,k]; "
+      "N_k=sum f_k phi I* [P_prompt+sum_j P_delayed,j]");
     write_attribute(grp, "uses_birth_spectrum_chi", true);
     write_attribute(grp, "delayed_chi_separate_importance_weight_used", false);
     write_attribute(grp, "importance_group_meaning", "birth energy group");
@@ -1047,7 +1058,8 @@ void BetaEffective::write_to_file(const std::string& filename) const
     std::vector<double> den = {result_e_.denominator};
     write_dataset(grp, "denominator", den);
     write_attribute(grp, "formula",
-      "family-group Method E; delayed families already include nu_d,k/nu_t");
+      "family-group Method E using total strict source production summed over "
+      "birth energy; delayed families already include delayed weighting");
     write_attribute(grp, "uses_birth_spectrum_chi", false);
     write_attribute(grp, "delayed_yield_reapplied", false);
     H5Gclose(grp);
@@ -1111,25 +1123,21 @@ double BetaEffective::compute_denominator_birth_spectrum(
       fatal_error("Missing group-resolved forward flux for fissionable cell " +
                   std::to_string(cell_idx) + ".");
     }
-    if (nuc_data.sigma_f_groups.size() !=
-          static_cast<size_t>(n_energy_groups_) ||
-        nuc_data.nu_prompt_groups.size() !=
-          static_cast<size_t>(n_energy_groups_) ||
-        nuc_data.nu_delayed_groups.size() !=
-          static_cast<size_t>(n_energy_groups_ * N_DELAYED_GROUPS) ||
-        nuc_data.chi_prompt_groups.size() !=
-          static_cast<size_t>(n_energy_groups_) ||
-        nuc_data.chi_delayed_groups.size() !=
-          static_cast<size_t>(n_energy_groups_ * N_DELAYED_GROUPS)) {
-      fatal_error("Missing group-resolved birth-spectrum nuclear data for "
+    if (nuc_data.prompt_prod_groups.size() !=
+          static_cast<size_t>(n_energy_groups_) *
+            static_cast<size_t>(n_energy_groups_) ||
+        nuc_data.delayed_prod_groups.size() !=
+          static_cast<size_t>(n_energy_groups_) * N_DELAYED_GROUPS *
+            static_cast<size_t>(n_energy_groups_)) {
+      fatal_error("Missing strict fission source matrices for "
                   "fissionable cell " +
                   std::to_string(cell_idx) + ".");
     }
 
     const auto& fg = it_flux_groups->second;
     for (int g_in = 0; g_in < n_energy_groups_; ++g_in) {
-      const double fission_rate = nuc_data.sigma_f_groups[g_in] * fg[g_in];
-      if (fission_rate == 0.0)
+      const double phi = fg[g_in];
+      if (phi == 0.0)
         continue;
 
       for (int g_birth = 0; g_birth < n_energy_groups_; ++g_birth) {
@@ -1139,16 +1147,14 @@ double BetaEffective::compute_denominator_birth_spectrum(
         if (I_birth <= 0.0)
           continue;
 
-        double source_weight =
-          nuc_data.nu_prompt_groups[g_in] *
-          nuc_data.chi_prompt_groups[g_birth];
+        double source_prod = nuc_data.prompt_prod_groups[prompt_source_offset(
+          n_energy_groups_, g_in, g_birth)];
         for (int d = 0; d < N_DELAYED_GROUPS; ++d) {
-          source_weight +=
-            nuc_data.nu_delayed_groups[delayed_offset(g_in, d)] *
-            nuc_data.chi_delayed_groups[delayed_offset(g_birth, d)];
+          source_prod += nuc_data.delayed_prod_groups[delayed_source_offset(
+            n_energy_groups_, g_in, d, g_birth)];
         }
 
-        const double term = volume * fission_rate * source_weight * I_birth;
+        const double term = volume * phi * source_prod * I_birth;
         if (term != 0.0) {
           terms.push_back(term);
           add_birth_group_term(g_birth, term);
@@ -1220,32 +1226,43 @@ double BetaEffective::compute_delayed_numerator_birth_spectrum(
       fatal_error("Missing group-resolved forward flux for fissionable cell " +
                   std::to_string(cell_idx) + ".");
     }
-    if (nuc_data.sigma_f_groups.size() !=
-          static_cast<size_t>(n_energy_groups_) ||
-        nuc_data.nu_total_groups.size() !=
-          static_cast<size_t>(n_energy_groups_) ||
-        nuc_data.nu_prompt_groups.size() !=
-          static_cast<size_t>(n_energy_groups_) ||
-        nuc_data.nu_delayed_groups.size() !=
-          static_cast<size_t>(n_energy_groups_ * N_DELAYED_GROUPS) ||
-        nuc_data.chi_prompt_groups.size() !=
-          static_cast<size_t>(n_energy_groups_) ||
-        nuc_data.chi_delayed_groups.size() !=
-          static_cast<size_t>(n_energy_groups_ * N_DELAYED_GROUPS)) {
-      fatal_error("Missing group-resolved birth-spectrum nuclear data for "
+    if (nuc_data.prompt_prod_groups.size() !=
+          static_cast<size_t>(n_energy_groups_) *
+            static_cast<size_t>(n_energy_groups_) ||
+        nuc_data.delayed_prod_groups.size() !=
+          static_cast<size_t>(n_energy_groups_) * N_DELAYED_GROUPS *
+            static_cast<size_t>(n_energy_groups_)) {
+      fatal_error("Missing strict fission source matrices for "
                   "fissionable cell " +
                   std::to_string(cell_idx) + ".");
     }
 
     const auto& fg = it_flux_groups->second;
     for (int g_in = 0; g_in < n_energy_groups_; ++g_in) {
-      const double fission_rate = nuc_data.sigma_f_groups[g_in] * fg[g_in];
-      const double nu_delayed =
-        nuc_data.nu_delayed_groups[delayed_offset(g_in, group)];
-      const double nu_total = nuc_data.nu_total_groups[g_in];
-      if (fission_rate == 0.0 || nu_delayed == 0.0 || nu_total <= 0.0)
+      const double phi = fg[g_in];
+      if (phi == 0.0)
         continue;
-      const double delayed_fraction = nu_delayed / nu_total;
+
+      double total_unfolded_source = 0.0;
+      double delayed_unfolded_source = 0.0;
+      for (int g_birth = 0; g_birth < n_energy_groups_; ++g_birth) {
+        total_unfolded_source += nuc_data.prompt_prod_groups
+          [prompt_source_offset(n_energy_groups_, g_in, g_birth)];
+        for (int d = 0; d < N_DELAYED_GROUPS; ++d) {
+          const double delayed_source =
+            nuc_data.delayed_prod_groups[delayed_source_offset(
+              n_energy_groups_, g_in, d, g_birth)];
+          total_unfolded_source += delayed_source;
+          if (d == group) {
+            delayed_unfolded_source += delayed_source;
+          }
+        }
+      }
+      if (total_unfolded_source <= 0.0 || delayed_unfolded_source <= 0.0)
+        continue;
+
+      const double delayed_fraction =
+        delayed_unfolded_source / total_unfolded_source;
 
       for (int g_birth = 0; g_birth < n_energy_groups_; ++g_birth) {
         const size_t imp_index =
@@ -1254,16 +1271,14 @@ double BetaEffective::compute_delayed_numerator_birth_spectrum(
         if (I_birth <= 0.0)
           continue;
 
-        double source_weight =
-          nuc_data.nu_prompt_groups[g_in] *
-          nuc_data.chi_prompt_groups[g_birth];
+        double total_source = nuc_data.prompt_prod_groups[prompt_source_offset(
+          n_energy_groups_, g_in, g_birth)];
         for (int d = 0; d < N_DELAYED_GROUPS; ++d) {
-          source_weight +=
-            nuc_data.nu_delayed_groups[delayed_offset(g_in, d)] *
-            nuc_data.chi_delayed_groups[delayed_offset(g_birth, d)];
+          total_source += nuc_data.delayed_prod_groups[delayed_source_offset(
+            n_energy_groups_, g_in, d, g_birth)];
         }
         const double term =
-          volume * fission_rate * delayed_fraction * source_weight * I_birth;
+          volume * phi * delayed_fraction * total_source * I_birth;
         if (term != 0.0) {
           terms.push_back(term);
           add_birth_group_term(g_birth, term);
@@ -1310,11 +1325,13 @@ double BetaEffective::compute_denominator_upstream_family(
       fatal_error("Missing group-resolved forward flux for fissionable cell " +
                   std::to_string(cell_idx) + ".");
     }
-    if (nuc_data.sigma_f_groups.size() !=
-          static_cast<size_t>(n_energy_groups_) ||
-        nuc_data.nu_total_groups.size() !=
-          static_cast<size_t>(n_energy_groups_)) {
-      fatal_error("Missing group-resolved nuclear data for fissionable cell " +
+    if (nuc_data.prompt_prod_groups.size() !=
+          static_cast<size_t>(n_energy_groups_) *
+            static_cast<size_t>(n_energy_groups_) ||
+        nuc_data.delayed_prod_groups.size() !=
+          static_cast<size_t>(n_energy_groups_) * N_DELAYED_GROUPS *
+            static_cast<size_t>(n_energy_groups_)) {
+      fatal_error("Missing strict fission source matrices for fissionable cell " +
                   std::to_string(cell_idx) + ".");
     }
 
@@ -1348,8 +1365,16 @@ double BetaEffective::compute_denominator_upstream_family(
       if (I_total <= 0.0)
         continue;
 
-      double F_total_g =
-        nuc_data.nu_total_groups[g] * nuc_data.sigma_f_groups[g] * fg[g];
+      double total_prod = 0.0;
+      for (int g_birth = 0; g_birth < n_energy_groups_; ++g_birth) {
+        total_prod += nuc_data.prompt_prod_groups[prompt_source_offset(
+          n_energy_groups_, g, g_birth)];
+        for (int d = 0; d < N_DELAYED_GROUPS; ++d) {
+          total_prod += nuc_data.delayed_prod_groups[delayed_source_offset(
+            n_energy_groups_, g, d, g_birth)];
+        }
+      }
+      double F_total_g = total_prod * fg[g];
       double term = volume * I_total * F_total_g;
       if (term != 0.0) {
         terms.push_back(term);
@@ -1408,11 +1433,13 @@ double BetaEffective::compute_delayed_numerator_upstream_family(
       fatal_error("Missing group-resolved forward flux for fissionable cell " +
                   std::to_string(cell_idx) + ".");
     }
-    if (nuc_data.sigma_f_groups.size() !=
-          static_cast<size_t>(n_energy_groups_) ||
-        nuc_data.nu_total_groups.size() !=
-          static_cast<size_t>(n_energy_groups_)) {
-      fatal_error("Missing group-resolved nuclear data for fissionable cell " +
+    if (nuc_data.prompt_prod_groups.size() !=
+          static_cast<size_t>(n_energy_groups_) *
+            static_cast<size_t>(n_energy_groups_) ||
+        nuc_data.delayed_prod_groups.size() !=
+          static_cast<size_t>(n_energy_groups_) * N_DELAYED_GROUPS *
+            static_cast<size_t>(n_energy_groups_)) {
+      fatal_error("Missing strict fission source matrices for fissionable cell " +
                   std::to_string(cell_idx) + ".");
     }
 
@@ -1421,8 +1448,16 @@ double BetaEffective::compute_delayed_numerator_upstream_family(
     for (int g = 0; g < n_energy_groups_; ++g) {
       if (I_delayed_k[g] <= 0.0)
         continue;
-      double F_total_g =
-        nuc_data.nu_total_groups[g] * nuc_data.sigma_f_groups[g] * fg[g];
+      double total_prod = 0.0;
+      for (int g_birth = 0; g_birth < n_energy_groups_; ++g_birth) {
+        total_prod += nuc_data.prompt_prod_groups[prompt_source_offset(
+          n_energy_groups_, g, g_birth)];
+        for (int d = 0; d < N_DELAYED_GROUPS; ++d) {
+          total_prod += nuc_data.delayed_prod_groups[delayed_source_offset(
+            n_energy_groups_, g, d, g_birth)];
+        }
+      }
+      double F_total_g = total_prod * fg[g];
       double term = volume * I_delayed_k[g] * F_total_g;
       if (term != 0.0) {
         terms.push_back(term);
@@ -1509,6 +1544,7 @@ void BetaEffective::build_cell_material_map(
     int void_count = 0;
     int geometry_failed_count = 0;
     int heterogeneous_count = 0;
+    int diluted_count = 0;
   };
 
   std::vector<ThreadLocalData> thread_data;
@@ -1631,10 +1667,14 @@ void BetaEffective::build_cell_material_map(
       if (is_heterogeneous) {
         local_data.heterogeneous_count++;
       }
+      bool has_non_fissionable_dilution = (fissionable_hits < n_sample_points_);
+      if (has_non_fissionable_dilution) {
+        local_data.diluted_count++;
+      }
 
       MaterialNuclearData cell_data;
 
-      if (material_counts.size() == 1) {
+      if (material_counts.size() == 1 && !has_non_fissionable_dilution) {
         // 同质单元: 直接从全局缓存获取材料数据（线程安全，只读）
         int mat_id = material_counts.begin()->first;
         auto it = global_material_cache.find(mat_id);
@@ -1643,10 +1683,12 @@ void BetaEffective::build_cell_material_map(
         }
         local_data.cell_to_material[cell_idx] = mat_id;
       } else {
-        // 异质单元: 使用全局缓存计算加权核数据（线程安全，只读）
+        // Mixed or diluted cell: use total sample count as the volume
+        // denominator so moderator/void fractions reduce the source strength.
         cell_data = compute_weighted_nuclear_data(
-          material_counts, fissionable_hits, global_material_cache);
-        local_data.cell_to_material[cell_idx] = -1; // 标记为多材料
+          material_counts, n_sample_points_, global_material_cache);
+        local_data.cell_to_material[cell_idx] =
+          (material_counts.size() == 1) ? material_counts.begin()->first : -1;
       }
 
       local_data.cell_nuclear_data[cell_idx] = cell_data;
@@ -1665,6 +1707,7 @@ void BetaEffective::build_cell_material_map(
   int non_fissionable_count = 0;
   int void_count = 0;
   int geometry_failed_count = 0;
+  int diluted_count = 0;
 
   for (const auto& local : thread_data) {
     // 合并单元数据
@@ -1684,6 +1727,7 @@ void BetaEffective::build_cell_material_map(
     void_count += local.void_count;
     geometry_failed_count += local.geometry_failed_count;
     n_heterogeneous_cells_ += local.heterogeneous_count;
+    diluted_count += local.diluted_count;
   }
 
   // 构建唯一材料列表（使用全局缓存）
@@ -1696,7 +1740,8 @@ void BetaEffective::build_cell_material_map(
   int homogeneous_count = fissionable_count - n_heterogeneous_cells_;
   std::cout << "  几何划分结果: 裂变 " << fissionable_count << " (同质 "
             << homogeneous_count << ", 混合 " << n_heterogeneous_cells_
-            << "), 非裂变 " << non_fissionable_count << ", 空白 "
+            << ", 稀释 " << diluted_count << "), 非裂变 "
+            << non_fissionable_count << ", 空白 "
             << void_count << ", 失败 " << geometry_failed_count
             << ", 裂变材料种类 " << unique_materials_.size() << std::endl;
 
@@ -1707,12 +1752,26 @@ void BetaEffective::build_cell_material_map(
 
     std::cout << "  裂变材料样本命中:";
     int printed = 0;
+    const double total_sample_points =
+      static_cast<double>(flux_vec.size()) * n_sample_points_;
     for (const auto& [mat_id, count] : material_hits) {
       if (printed >= 8) {
         std::cout << " ...";
         break;
       }
-      std::cout << " id=" << mat_id << "(" << count << ")";
+      double source_sum = 0.0;
+      auto it_data = global_material_cache.find(mat_id);
+      if (it_data != global_material_cache.end()) {
+        source_sum += std::accumulate(it_data->second.prompt_prod_groups.begin(),
+          it_data->second.prompt_prod_groups.end(), 0.0);
+        source_sum += std::accumulate(it_data->second.delayed_prod_groups.begin(),
+          it_data->second.delayed_prod_groups.end(), 0.0);
+      }
+      const double volume_fraction =
+        total_sample_points > 0.0 ? count / total_sample_points : 0.0;
+      std::cout << " id=" << mat_id << "(hits=" << count
+                << ", vf=" << std::setprecision(4) << volume_fraction
+                << ", P~=" << source_sum * volume_fraction << ")";
       ++printed;
     }
     std::cout << std::endl;
@@ -1835,6 +1894,11 @@ MaterialNuclearData BetaEffective::compute_weighted_nuclear_data(
 
   const int n_groups = std::max(1, n_energy_groups_);
   const size_t delayed_size = static_cast<size_t>(n_groups) * N_DELAYED_GROUPS;
+  const size_t source_prompt_size =
+    static_cast<size_t>(n_groups) * static_cast<size_t>(n_groups);
+  const size_t source_delayed_size = static_cast<size_t>(n_groups) *
+                                     N_DELAYED_GROUPS *
+                                     static_cast<size_t>(n_groups);
 
   std::vector<double> accum_sigma_groups(n_groups, 0.0);
   std::vector<double> accum_nu_total_groups(n_groups, 0.0);
@@ -1842,6 +1906,20 @@ MaterialNuclearData BetaEffective::compute_weighted_nuclear_data(
   std::vector<double> accum_nu_delayed_groups(delayed_size, 0.0);
   std::vector<double> accum_chi_prompt(n_groups, 0.0);
   std::vector<double> accum_chi_delayed(delayed_size, 0.0);
+  std::vector<double> strict_sigma_groups(n_groups, 0.0);
+  std::vector<double> strict_prompt_prod(source_prompt_size, 0.0);
+  std::vector<double> strict_delayed_prod(source_delayed_size, 0.0);
+  double strict_sigma_f = 0.0;
+  int fissionable_samples = 0;
+  for (const auto& [mat_id, count] : material_counts) {
+    (void)mat_id;
+    fissionable_samples += count;
+  }
+  if (total_samples <= 0) {
+    fatal_error("Cannot mix material nuclear data with zero sample count.");
+  }
+  weighted_data.fissionable_volume_fraction =
+    static_cast<double>(fissionable_samples) / static_cast<double>(total_samples);
 
   auto group_value = [&](const std::vector<double>& values, double fallback,
                        int g) {
@@ -1884,6 +1962,27 @@ MaterialNuclearData BetaEffective::compute_weighted_nuclear_data(
     }
   };
 
+  auto accumulate_strict_source = [&](const MaterialNuclearData& mat_data,
+                                    double fraction) {
+    if (mat_data.prompt_prod_groups.size() != source_prompt_size ||
+        mat_data.delayed_prod_groups.size() != source_delayed_size) {
+      fatal_error("Material " + std::to_string(mat_data.material_id) +
+                  " is missing strict fission source matrices.");
+    }
+
+    strict_sigma_f += fraction * mat_data.sigma_f;
+    for (int g = 0; g < n_groups; ++g) {
+      strict_sigma_groups[g] +=
+        fraction * group_value(mat_data.sigma_f_groups, mat_data.sigma_f, g);
+    }
+    for (size_t i = 0; i < source_prompt_size; ++i) {
+      strict_prompt_prod[i] += fraction * mat_data.prompt_prod_groups[i];
+    }
+    for (size_t i = 0; i < source_delayed_size; ++i) {
+      strict_delayed_prod[i] += fraction * mat_data.delayed_prod_groups[i];
+    }
+  };
+
   auto normalize_distribution = [](std::vector<double>& dist) {
     if (dist.empty())
       return;
@@ -1905,9 +2004,12 @@ MaterialNuclearData BetaEffective::compute_weighted_nuclear_data(
 
       // 从缓存获取材料核数据（线程安全）
       auto it = material_cache.find(mat_id);
-      if (it == material_cache.end())
-        continue;
+      if (it == material_cache.end()) {
+        fatal_error("Missing nuclear data cache for fissionable material " +
+                    std::to_string(mat_id) + ".");
+      }
       const MaterialNuclearData& mat_data = it->second;
+      accumulate_strict_source(mat_data, fraction);
 
       // 简单加权平均
       weighted_data.nu_total += fraction * mat_data.nu_total;
@@ -1933,9 +2035,12 @@ MaterialNuclearData BetaEffective::compute_weighted_nuclear_data(
 
       // 从缓存获取材料核数据（线程安全）
       auto it = material_cache.find(mat_id);
-      if (it == material_cache.end())
-        continue;
+      if (it == material_cache.end()) {
+        fatal_error("Missing nuclear data cache for fissionable material " +
+                    std::to_string(mat_id) + ".");
+      }
       const MaterialNuclearData& mat_data = it->second;
+      accumulate_strict_source(mat_data, fraction);
 
       // 按裂变反应率加权: fraction × Σ_f
       double fission_contribution = fraction * mat_data.sigma_f;
@@ -2032,6 +2137,13 @@ MaterialNuclearData BetaEffective::compute_weighted_nuclear_data(
       }
     }
   }
+
+  weighted_data.sigma_f = strict_sigma_f;
+  weighted_data.sigma_f_groups = strict_sigma_groups;
+  weighted_data.prompt_prod_groups = strict_prompt_prod;
+  weighted_data.delayed_prod_groups = strict_delayed_prod;
+  derive_diagnostic_nuclear_data_from_source_terms(
+    weighted_data, n_groups, flux_collapse_weights_);
 
   return weighted_data;
 }
