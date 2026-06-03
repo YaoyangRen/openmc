@@ -799,6 +799,16 @@ void initialize_history(Particle& p, int64_t index_source)
         p.r(), p.source_particle_id(), -1.0, p.g(), p.wgt());
     }
   }
+  if (simulation::current_batch > settings::n_inactive) {
+    if (simulation::beta_effective_accumulator) {
+      simulation::beta_effective_accumulator->record_source_birth(
+        p.r(), p.source_particle_id());
+    }
+    if (simulation::clutch_sensitivity_accumulator) {
+      simulation::clutch_sensitivity_accumulator->record_source_birth(
+        p.r(), p.source_particle_id());
+    }
+  }
   // set progeny count to zero
   p.n_progeny() = 0;
 

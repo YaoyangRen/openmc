@@ -235,7 +235,8 @@ class Model:
         derivatives : openmc.TallyDerivative or iterable of openmc.TallyDerivative
             Material perturbation derivatives to score.
         method : {'hybrid', 'fclutch_fm', 'cclutch_history'}
-            CLUTCH sensitivity output method.
+            CLUTCH sensitivity output method. ``cclutch_history`` writes the
+            spatial transfer-function C-CLUTCH comparison method.
         output : path-like
             HDF5 output filename.
         kinetics_energy_edges : iterable of float, optional

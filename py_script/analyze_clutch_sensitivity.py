@@ -44,8 +44,7 @@ class MethodResult:
     batch_ids: np.ndarray
     batch_numerator: np.ndarray
     batch_denominator: np.ndarray
-    component_names: list[str] | None = None
-    component_numerator: np.ndarray | None = None
+    uses_transfer_function: bool = False
 
 
 def decode_value(value: Any) -> Any:
@@ -121,12 +120,6 @@ def read_method(group: h5py.Group, name: str, n_params: int) -> MethodResult:
         method, "batch_numerator", (batch_denominator.size, n_params)
     ).astype(float)
 
-    component_names = None
-    component_numerator = None
-    if "component_numerator" in method:
-        component_numerator = np.asarray(method["component_numerator"][...], dtype=float)
-        component_names = read_string_dataset(method, "component_names")
-
     return MethodResult(
         name=name,
         available=available,
@@ -138,8 +131,7 @@ def read_method(group: h5py.Group, name: str, n_params: int) -> MethodResult:
         batch_ids=batch_ids,
         batch_numerator=batch_numerator,
         batch_denominator=batch_denominator,
-        component_names=component_names,
-        component_numerator=component_numerator,
+        uses_transfer_function=bool(int(read_scalar_attr(method.attrs, "uses_transfer_function", 0))),
     )
 
 
@@ -166,6 +158,7 @@ def print_header(h5: h5py.File, path: Path) -> None:
         "primary_method",
         "method",
         "adjoint_source",
+        "cclutch_method",
     ):
         value = read_scalar_attr(h5.attrs, key)
         if value is not None:
@@ -184,6 +177,10 @@ def print_diagnostics(h5: h5py.File) -> None:
         "total_fission_sites",
         "total_scored_sites",
         "total_dropped_sites",
+        "total_cclutch_events",
+        "total_cclutch_scored_events",
+        "total_cclutch_dropped_events",
+        "total_cclutch_missing_source_events",
         "active_batches_scored",
     ):
         value = read_scalar_attr(diag.attrs, key)
@@ -210,7 +207,10 @@ def format_rel_unc(value: float, unc: float) -> str:
 
 
 def print_method_table(params: list[Parameter], method: MethodResult) -> None:
-    print(f"Method: {method.name}")
+    label = method.name
+    if method.name == "cclutch_history" and method.uses_transfer_function:
+        label += " (transfer-function C-CLUTCH)"
+    print(f"Method: {label}")
     print("-" * 120)
     print(
         f"{'id':>5} {'variable':>16} {'mat':>6} {'nuclide':>12} "
@@ -260,38 +260,13 @@ def print_batch_diagnostics(method: MethodResult) -> None:
     print()
 
 
-def print_component_breakdown(params: list[Parameter], method: MethodResult) -> None:
-    if method.component_numerator is None or method.component_names is None:
-        return
-
-    comp = method.component_numerator
-    print(f"Component breakdown: {method.name}")
-    print("-" * 120)
-    print(
-        f"{'id':>5} {'variable':>16} {'component':>16} "
-        f"{'numerator':>14} {'dlogk_part':>14} {'share_of_total':>16}"
-    )
-    print("-" * 120)
-    for p_index, param in enumerate(params):
-        total = method.numerator[p_index]
-        for c_index, name in enumerate(method.component_names):
-            value = comp[c_index, p_index]
-            dlogk_part = value / method.denominator if method.denominator != 0.0 else np.nan
-            share = value / total if total != 0.0 else np.nan
-            print(
-                f"{param.pid:5d} {param.variable:>16} {name:>16} "
-                f"{value:14.6e} {dlogk_part:14.6e} {share:16.6e}"
-            )
-    print()
-
-
 def print_method_comparison(params: list[Parameter], methods: dict[str, MethodResult]) -> None:
     if "fclutch_fm" not in methods or "cclutch_history" not in methods:
         return
 
     primary = methods["fclutch_fm"]
     diag = methods["cclutch_history"]
-    print("Method comparison: cclutch_history - fclutch_fm")
+    print("Method comparison: C-CLUTCH - F-CLUTCH")
     print("-" * 96)
     print(f"{'id':>5} {'variable':>16} {'delta_sens':>14} {'rel_delta':>14}")
     print("-" * 96)
@@ -377,13 +352,11 @@ def analyze(filename: Path, csv_path: Path | None = None, show_tree: bool = Fals
             if method_name in methods:
                 print_method_table(params, methods[method_name])
                 print_batch_diagnostics(methods[method_name])
-                print_component_breakdown(params, methods[method_name])
 
         for method_name, method in methods.items():
             if method_name not in {"fclutch_fm", "cclutch_history"}:
                 print_method_table(params, method)
                 print_batch_diagnostics(method)
-                print_component_breakdown(params, method)
 
         print_method_comparison(params, methods)
 

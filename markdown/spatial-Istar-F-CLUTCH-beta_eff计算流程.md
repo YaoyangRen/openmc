@@ -6,6 +6,7 @@
 source state = cell
 importance   = I*(cell)
 primary      = fclutch_spatial
+comparison   = cclutch
 ```
 
 ## 2026-06-03 优化补充
@@ -51,7 +52,7 @@ diagnostics/*
 很低或 residual 偏大，优先增加 inactive 统计、粗化 kinetics mesh，或提高
 `max_iterations`。
 
-该方法不再使用出生能量维度的伴随源 `I*(cell, g_birth)`，也不再默认生成 `transfer_function_data.h5`、`adjoint_flux.h5` 或 `flux_mesh.h5`。
+该方法不再使用出生能量维度的伴随源 `I*(cell, g_birth)`，也不再默认生成 `transfer_function_data.h5`、`adjoint_flux.h5` 或 `flux_mesh.h5`。当前版本在 `beta_eff.h5` 内部新增空间 C-CLUTCH 对照方法 `/method/cclutch`，但它使用运行时内部 accumulator，不恢复普通 `greenfunction` tally 路径。
 
 ## 总体流程
 
@@ -67,11 +68,12 @@ inactive batches:
 active batches:
   5. 对每个实际生成的 fission source site 计分
   6. 按 delayed group 累积分子，按所有 fission source site 累积分母
-  7. active 结束后按 batch 保存分子和分母
+  7. 同时记录每个源粒子的 source cell，并在裂变碰撞处统计空间 transfer function
+  8. active 结束后按 batch 保存 F-CLUTCH 和 C-CLUTCH 的分子、分母
 
 final:
-  8. 用 ratio-of-means 计算 beta_i、beta_total 和不确定度
-  9. 写出 beta_eff.h5
+  9. 用 ratio-of-means 计算 beta_i、beta_total 和不确定度
+  10. 写出 beta_eff.h5
 ```
 
 默认输出只依赖：
@@ -329,6 +331,15 @@ method/fclutch_spatial/beta_total_uncertainty
 method/fclutch_spatial/batch_ids
 method/fclutch_spatial/batch_denominator
 method/fclutch_spatial/batch_numerator
+method/cclutch/beta_i
+method/cclutch/beta_total
+method/cclutch/numerator
+method/cclutch/denominator
+method/cclutch/uncertainty
+method/cclutch/beta_total_uncertainty
+method/cclutch/batch_ids
+method/cclutch/batch_denominator
+method/cclutch/batch_numerator
 ```
 
 诊断组：
@@ -338,17 +349,30 @@ diagnostics/total_fission_sites
 diagnostics/total_scored_sites
 diagnostics/total_dropped_sites
 diagnostics/total_invalid_delayed_group_sites
+diagnostics/total_cclutch_events
+diagnostics/total_cclutch_scored_events
+diagnostics/total_cclutch_dropped_events
+diagnostics/total_cclutch_missing_source_events
 diagnostics/active_batches_scored
 diagnostics/numerator
 diagnostics/denominator
 ```
+
+`method/cclutch` 使用同一个空间伴随源 `I*(cell)`，但 active 阶段先按源 cell 统计 transfer function：
+
+```text
+D_c,b   = sum_source I*(source_cell) * T_total,b(source_cell)
+N_c,k,b = sum_source I*(source_cell) * T_delayed_k,b(source_cell)
+```
+
+其中 `T_total,b(source_cell)` 和 `T_delayed_k,b(source_cell)` 均按该 source cell 的 active 源粒子数归一化。该方法作为 C-CLUTCH 对照输出，不覆盖根数据集中的主结果。
 
 ## 已移除的默认路径
 
 当前 `clutch_on` 默认路径不再执行：
 
 ```text
-GreenFunctionMesh creation
+ordinary GreenFunctionMesh creation
 transfer_function_data.h5 write
 AdjointFlux::compute_from_files()
 adjoint_flux.h5 write

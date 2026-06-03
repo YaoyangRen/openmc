@@ -34,6 +34,7 @@
 #include <fmt/core.h>
 
 #include <algorithm> // for max, min, max_element
+#include <array>
 #include <cmath>     // for sqrt, exp, log, abs, copysign
 #include <xtensor/xview.hpp>
 
@@ -179,6 +180,33 @@ void create_fission_sites(Particle& p, int i_nuclide, const Reaction& rx)
   double nu_t = p.wgt() / simulation::keff * weight *
                 p.neutron_xs(i_nuclide).nu_fission /
                 p.neutron_xs(i_nuclide).total;
+
+  if (simulation::current_batch > settings::n_inactive) {
+    if (simulation::beta_effective_accumulator) {
+      std::array<double, BetaEffectiveAccumulator::N_DELAYED_GROUPS>
+        delayed_contributions {};
+      const auto& nuc = *data::nuclides[i_nuclide];
+      const double nu_total_yield =
+        nuc.nu(p.E(), Nuclide::EmissionMode::total);
+      if (nu_total_yield > 0.0) {
+        const int n_prec = std::min(nuc.n_precursor_,
+          BetaEffectiveAccumulator::N_DELAYED_GROUPS);
+        for (int k = 1; k <= n_prec; ++k) {
+          const double nu_dk =
+            nuc.nu(p.E(), Nuclide::EmissionMode::delayed, k);
+          if (nu_dk > 0.0) {
+            delayed_contributions[k - 1] = nu_t * nu_dk / nu_total_yield;
+          }
+        }
+      }
+      simulation::beta_effective_accumulator->score_cclutch_fission_event(p.r(),
+        p.source_particle_id(), nu_t, delayed_contributions);
+    }
+    if (simulation::clutch_sensitivity_accumulator) {
+      simulation::clutch_sensitivity_accumulator->score_cclutch_fission_event(
+        p, p.r(), nu_t);
+    }
+  }
 
   // Sample the number of neutrons produced
   int nu = static_cast<int>(nu_t);

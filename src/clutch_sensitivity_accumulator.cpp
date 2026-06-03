@@ -63,6 +63,10 @@ ClutchSensitivityAccumulator::ClutchSensitivityAccumulator(
   upper_bound_ = grid_->upper_bound();
   inv_pitch_ = grid_->inv_pitch();
   adjoint_source_spatial_.assign(grid_->n_cells(), 0.0);
+  current_source_counts_.assign(grid_->n_cells(), 0);
+  current_cclutch_transfer_total_.assign(grid_->n_cells(), 0.0);
+  current_cclutch_transfer_numerator_.assign(
+    grid_->n_cells() * derivative_indices_.size(), 0.0);
   initialize_parameter_metadata();
 }
 
@@ -84,6 +88,10 @@ ClutchSensitivityAccumulator::ClutchSensitivityAccumulator(
   upper_bound_ = grid_->upper_bound();
   inv_pitch_ = grid_->inv_pitch();
   adjoint_source_spatial_.assign(grid_->n_cells(), 0.0);
+  current_source_counts_.assign(grid_->n_cells(), 0);
+  current_cclutch_transfer_total_.assign(grid_->n_cells(), 0.0);
+  current_cclutch_transfer_numerator_.assign(
+    grid_->n_cells() * derivative_indices_.size(), 0.0);
   derivative_variables_.assign(n_parameters(), "synthetic");
   derivative_material_ids_.assign(n_parameters(), 0);
   derivative_nuclides_.assign(n_parameters(), "");
@@ -186,9 +194,13 @@ void ClutchSensitivityAccumulator::begin_batch(int batch_id)
   current_batch_ = BatchScore {};
   current_batch_.batch_id = batch_id;
   current_batch_.numerator.assign(n_parameters(), 0.0);
-  current_batch_.track_numerator.assign(n_parameters(), 0.0);
-  current_batch_.collision_numerator.assign(n_parameters(), 0.0);
-  current_batch_.direct_numerator.assign(n_parameters(), 0.0);
+  current_batch_.cclutch_numerator.assign(n_parameters(), 0.0);
+  current_source_cells_.clear();
+  std::fill(current_source_counts_.begin(), current_source_counts_.end(), 0);
+  std::fill(current_cclutch_transfer_total_.begin(),
+    current_cclutch_transfer_total_.end(), 0.0);
+  std::fill(current_cclutch_transfer_numerator_.begin(),
+    current_cclutch_transfer_numerator_.end(), 0.0);
   batch_active_ = true;
 }
 
@@ -198,8 +210,37 @@ void ClutchSensitivityAccumulator::end_batch(int batch_id)
   if (!batch_active_ || current_batch_.batch_id != batch_id) {
     fatal_error("ClutchSensitivityAccumulator: invalid end_batch call.");
   }
+  fold_current_cclutch_batch();
   batches_.push_back(current_batch_);
   batch_active_ = false;
+  current_source_cells_.clear();
+}
+
+void ClutchSensitivityAccumulator::record_source_birth(
+  const Position& r, int64_t source_particle_id)
+{
+  if (source_particle_id < 0) {
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!batch_active_) {
+    return;
+  }
+
+  const int cell = position_to_index(r);
+  if (cell < 0) {
+    return;
+  }
+
+  auto [it, inserted] = current_source_cells_.emplace(source_particle_id, cell);
+  if (inserted) {
+    ++current_source_counts_[cell];
+  } else if (it->second != cell) {
+    --current_source_counts_[it->second];
+    it->second = cell;
+    ++current_source_counts_[cell];
+  }
 }
 
 void ClutchSensitivityAccumulator::score_fission_site(
@@ -220,6 +261,81 @@ void ClutchSensitivityAccumulator::score_fission_site(
 
   score_contribution(
     r, site_weight, path_terms, track_terms, collision_terms, direct_terms);
+}
+
+void ClutchSensitivityAccumulator::score_cclutch_fission_event(
+  const Particle& p, const Position& r, double total_contribution)
+{
+  if (!std::isfinite(total_contribution) || total_contribution <= 0.0) {
+    return;
+  }
+
+  vector<double> response_terms(n_parameters(), 0.0);
+  for (int i = 0; i < derivative_indices_.size(); ++i) {
+    const int deriv_index = derivative_indices_[i];
+    response_terms[i] =
+      p.flux_derivs(deriv_index) + nu_fission_direct_derivative(p, deriv_index);
+  }
+
+  score_cclutch_contribution(
+    r, p.source_particle_id(), total_contribution, response_terms);
+}
+
+void ClutchSensitivityAccumulator::score_cclutch_contribution(const Position& r,
+  int64_t source_particle_id, double total_contribution,
+  const vector<double>& response_terms)
+{
+  if (!std::isfinite(total_contribution) || total_contribution <= 0.0) {
+    return;
+  }
+  if (response_terms.size() != n_parameters()) {
+    fatal_error("ClutchSensitivityAccumulator: C-CLUTCH response vector size "
+                "does not match the number of derivatives.");
+  }
+
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!batch_active_) {
+    fatal_error("ClutchSensitivityAccumulator: C-CLUTCH event scored outside "
+                "an active batch.");
+  }
+  if (!source_ready_) {
+    fatal_error("ClutchSensitivityAccumulator: adjoint source is not loaded.");
+  }
+
+  ++current_batch_.cclutch_events;
+  ++total_cclutch_events_;
+
+  if (position_to_index(r) < 0) {
+    ++current_batch_.cclutch_dropped_events;
+    ++total_cclutch_dropped_events_;
+    return;
+  }
+
+  auto it = current_source_cells_.find(source_particle_id);
+  if (it == current_source_cells_.end()) {
+    ++current_batch_.cclutch_missing_source_events;
+    ++total_cclutch_missing_source_events_;
+    return;
+  }
+
+  const int source_cell = it->second;
+  if (source_cell < 0 ||
+      source_cell >= static_cast<int>(current_cclutch_transfer_total_.size())) {
+    ++current_batch_.cclutch_dropped_events;
+    ++total_cclutch_dropped_events_;
+    return;
+  }
+
+  current_cclutch_transfer_total_[source_cell] += total_contribution;
+  const size_t offset =
+    static_cast<size_t>(source_cell) * static_cast<size_t>(n_parameters());
+  for (int i = 0; i < n_parameters(); ++i) {
+    current_cclutch_transfer_numerator_[offset + i] +=
+      total_contribution * response_terms[i];
+  }
+
+  ++current_batch_.cclutch_scored_events;
+  ++total_cclutch_scored_events_;
 }
 
 void ClutchSensitivityAccumulator::score_contribution(const Position& r,
@@ -268,17 +384,49 @@ void ClutchSensitivityAccumulator::score_contribution(const Position& r,
   const double response = site_weight * importance;
   current_batch_.denominator += response;
   for (int i = 0; i < n_parameters(); ++i) {
-    const double track = response * track_terms[i];
-    const double collision = response * collision_terms[i];
-    const double direct = response * direct_terms[i];
-    current_batch_.track_numerator[i] += track;
-    current_batch_.collision_numerator[i] += collision;
-    current_batch_.direct_numerator[i] += direct;
     current_batch_.numerator[i] += response * (path_terms[i] + direct_terms[i]);
   }
 
   ++current_batch_.scored_sites;
   ++total_scored_sites_;
+}
+
+void ClutchSensitivityAccumulator::fold_current_cclutch_batch()
+{
+  const size_t n_params = n_parameters();
+  for (int source_cell = 0;
+       source_cell < static_cast<int>(current_cclutch_transfer_total_.size());
+       ++source_cell) {
+    const double total = current_cclutch_transfer_total_[source_cell];
+    bool has_numerator = false;
+    const size_t offset = static_cast<size_t>(source_cell) * n_params;
+    for (int i = 0; i < n_params; ++i) {
+      has_numerator =
+        has_numerator || current_cclutch_transfer_numerator_[offset + i] != 0.0;
+    }
+    if (total <= 0.0 && !has_numerator) {
+      continue;
+    }
+
+    const int source_count = current_source_counts_[source_cell];
+    if (source_count <= 0) {
+      fatal_error("ClutchSensitivityAccumulator: C-CLUTCH transfer response "
+                  "exists for a source cell with zero source count.");
+    }
+
+    const double importance = adjoint_source_spatial_[source_cell];
+    if (importance <= 0.0) {
+      continue;
+    }
+
+    const double source_weight =
+      importance / static_cast<double>(source_count);
+    current_batch_.cclutch_denominator += source_weight * total;
+    for (int i = 0; i < n_params; ++i) {
+      current_batch_.cclutch_numerator[i] +=
+        source_weight * current_cclutch_transfer_numerator_[offset + i];
+    }
+  }
 }
 
 ClutchSensitivityAccumulator::MethodResult
@@ -292,9 +440,6 @@ ClutchSensitivityAccumulator::compute_result(const vector<BatchScore>& batches)
   result.dlogk_dparameter.assign(n_params, 0.0);
   result.sensitivity.assign(n_params, 0.0);
   result.uncertainty.assign(n_params, 0.0);
-  for (auto& component : result.component_numerator) {
-    component.assign(n_params, 0.0);
-  }
   if (n == 0) {
     return result;
   }
@@ -304,9 +449,6 @@ ClutchSensitivityAccumulator::compute_result(const vector<BatchScore>& batches)
     sum_denominator += batch.denominator;
     for (int i = 0; i < n_params; ++i) {
       result.numerator[i] += batch.numerator[i];
-      result.component_numerator[0][i] += batch.track_numerator[i];
-      result.component_numerator[1][i] += batch.collision_numerator[i];
-      result.component_numerator[2][i] += batch.direct_numerator[i];
     }
   }
   if (sum_denominator <= 0.0) {
@@ -318,9 +460,6 @@ ClutchSensitivityAccumulator::compute_result(const vector<BatchScore>& batches)
   result.available = true;
   for (int i = 0; i < n_params; ++i) {
     result.numerator[i] *= inv_n;
-    result.component_numerator[0][i] *= inv_n;
-    result.component_numerator[1][i] *= inv_n;
-    result.component_numerator[2][i] *= inv_n;
     result.dlogk_dparameter[i] = result.numerator[i] / result.denominator;
     result.sensitivity[i] =
       parameter_values_[i] * result.dlogk_dparameter[i];
@@ -356,16 +495,92 @@ ClutchSensitivityAccumulator::compute_result(const vector<BatchScore>& batches)
 }
 
 ClutchSensitivityAccumulator::MethodResult
+ClutchSensitivityAccumulator::compute_cclutch_result(
+  const vector<BatchScore>& batches) const
+{
+  MethodResult result;
+  const size_t n = batches.size();
+  const size_t n_params = n_parameters();
+  result.numerator.assign(n_params, 0.0);
+  result.dlogk_dparameter.assign(n_params, 0.0);
+  result.sensitivity.assign(n_params, 0.0);
+  result.uncertainty.assign(n_params, 0.0);
+  if (n == 0) {
+    return result;
+  }
+
+  double sum_denominator = 0.0;
+  for (const auto& batch : batches) {
+    sum_denominator += batch.cclutch_denominator;
+    for (int i = 0; i < n_params; ++i) {
+      result.numerator[i] += batch.cclutch_numerator[i];
+    }
+  }
+  if (sum_denominator <= 0.0) {
+    return result;
+  }
+
+  const double inv_n = 1.0 / static_cast<double>(n);
+  result.denominator = sum_denominator * inv_n;
+  result.available = true;
+  for (int i = 0; i < n_params; ++i) {
+    result.numerator[i] *= inv_n;
+    result.dlogk_dparameter[i] = result.numerator[i] / result.denominator;
+    result.sensitivity[i] =
+      parameter_values_[i] * result.dlogk_dparameter[i];
+  }
+
+  if (n > 1) {
+    for (int i = 0; i < n_params; ++i) {
+      const double ratio = result.dlogk_dparameter[i];
+      double mean_z = 0.0;
+      vector<double> z_values;
+      z_values.reserve(n);
+      for (const auto& batch : batches) {
+        const double z =
+          batch.cclutch_numerator[i] - ratio * batch.cclutch_denominator;
+        z_values.push_back(z);
+        mean_z += z;
+      }
+      mean_z *= inv_n;
+
+      double s2 = 0.0;
+      for (double z : z_values) {
+        const double dz = z - mean_z;
+        s2 += dz * dz;
+      }
+      s2 /= static_cast<double>(n - 1);
+      const double sigma_ratio =
+        std::sqrt(s2 / (static_cast<double>(n) * result.denominator *
+                         result.denominator));
+      result.uncertainty[i] = std::abs(parameter_values_[i]) * sigma_ratio;
+    }
+  }
+
+  return result;
+}
+
+ClutchSensitivityAccumulator::MethodResult
 ClutchSensitivityAccumulator::compute_result() const
 {
   std::lock_guard<std::mutex> lock(mutex_);
   return compute_result(batches_);
 }
 
+ClutchSensitivityAccumulator::MethodResult
+ClutchSensitivityAccumulator::compute_cclutch_result() const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  return compute_cclutch_result(batches_);
+}
+
 vector<ClutchSensitivityAccumulator::BatchScore>
 ClutchSensitivityAccumulator::collect_global_batches(
   int64_t& total_fission_sites, int64_t& total_scored_sites,
-  int64_t& total_dropped_sites) const
+  int64_t& total_dropped_sites, int64_t& total_cclutch_events,
+  int64_t& total_cclutch_scored_events,
+  int64_t& total_cclutch_dropped_events,
+  int64_t& total_cclutch_missing_source_events) const
 {
   vector<BatchScore> local_batches;
   {
@@ -374,6 +589,11 @@ ClutchSensitivityAccumulator::collect_global_batches(
     total_fission_sites = total_fission_sites_;
     total_scored_sites = total_scored_sites_;
     total_dropped_sites = total_dropped_sites_;
+    total_cclutch_events = total_cclutch_events_;
+    total_cclutch_scored_events = total_cclutch_scored_events_;
+    total_cclutch_dropped_events = total_cclutch_dropped_events_;
+    total_cclutch_missing_source_events =
+      total_cclutch_missing_source_events_;
   }
 
 #ifdef OPENMC_MPI
@@ -387,18 +607,15 @@ ClutchSensitivityAccumulator::collect_global_batches(
   }
 
   const size_t n_params = n_parameters();
-  const size_t block = 1 + 4 * n_params;
+  const size_t block = 2 + 2 * n_params;
   vector<double> local(static_cast<size_t>(local_n) * block, 0.0);
   for (int b = 0; b < local_n; ++b) {
     size_t offset = static_cast<size_t>(b) * block;
     local[offset++] = local_batches[b].denominator;
+    local[offset++] = local_batches[b].cclutch_denominator;
     for (double v : local_batches[b].numerator)
       local[offset++] = v;
-    for (double v : local_batches[b].track_numerator)
-      local[offset++] = v;
-    for (double v : local_batches[b].collision_numerator)
-      local[offset++] = v;
-    for (double v : local_batches[b].direct_numerator)
+    for (double v : local_batches[b].cclutch_numerator)
       local[offset++] = v;
   }
 
@@ -411,10 +628,11 @@ ClutchSensitivityAccumulator::collect_global_batches(
       static_cast<int>(local.size()), MPI_DOUBLE, MPI_SUM, 0, mpi::intracomm);
   }
 
-  int64_t local_counts[3] {
-    total_fission_sites, total_scored_sites, total_dropped_sites};
-  int64_t global_counts[3] {0, 0, 0};
-  MPI_Reduce(local_counts, global_counts, 3, MPI_INT64_T, MPI_SUM, 0,
+  int64_t local_counts[7] {total_fission_sites, total_scored_sites,
+    total_dropped_sites, total_cclutch_events, total_cclutch_scored_events,
+    total_cclutch_dropped_events, total_cclutch_missing_source_events};
+  int64_t global_counts[7] {};
+  MPI_Reduce(local_counts, global_counts, 7, MPI_INT64_T, MPI_SUM, 0,
     mpi::intracomm);
 
   if (!mpi::master) {
@@ -423,25 +641,24 @@ ClutchSensitivityAccumulator::collect_global_batches(
   total_fission_sites = global_counts[0];
   total_scored_sites = global_counts[1];
   total_dropped_sites = global_counts[2];
+  total_cclutch_events = global_counts[3];
+  total_cclutch_scored_events = global_counts[4];
+  total_cclutch_dropped_events = global_counts[5];
+  total_cclutch_missing_source_events = global_counts[6];
 
   vector<BatchScore> result = local_batches;
   for (auto& batch : result) {
     batch.numerator.assign(n_params, 0.0);
-    batch.track_numerator.assign(n_params, 0.0);
-    batch.collision_numerator.assign(n_params, 0.0);
-    batch.direct_numerator.assign(n_params, 0.0);
+    batch.cclutch_numerator.assign(n_params, 0.0);
   }
   for (int b = 0; b < local_n; ++b) {
     size_t offset = static_cast<size_t>(b) * block;
     result[b].denominator = global[offset++];
+    result[b].cclutch_denominator = global[offset++];
     for (int i = 0; i < n_params; ++i)
       result[b].numerator[i] = global[offset++];
     for (int i = 0; i < n_params; ++i)
-      result[b].track_numerator[i] = global[offset++];
-    for (int i = 0; i < n_params; ++i)
-      result[b].collision_numerator[i] = global[offset++];
-    for (int i = 0; i < n_params; ++i)
-      result[b].direct_numerator[i] = global[offset++];
+      result[b].cclutch_numerator[i] = global[offset++];
   }
   return result;
 #else
@@ -459,12 +676,22 @@ void ClutchSensitivityAccumulator::write_batch_matrix(hid_t group,
 
 void ClutchSensitivityAccumulator::write_method_group(hid_t parent,
   const char* name, const MethodResult& result,
-  const vector<BatchScore>& batches, bool write_components) const
+  const vector<BatchScore>& batches, bool use_cclutch) const
 {
   hid_t group = create_group(parent, name);
   write_attribute(group, "available", static_cast<int>(result.available));
-  write_attribute(group, "uses_fission_event_sites", 1);
+  write_attribute(group, "uses_fission_event_sites", use_cclutch ? 0 : 1);
+  write_attribute(group, "uses_transfer_function", use_cclutch ? 1 : 0);
   write_attribute(group, "source_state_definition", "cell");
+  if (use_cclutch) {
+    write_attribute(group, "formula",
+      "D=mean_b sum_source I*(source_cell) T_total(source_cell); "
+      "N_x=mean_b sum_source I*(source_cell) T_x(source_cell)");
+  } else {
+    write_attribute(group, "formula",
+      "D=mean_b sum_sites w_site I*(cell); "
+      "N_x=mean_b sum_sites w_site I*(cell) (R_path_x+R_fission_x)");
+  }
   write_dataset(group, "dlogk_dparameter", result.dlogk_dparameter);
   write_dataset(group, "sensitivity", result.sensitivity);
   write_dataset(group, "numerator", result.numerator);
@@ -479,28 +706,18 @@ void ClutchSensitivityAccumulator::write_method_group(hid_t parent,
   batch_numerator.reserve(batches.size() * n_parameters());
   for (const auto& batch : batches) {
     batch_ids.push_back(batch.batch_id);
-    batch_denominator.push_back(batch.denominator);
+    batch_denominator.push_back(
+      use_cclutch ? batch.cclutch_denominator : batch.denominator);
+    const auto& numerator =
+      use_cclutch ? batch.cclutch_numerator : batch.numerator;
     batch_numerator.insert(
-      batch_numerator.end(), batch.numerator.begin(), batch.numerator.end());
+      batch_numerator.end(), numerator.begin(), numerator.end());
   }
 
   write_dataset(group, "batch_ids", batch_ids);
   write_dataset(group, "batch_denominator", batch_denominator);
   write_batch_matrix(
     group, "batch_numerator", batch_numerator, batches.size());
-
-  if (write_components) {
-    vector<double> components;
-    components.reserve(3 * n_parameters());
-    for (const auto& component : result.component_numerator) {
-      components.insert(components.end(), component.begin(), component.end());
-    }
-    hsize_t dims[] {3, static_cast<hsize_t>(n_parameters())};
-    write_dataset_lowlevel(group, 2, dims, "component_numerator",
-      H5TypeMap<double>::type_id, H5S_ALL, false, components.data());
-    write_dataset(group, "component_names",
-      vector<std::string> {"track", "collision", "direct_fission"});
-  }
 
   H5Gclose(group);
 }
@@ -519,17 +736,29 @@ void ClutchSensitivityAccumulator::write_to_file(
   int64_t total_fission_sites = 0;
   int64_t total_scored_sites = 0;
   int64_t total_dropped_sites = 0;
+  int64_t total_cclutch_events = 0;
+  int64_t total_cclutch_scored_events = 0;
+  int64_t total_cclutch_dropped_events = 0;
+  int64_t total_cclutch_missing_source_events = 0;
   auto global_batches = collect_global_batches(
-    total_fission_sites, total_scored_sites, total_dropped_sites);
+    total_fission_sites, total_scored_sites, total_dropped_sites,
+    total_cclutch_events, total_cclutch_scored_events,
+    total_cclutch_dropped_events, total_cclutch_missing_source_events);
 
   if (!mpi::master) {
     return;
   }
 
   auto result = compute_result(global_batches);
-  if (!result.available) {
+  auto cclutch_result = compute_cclutch_result(global_batches);
+  if ((method_ == "hybrid" || method_ == "fclutch_fm") && !result.available) {
     fatal_error("CLUTCH sensitivity denominator is zero. Verify the spatial "
                 "adjoint source and active fission-site scoring.");
+  }
+  if ((method_ == "hybrid" || method_ == "cclutch_history") &&
+      !cclutch_result.available) {
+    fatal_error("C-CLUTCH sensitivity denominator is zero. Verify active "
+                "source birth recording and transfer-function scoring.");
   }
 
   hid_t file_id = file_open(filename, 'w');
@@ -539,6 +768,8 @@ void ClutchSensitivityAccumulator::write_to_file(
   write_attribute(file_id, "primary_method", "fclutch_fm");
   write_attribute(file_id, "method", method_);
   write_attribute(file_id, "adjoint_source", "fission_matrix.h5/adjoint_source");
+  write_attribute(file_id, "cclutch_method",
+    "cclutch_history is transfer-function C-CLUTCH in this version");
 
   hid_t params = create_group(file_id, "parameters");
   write_dataset(params, "ids", derivative_ids_);
@@ -555,7 +786,7 @@ void ClutchSensitivityAccumulator::write_to_file(
   }
   if (method_ == "hybrid" || method_ == "cclutch_history") {
     write_method_group(
-      method_group, "cclutch_history", result, global_batches, true);
+      method_group, "cclutch_history", cclutch_result, global_batches, true);
   }
   H5Gclose(method_group);
 
@@ -563,6 +794,13 @@ void ClutchSensitivityAccumulator::write_to_file(
   write_attribute(diagnostics, "total_fission_sites", total_fission_sites);
   write_attribute(diagnostics, "total_scored_sites", total_scored_sites);
   write_attribute(diagnostics, "total_dropped_sites", total_dropped_sites);
+  write_attribute(diagnostics, "total_cclutch_events", total_cclutch_events);
+  write_attribute(diagnostics, "total_cclutch_scored_events",
+    total_cclutch_scored_events);
+  write_attribute(diagnostics, "total_cclutch_dropped_events",
+    total_cclutch_dropped_events);
+  write_attribute(diagnostics, "total_cclutch_missing_source_events",
+    total_cclutch_missing_source_events);
   write_attribute(diagnostics, "active_batches_scored",
     static_cast<int>(global_batches.size()));
   write_dataset(diagnostics, "grid_shape", grid_->shape());

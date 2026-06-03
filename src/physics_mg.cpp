@@ -1,5 +1,6 @@
 #include "openmc/physics_mg.h"
 
+#include <array>
 #include <stdexcept>
 
 #include "xtensor/xarray.hpp"
@@ -106,6 +107,28 @@ void create_fission_sites(Particle& p)
   // Determine the expected number of neutrons produced
   double nu_t = p.wgt() / simulation::keff * weight * p.macro_xs().nu_fission /
                 p.macro_xs().total;
+
+  if (simulation::beta_effective_accumulator &&
+      simulation::current_batch > settings::n_inactive) {
+    std::array<double, BetaEffectiveAccumulator::N_DELAYED_GROUPS>
+      delayed_contributions {};
+    if (p.macro_xs().nu_fission > 0.0) {
+      const int n_delayed = std::min(data::mg.num_delayed_groups_,
+        BetaEffectiveAccumulator::N_DELAYED_GROUPS);
+      for (int d = 0; d < n_delayed; ++d) {
+        const double delayed_nu_fission =
+          data::mg.macro_xs_[p.material()].get_xs(MgxsType::DELAYED_NU_FISSION,
+            p.g(), nullptr, nullptr, &d, p.mg_xs_cache().t,
+            p.mg_xs_cache().a);
+        if (delayed_nu_fission > 0.0) {
+          delayed_contributions[d] =
+            nu_t * delayed_nu_fission / p.macro_xs().nu_fission;
+        }
+      }
+    }
+    simulation::beta_effective_accumulator->score_cclutch_fission_event(p.r(),
+      p.source_particle_id(), nu_t, delayed_contributions);
+  }
 
   // Sample the number of neutrons produced
   int nu = static_cast<int>(nu_t);

@@ -15,7 +15,7 @@
   - `nuclide_density`
   - `temperature`
 - 主方法 `fclutch_fm`：使用 inactive batches 形成的裂变矩阵空间伴随源 `I*(cell)`。
-- 诊断方法 `cclutch_history`：输出同一响应项的 `track`、`collision`、`direct_fission` 分量。
+- 第二方法 `cclutch_history`：空间 transfer-function C-CLUTCH，对 active batch 中的源 cell 到响应 cell 裂变生产传递函数进行折叠。
 
 暂不支持：
 
@@ -23,7 +23,7 @@
 - event-based 模式。
 - fixed-source 模式。
 - MT/能群级核数据敏感性。
-- transfer-function C-CLUTCH 完整路径。
+- 出生能量维度的 C-CLUTCH。
 
 ## 必需输入文件
 
@@ -84,9 +84,9 @@
 
 - `hybrid`：同时写出 `/method/fclutch_fm` 和 `/method/cclutch_history`。
 - `fclutch_fm`：只写主方法结果。
-- `cclutch_history`：只写诊断分量结果。
+- `cclutch_history`：只写空间 transfer-function C-CLUTCH 结果。
 
-建议首选 `hybrid`，因为它能同时看到主结果和路径/碰撞/直接裂变分量。
+建议首选 `hybrid`，因为它能同时看到 F-CLUTCH 和 C-CLUTCH 两种方法的物理对照。
 
 ## kinetics_mesh 节点
 
@@ -299,8 +299,6 @@ model.export_to_xml()
   batch_ids
   batch_numerator
   batch_denominator
-  component_numerator
-  component_names
 
 /diagnostics
   grid_shape
@@ -314,17 +312,18 @@ model.export_to_xml()
 - `dlogk_dparameter`：`d ln(k) / d parameter`。
 - `sensitivity`：无量纲敏感性，等于 `parameter_value * dlogk_dparameter`。
 - `uncertainty`：对 `sensitivity` 的 batch 统计不确定度。
-- `component_numerator`：诊断项，三行依次对应 `track`、`collision`、`direct_fission`。
+- `fclutch_fm` 的分母来自 active fission source site 的 `w_site * I*(cell_site)`。
+- `cclutch_history` 的分母来自 active transfer function：`sum_source I*(source_cell) * T_total(source_cell)`。
 
 ## 分析脚本输出解读
 
 可以使用仓库根目录下的脚本分析输出文件：
 
 ```bash
-python analyze_clutch_sensitivity.py clutch_sensitivity.h5
+python py_script/analyze_clutch_sensitivity.py clutch_sensitivity.h5
 ```
 
-脚本输出中的 `Method: fclutch_fm` 是主方法结果，`Method: cclutch_history` 是诊断对照结果。当前首版实现中，`cclutch_history` 不是完整 transfer-function C-CLUTCH，而是对同一 F-CLUTCH 响应项额外拆分 `track`、`collision`、`direct_fission` 三类贡献。因此通常会看到两者总 sensitivity 完全一致，差别主要体现在 `cclutch_history` 多了分量解释。
+脚本输出中的 `Method: fclutch_fm` 是主方法结果，`Method: cclutch_history (transfer-function C-CLUTCH)` 是第二方法结果。两者使用同一个 inactive 裂变矩阵伴随源 `I*(cell)`，但 active 阶段的计分对象不同：F-CLUTCH 直接在裂变源 site 上加权，C-CLUTCH 先统计源 cell 到响应 cell 的裂变生产 transfer function，再用 `I*(source_cell)` 折叠。
 
 ### 主结果表
 
@@ -369,13 +368,19 @@ U235 nuclide_density sensitivity = 8.012037e-01
 denominator mean: 3.78916978e+00
 ```
 
-这是 CLUTCH ratio estimator 的归一化分母：
+这是 CLUTCH ratio estimator 的归一化分母。对 `fclutch_fm`：
 
 ```text
 D = sum_fission_site w_site * I*(cell_site)
 ```
 
-它不是敏感性本身，而是用空间伴随源 `I*(cell)` 加权后的 active fission source response 归一化量。分母越稳定，说明 active fission source 与 inactive 生成的空间重要性匹配越稳定。
+对 `cclutch_history`：
+
+```text
+D = sum_source_cell I*(source_cell) * T_total(source_cell)
+```
+
+其中 `T_total(source_cell)` 是该 active batch 中从该源 cell 出发的单位源粒子平均总裂变生产响应。它不是敏感性本身，而是归一化响应量。分母越稳定，说明 active source/transfer function 与 inactive 生成的空间重要性匹配越稳定。
 
 ### Batch diagnostics
 
@@ -415,31 +420,6 @@ mean(N_b) / mean(D_b)
 
 因此它通常与 batch ratio mean 很接近，但不要求完全相等。
 
-### Component breakdown
-
-示例：
-
-```text
-component          dlogk_part
-track            -1.231670e-01
-collision         1.139319e-01
-direct_fission    5.333333e-02
-```
-
-三项相加对应主表中的 `dlogk/dp`：
-
-```text
--0.123167 + 0.113932 + 0.053333 = 0.044098
-```
-
-物理含义：
-
-- `track`：路径项。密度增加会增大总截面，降低粒子沿路径存活概率，因此常为负。
-- `collision`：碰撞项。密度或核素密度增加会提高碰撞/反应概率项，因此常为正。
-- `direct_fission`：直接裂变生产项。密度或裂变核素密度增加会直接增强 `nu-fission` 源生产项，因此通常为正。
-
-`share_of_total` 是每个分量相对于净 numerator 的比例。由于 `track`、`collision`、`direct_fission` 之间可能强烈抵消，`share_of_total` 可以为负，也可以大于 1。它不是普通百分比占比，而是相对于抵消后的净结果的比例。
-
 ### temperature sensitivity 为零
 
 若看到：
@@ -462,13 +442,13 @@ temperature sensitivity = 0
 示例：
 
 ```text
-Method comparison: cclutch_history - fclutch_fm
+Method comparison: C-CLUTCH - F-CLUTCH
 id  variable          delta_sens      rel_delta
 1   density           0.000000e+00    0.000000e+00
 2   nuclide_density   0.000000e+00    0.000000e+00
 ```
 
-当前首版实现中，`cclutch_history` 使用与 `fclutch_fm` 相同的总响应项，只是额外输出分量拆分。因此 `delta_sens = 0` 是预期行为。若后续实现完整 transfer-function C-CLUTCH，该对比才会成为两种不同 CLUTCH 路线的物理差异检查。
+现在 `cclutch_history` 是真正的空间 transfer-function C-CLUTCH，因此 `delta_sens` 表示 C-CLUTCH 与 F-CLUTCH 两种估计路线的差值。若差值明显大于统计不确定度，优先检查 kinetics mesh 是否过细、inactive 伴随源覆盖率是否不足、以及 C-CLUTCH denominator 的 batch 变异系数是否偏大。
 
 ## 常见错误
 

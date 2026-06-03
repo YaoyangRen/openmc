@@ -100,7 +100,8 @@ class Settings:
         and 'score_start_batch'.
     clutch_sensitivity : dict
         Generalized CLUTCH k-effective sensitivity controls. Accepted keys are
-        'method', 'output', and 'derivative_ids'.
+        'method', 'output', and 'derivative_ids'. Method 'cclutch_history'
+        writes the spatial transfer-function C-CLUTCH comparison result.
     max_lost_particles : int
         Maximum number of lost particles
 
