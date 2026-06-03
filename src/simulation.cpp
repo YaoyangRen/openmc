@@ -27,7 +27,6 @@
 #include "openmc/track_output.h"
 #include "openmc/weight_windows.h"
 
-#include "openmc/adjoint_flux.h"
 #include "openmc/greenfunction_mesh.h"
 #include "openmc/mesh_init.h"
 
@@ -416,14 +415,7 @@ void initialize_batch()
     }
   }
 
-  // Initialize transfer function mesh (传递函数)
-  if (settings::clutch_on && !simulation::transfer_function_mesh) {
-    simulation::transfer_function_mesh = std::make_unique<GreenFunctionMesh>(
-      shared_grid, settings::n_batches, settings::kinetics_energy_edges);
-  }
-
-  // Initialize fission matrix (裂变矩阵)
-  // 传入与 GreenFunctionMesh 相同的能群边界，使源状态与传递函数源侧共享同一组群
+  // Initialize fission matrix (spatial CLUTCH source-state matrix).
   if (settings::clutch_on && !simulation::fission_matrix) {
     simulation::fission_matrix = std::make_unique<FissionMatrix>(
       shared_grid, settings::n_batches, settings::kinetics_energy_edges);
@@ -470,14 +462,6 @@ void initialize_batch()
   if (simulation::fission_matrix &&
       simulation::current_batch <= settings::n_inactive) {
     simulation::fission_matrix->start_new_batch(simulation::current_batch);
-  }
-
-  // 传递函数mesh的batch管理
-  if (settings::clutch_on) {
-    if (simulation::transfer_function_mesh) {
-      simulation::transfer_function_mesh->start_new_batch(
-        simulation::current_batch);
-    }
   }
 
   if (settings::clutch_on && simulation::beta_effective_accumulator &&
@@ -625,37 +609,14 @@ void finalize_batch()
       simulation::current_batch);
   }
 
-  // Finalize beta_eff function at the end
-  if (settings::clutch_on && simulation::current_batch == settings::n_batches) {
-    // 输出传递函数数据
-    if (simulation::transfer_function_mesh) {
-      simulation::transfer_function_mesh->finalize_greenfunction_mesh(
-        simulation::current_batch,
-        "transfer_function_data.h5"); // 传递函数文件
-
-      // 传递函数计算完成后，立即计算共轭通量
-      // std::cout << "\n" << std::string(70, '=') << std::endl;
-      // std::cout << "COMPUTING ADJOINT FLUX (Convolution)" << std::endl;
-      // std::cout << std::string(70, '=') << std::endl;
-
-      try {
-        AdjointFlux adjoint_flux;
-        adjoint_flux.compute_from_files(
-          "transfer_function_data.h5", // 传递函数文件
-          "fission_matrix.h5",         // 伴随源文件
-          "adjoint_flux.h5"            // 输出文件
-        );
-        std::cout << "Adjoint flux computation completed successfully."
-                  << std::endl;
-      } catch (const std::exception& e) {
-        std::cerr << "Warning: Adjoint flux computation failed: " << e.what()
-                  << std::endl;
-      }
-    }
-    // 输出通量分布数据
+  if (simulation::current_batch == settings::n_batches) {
     if (simulation::flux_mesh && settings::flux_mesh_on) {
       simulation::flux_mesh->finalize(settings::n_batches - settings::n_inactive);
     }
+  }
+
+  // Finalize beta_eff function at the end
+  if (settings::clutch_on && simulation::current_batch == settings::n_batches) {
     // Write beta_eff from active-batch F-CLUTCH fission-site scores.
     if (simulation::beta_effective_accumulator) {
       simulation::beta_effective_accumulator->write_to_file("beta_eff.h5");
@@ -766,16 +727,6 @@ void initialize_history(Particle& p, int64_t index_source)
         p.r(), p.source_particle_id(), -1.0, p.g(), p.wgt());
     }
   }
-  if (simulation::transfer_function_mesh) {
-    if (settings::run_CE) {
-      simulation::transfer_function_mesh->record_source_birth(
-        p.r(), p.source_particle_id(), p.E(), -1);
-    } else {
-      simulation::transfer_function_mesh->record_source_birth(
-        p.r(), p.source_particle_id(), -1.0, p.g());
-    }
-  }
-
   // set progeny count to zero
   p.n_progeny() = 0;
 

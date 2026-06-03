@@ -195,7 +195,6 @@ Tally::Tally(pugi::xml_node node)
       // TODO: errors check.
       if (true) {
         settings::clutch_on = true;
-        settings::flux_mesh_on = true;
       }
     }
   }
