@@ -37,7 +37,7 @@
 #include "xtensor/xview.hpp"
 #include <iomanip>
 
-#include "openmc/beta_effective.h"
+#include "openmc/beta_effective_accumulator.h"
 
 #ifdef OPENMC_MPI
 #include <mpi.h>
@@ -336,6 +336,7 @@ vector<int64_t> work_index;
 
 std::unique_ptr<GreenFunctionMesh> transfer_function_mesh;
 std::unique_ptr<FissionMatrix> fission_matrix;
+std::unique_ptr<BetaEffectiveAccumulator> beta_effective_accumulator;
 std::unique_ptr<FluxMesh> flux_mesh;
 std::shared_ptr<SharedMeshGrid> shared_mesh_grid;
 
@@ -428,6 +429,11 @@ void initialize_batch()
       shared_grid, settings::n_batches, settings::kinetics_energy_edges);
   }
 
+  if (settings::clutch_on && !simulation::beta_effective_accumulator) {
+    simulation::beta_effective_accumulator =
+      std::make_unique<BetaEffectiveAccumulator>(shared_grid);
+  }
+
   // Initialize flux mesh (通量分布网格)
   if (!simulation::flux_mesh && settings::flux_mesh_on) {
     simulation::flux_mesh =
@@ -472,6 +478,12 @@ void initialize_batch()
       simulation::transfer_function_mesh->start_new_batch(
         simulation::current_batch);
     }
+  }
+
+  if (settings::clutch_on && simulation::beta_effective_accumulator &&
+      simulation::current_batch > settings::n_inactive) {
+    simulation::beta_effective_accumulator->begin_batch(
+      simulation::current_batch);
   }
 }
 
@@ -585,13 +597,18 @@ void finalize_batch()
               << std::endl;
 
     // Merge the last inactive batch before solving the adjoint source so the
-    // stored matrix and adjoint_source_grouped are based on the same data.
+    // stored matrix and spatial adjoint source are based on the same data.
     simulation::fission_matrix->start_new_batch(-1);
 
-    // 计算伴随源分布（使用累积的FM）
+    // Compute the adjoint fission source from the accumulated inactive FM.
     simulation::fission_matrix->compute_adjoint_source(
       settings::adjoint_initial_guess, settings::adjoint_max_iterations,
       settings::adjoint_tolerance);
+
+    if (simulation::beta_effective_accumulator) {
+      simulation::beta_effective_accumulator->set_adjoint_source_spatial(
+        simulation::fission_matrix->get_spatial_adjoint_source());
+    }
 
     // 输出到文件
     simulation::fission_matrix->finalize("fission_matrix.h5");
@@ -602,6 +619,10 @@ void finalize_batch()
   const bool active_batch = simulation::current_batch > settings::n_inactive;
   if (simulation::flux_mesh && settings::flux_mesh_on && active_batch) {
     simulation::flux_mesh->end_batch(simulation::current_batch);
+  }
+  if (simulation::beta_effective_accumulator && active_batch) {
+    simulation::beta_effective_accumulator->end_batch(
+      simulation::current_batch);
   }
 
   // Finalize beta_eff function at the end
@@ -635,17 +656,9 @@ void finalize_batch()
     if (simulation::flux_mesh && settings::flux_mesh_on) {
       simulation::flux_mesh->finalize(settings::n_batches - settings::n_inactive);
     }
-    // 计算有效缓发中子份额 β_eff
-    if (simulation::flux_mesh && settings::flux_mesh_on) {
-      try {
-        openmc::BetaEffective beta_calc;
-        beta_calc.compute_from_files("flux_mesh.h5", "adjoint_flux.h5",
-          "beta_eff.h5", "fission_matrix.h5");
-
-      } catch (const std::exception& e) {
-        std::cerr << "Warning: β_eff computation failed: " << e.what()
-                  << std::endl;
-      }
+    // Write beta_eff from active-batch F-CLUTCH fission-site scores.
+    if (simulation::beta_effective_accumulator) {
+      simulation::beta_effective_accumulator->write_to_file("beta_eff.h5");
     }
   }
 }

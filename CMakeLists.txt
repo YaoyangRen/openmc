@@ -452,7 +452,7 @@ list(APPEND libopenmc_SOURCES
   src/fission_matrix.cpp
   src/flux_mesh.cpp
   src/adjoint_flux.cpp
-  src/beta_effective.cpp
+  src/beta_effective_accumulator.cpp
   src/material_nuclear_data.cpp
 )
 

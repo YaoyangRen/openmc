@@ -16,6 +16,7 @@
 
 namespace openmc {
 
+class BetaEffectiveAccumulator;
 class SharedMeshGrid;
 
 constexpr int STATUS_EXIT_NORMAL {0};
@@ -59,6 +60,8 @@ extern std::unique_ptr<GreenFunctionMesh>
 
 extern std::unique_ptr<FissionMatrix>
   fission_matrix; // Fission Matrix (裂变矩阵)
+
+extern std::unique_ptr<BetaEffectiveAccumulator> beta_effective_accumulator;
 
 extern std::unique_ptr<FluxMesh>
   flux_mesh; // Flux distribution mesh (通量分布网格)

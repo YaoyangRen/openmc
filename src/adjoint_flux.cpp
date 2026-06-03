@@ -260,21 +260,8 @@ void AdjointFlux::compute_from_files(const std::string& transfer_function_file,
       "裂变矩阵文件中未找到伴随源。请先运行 compute_adjoint_source。");
   }
 
-  // 优先读取分群伴随源（新格式），否则读取标量（旧格式）
   vector<double> adjoint_source;
-  int fm_n_source_groups = 1;
-  if (attribute_exists(fm_file, "n_source_groups")) {
-    read_attribute(fm_file, "n_source_groups", fm_n_source_groups);
-  }
-
-  bool use_grouped = false;
-  if (fm_n_source_groups > 1 &&
-      object_exists(fm_file, "adjoint_source_grouped")) {
-    read_dataset(fm_file, "adjoint_source_grouped", adjoint_source);
-    use_grouped = true;
-  } else {
-    read_dataset(fm_file, "adjoint_source", adjoint_source);
-  }
+  read_dataset(fm_file, "adjoint_source", adjoint_source);
 
   double keff_reference = 0.0;
   if (attribute_exists(fm_file, "keff_reference")) {
@@ -289,41 +276,27 @@ void AdjointFlux::compute_from_files(const std::string& transfer_function_file,
   file_close(fm_file);
 
   std::cout << "  伴随源: " << adjoint_source.size()
-            << (use_grouped ? " 状态 (分群)" : " 单元 (标量)");
+            << " 单元 (spatial I*)";
   if (keff_reference > 0.0) {
     std::cout << ", keff=" << std::fixed << std::setprecision(5)
               << keff_reference;
   }
   std::cout << std::endl;
 
-  // 确定有效的 n_source_groups（取 TF 文件和 FM 文件的一致值）
-  int effective_n_source_groups = use_grouped ? fm_n_source_groups : 1;
-
   // 验证网格一致性
-  size_t expected_adj_size = n_cells_ * effective_n_source_groups;
-  if (adjoint_source.size() != expected_adj_size) {
-    // 尝试回退到标量
-    if (use_grouped && adjoint_source.size() == n_cells_) {
-      effective_n_source_groups = 1;
-    } else {
-      fatal_error("网格不匹配: 传递函数有 " + std::to_string(n_cells_) +
-                  " 个单元，但伴随源有 " +
-                  std::to_string(adjoint_source.size()) + " 个条目");
-    }
+  if (adjoint_source.size() != n_cells_) {
+    fatal_error("网格不匹配: 传递函数有 " + std::to_string(n_cells_) +
+                " 个单元，但伴随源有 " +
+                std::to_string(adjoint_source.size()) + " 个条目");
   }
 
   // 3. 计算 response-weighted importance
   std::cout << "\n计算 response-weighted importance: "
                "I_response(r,g) = Σ_{source_state} T(s→r,g) × I*(s)"
             << std::endl;
-  if (effective_n_source_groups > 1) {
-    std::cout << "  使用能量分辨伴随源: " << effective_n_source_groups
-              << " 个源能群" << std::endl;
-  }
-
   compute_from_memory(transfer_functions, adjoint_source, shape_, origin_,
     pitch_, tf_n_groups, tf_n_families, std::move(tf_energy_edges),
-    effective_n_source_groups);
+    1);
   upper_right_ = tf_grid.upper_right;
 
   // 4. 写入输出文件

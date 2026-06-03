@@ -6,6 +6,7 @@
 #include <fmt/core.h>
 
 #include "openmc/bank.h"
+#include "openmc/beta_effective_accumulator.h"
 #include "openmc/constants.h"
 #include "openmc/eigenvalue.h"
 #include "openmc/error.h"
@@ -193,12 +194,22 @@ void create_fission_sites(Particle& p)
         simulation::fission_matrix->record_fission_site(site.r, site.wgt,
           p.source_particle_id(), -1.0, static_cast<int>(site.E));
       }
+      if (simulation::beta_effective_accumulator &&
+          simulation::current_batch > settings::n_inactive) {
+        simulation::beta_effective_accumulator->score_fission_site(site.r,
+          site.wgt, site.delayed_group);
+      }
     } else {
       p.secondary_bank().push_back(site);
       if (simulation::fission_matrix && p.source_particle_id() != -1 &&
           simulation::current_batch <= settings::n_inactive) {
         simulation::fission_matrix->record_fission_site(site.r, site.wgt,
           p.source_particle_id(), -1.0, static_cast<int>(site.E));
+      }
+      if (simulation::beta_effective_accumulator &&
+          simulation::current_batch > settings::n_inactive) {
+        simulation::beta_effective_accumulator->score_fission_site(site.r,
+          site.wgt, site.delayed_group);
       }
     }
 
