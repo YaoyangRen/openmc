@@ -27,6 +27,8 @@ BetaEffectiveAccumulator::BetaEffectiveAccumulator(
   const size_t n_cells = grid_->n_cells();
   current_source_counts_.assign(n_cells, 0);
   current_cclutch_transfer_total_.assign(n_cells, 0.0);
+  current_cclutch_transfer_lifetime_.assign(n_cells, 0.0);
+  current_cclutch_transfer_emission_adjusted_lifetime_.assign(n_cells, 0.0);
   std::array<double, N_DELAYED_GROUPS> zero_delayed {};
   current_cclutch_transfer_delayed_.assign(n_cells, zero_delayed);
 }
@@ -74,6 +76,10 @@ void BetaEffectiveAccumulator::begin_batch(int batch_id)
   std::fill(current_source_counts_.begin(), current_source_counts_.end(), 0);
   std::fill(current_cclutch_transfer_total_.begin(),
     current_cclutch_transfer_total_.end(), 0.0);
+  std::fill(current_cclutch_transfer_lifetime_.begin(),
+    current_cclutch_transfer_lifetime_.end(), 0.0);
+  std::fill(current_cclutch_transfer_emission_adjusted_lifetime_.begin(),
+    current_cclutch_transfer_emission_adjusted_lifetime_.end(), 0.0);
   for (auto& delayed : current_cclutch_transfer_delayed_) {
     delayed.fill(0.0);
   }
@@ -124,11 +130,20 @@ void BetaEffectiveAccumulator::record_source_birth(
   }
 }
 
-void BetaEffectiveAccumulator::score_fission_site(
-  const Position& r, double site_weight, int delayed_group)
+void BetaEffectiveAccumulator::score_fission_site(const Position& r,
+  double site_weight, int delayed_group, double neutron_lifetime,
+  double delayed_group_delay)
 {
   if (!std::isfinite(site_weight) || site_weight <= 0.0) {
     return;
+  }
+  if (!std::isfinite(neutron_lifetime) || neutron_lifetime < 0.0) {
+    fatal_error("BetaEffectiveAccumulator: fission-site neutron lifetime is "
+                "negative or non-finite.");
+  }
+  if (!std::isfinite(delayed_group_delay) || delayed_group_delay < 0.0) {
+    fatal_error("BetaEffectiveAccumulator: delayed-group mean delay is "
+                "negative or non-finite.");
   }
 
   std::lock_guard<std::mutex> lock(mutex_);
@@ -157,13 +172,19 @@ void BetaEffectiveAccumulator::score_fission_site(
     return;
   }
 
-  current_batch_.denominator += site_weight * importance;
+  const double score_weight = site_weight * importance;
+  current_batch_.denominator += score_weight;
+  current_batch_.lifetime_numerator += score_weight * neutron_lifetime;
+  current_batch_.emission_adjusted_lifetime_numerator +=
+    score_weight * neutron_lifetime;
 
   if (delayed_group < 0 || delayed_group > N_DELAYED_GROUPS) {
     ++current_batch_.invalid_delayed_group_sites;
     ++total_invalid_delayed_group_sites_;
   } else if (delayed_group > 0) {
-    current_batch_.numerator[delayed_group - 1] += site_weight * importance;
+    current_batch_.numerator[delayed_group - 1] += score_weight;
+    current_batch_.emission_adjusted_lifetime_numerator +=
+      score_weight * delayed_group_delay;
   }
 
   ++current_batch_.scored_sites;
@@ -172,10 +193,16 @@ void BetaEffectiveAccumulator::score_fission_site(
 
 void BetaEffectiveAccumulator::score_cclutch_fission_event(const Position& r,
   int64_t source_particle_id, double total_contribution,
-  const std::array<double, N_DELAYED_GROUPS>& delayed_contributions)
+  const std::array<double, N_DELAYED_GROUPS>& delayed_contributions,
+  double neutron_lifetime,
+  const std::array<double, N_DELAYED_GROUPS>& delayed_group_delays)
 {
   if (!std::isfinite(total_contribution) || total_contribution <= 0.0) {
     return;
+  }
+  if (!std::isfinite(neutron_lifetime) || neutron_lifetime < 0.0) {
+    fatal_error("BetaEffectiveAccumulator: C-CLUTCH neutron lifetime is "
+                "negative or non-finite.");
   }
 
   std::lock_guard<std::mutex> lock(mutex_);
@@ -212,10 +239,21 @@ void BetaEffectiveAccumulator::score_cclutch_fission_event(const Position& r,
   }
 
   current_cclutch_transfer_total_[source_cell] += total_contribution;
+  current_cclutch_transfer_lifetime_[source_cell] +=
+    total_contribution * neutron_lifetime;
+  current_cclutch_transfer_emission_adjusted_lifetime_[source_cell] +=
+    total_contribution * neutron_lifetime;
   for (int k = 0; k < N_DELAYED_GROUPS; ++k) {
     const double delayed = delayed_contributions[k];
     if (std::isfinite(delayed) && delayed > 0.0) {
+      const double delay = delayed_group_delays[k];
+      if (!std::isfinite(delay) || delay <= 0.0) {
+        fatal_error("BetaEffectiveAccumulator: C-CLUTCH delayed response has "
+                    "no positive delayed-group mean delay.");
+      }
       current_cclutch_transfer_delayed_[source_cell][k] += delayed;
+      current_cclutch_transfer_emission_adjusted_lifetime_[source_cell] +=
+        delayed * delay;
     }
   }
 
@@ -251,6 +289,11 @@ void BetaEffectiveAccumulator::fold_current_cclutch_batch()
     const double source_weight =
       importance / static_cast<double>(source_count);
     current_batch_.cclutch_denominator += source_weight * total;
+    current_batch_.cclutch_lifetime_numerator +=
+      source_weight * current_cclutch_transfer_lifetime_[source_cell];
+    current_batch_.cclutch_emission_adjusted_lifetime_numerator +=
+      source_weight *
+      current_cclutch_transfer_emission_adjusted_lifetime_[source_cell];
     for (int k = 0; k < N_DELAYED_GROUPS; ++k) {
       current_batch_.cclutch_numerator[k] +=
         source_weight * current_cclutch_transfer_delayed_[source_cell][k];
@@ -268,6 +311,18 @@ BetaEffectiveAccumulator::MethodResult
 BetaEffectiveAccumulator::compute_cclutch_result() const
 {
   return compute_result(true);
+}
+
+BetaEffectiveAccumulator::GenerationTimeResult
+BetaEffectiveAccumulator::compute_generation_time_result() const
+{
+  return compute_generation_time_result(false);
+}
+
+BetaEffectiveAccumulator::GenerationTimeResult
+BetaEffectiveAccumulator::compute_cclutch_generation_time_result() const
+{
+  return compute_generation_time_result(true);
 }
 
 BetaEffectiveAccumulator::MethodResult
@@ -365,6 +420,86 @@ BetaEffectiveAccumulator::compute_result(bool use_cclutch) const
     result.beta_total_uncertainty =
       std::sqrt(s2 / (static_cast<double>(n) * mean_denominator *
                        mean_denominator));
+  }
+
+  return result;
+}
+
+BetaEffectiveAccumulator::GenerationTimeResult
+BetaEffectiveAccumulator::compute_generation_time_result(
+  bool use_cclutch) const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  GenerationTimeResult result;
+  const size_t n = batches_.size();
+  if (n == 0) {
+    return result;
+  }
+
+  double sum_denominator = 0.0;
+  double sum_lifetime = 0.0;
+  double sum_emission_adjusted = 0.0;
+  for (const auto& batch : batches_) {
+    sum_denominator +=
+      use_cclutch ? batch.cclutch_denominator : batch.denominator;
+    sum_lifetime += use_cclutch ? batch.cclutch_lifetime_numerator
+                                : batch.lifetime_numerator;
+    sum_emission_adjusted +=
+      use_cclutch ? batch.cclutch_emission_adjusted_lifetime_numerator
+                  : batch.emission_adjusted_lifetime_numerator;
+  }
+
+  if (sum_denominator <= 0.0) {
+    return result;
+  }
+
+  const double inv_n = 1.0 / static_cast<double>(n);
+  const double mean_denominator = sum_denominator * inv_n;
+  const double mean_lifetime = sum_lifetime * inv_n;
+  const double mean_emission_adjusted = sum_emission_adjusted * inv_n;
+  result.available = true;
+  result.denominator = mean_denominator;
+  result.lifetime_numerator = mean_lifetime;
+  result.emission_adjusted_lifetime_numerator = mean_emission_adjusted;
+  result.transport_lifetime = mean_lifetime / mean_denominator;
+  result.emission_adjusted_lifetime =
+    mean_emission_adjusted / mean_denominator;
+
+  if (n > 1) {
+    auto ratio_uncertainty = [&](double ratio, bool adjusted) {
+      double mean_z = 0.0;
+      std::vector<double> z_values;
+      z_values.reserve(n);
+      for (const auto& batch : batches_) {
+        const double numerator =
+          adjusted ? (use_cclutch
+                         ? batch.cclutch_emission_adjusted_lifetime_numerator
+                         : batch.emission_adjusted_lifetime_numerator)
+                   : (use_cclutch ? batch.cclutch_lifetime_numerator
+                                  : batch.lifetime_numerator);
+        const double denominator =
+          use_cclutch ? batch.cclutch_denominator : batch.denominator;
+        const double z = numerator - ratio * denominator;
+        z_values.push_back(z);
+        mean_z += z;
+      }
+      mean_z *= inv_n;
+
+      double s2 = 0.0;
+      for (double z : z_values) {
+        const double dz = z - mean_z;
+        s2 += dz * dz;
+      }
+      s2 /= static_cast<double>(n - 1);
+      return std::sqrt(s2 / (static_cast<double>(n) * mean_denominator *
+                              mean_denominator));
+    };
+
+    result.transport_lifetime_uncertainty =
+      ratio_uncertainty(result.transport_lifetime, false);
+    result.emission_adjusted_lifetime_uncertainty =
+      ratio_uncertainty(result.emission_adjusted_lifetime, true);
   }
 
   return result;
@@ -468,6 +603,75 @@ void BetaEffectiveAccumulator::write_method_group(hid_t parent,
   write_dataset(group, "batch_denominator", batch_denominator);
   write_batch_matrix(
     group, "batch_numerator", batch_numerator, batches_.size());
+
+  H5Gclose(group);
+}
+
+void BetaEffectiveAccumulator::write_generation_time_method_group(hid_t parent,
+  const char* name, const GenerationTimeResult& result, bool use_cclutch) const
+{
+  hid_t group = create_group(parent, name);
+  write_attribute(group, "available", static_cast<int>(result.available));
+  write_attribute(group, "uses_ifp", 0);
+  write_attribute(group, "units", "s");
+  write_attribute(group, "source_state_definition", "cell");
+  write_attribute(group, "uses_transfer_function", use_cclutch ? 1 : 0);
+  write_attribute(group, "delay_treatment", "group_mean_1_over_lambda");
+  write_attribute(group, "transport_lifetime_definition",
+    "Particle::lifetime() from source birth to fission event");
+  write_attribute(group, "emission_adjusted_lifetime_definition",
+    "transport_lifetime plus delayed group mean precursor delay for delayed "
+    "response only");
+  if (use_cclutch) {
+    write_attribute(group, "formula",
+      "D=mean_b sum_source I*(source_cell) T_total(source_cell); "
+      "L=mean_b sum_source I*(source_cell) T_lifetime(source_cell)");
+  } else {
+    write_attribute(group, "formula",
+      "D=mean_b sum_sites w_site I*(cell); "
+      "L=mean_b sum_sites w_site I*(cell) lifetime");
+  }
+
+  write_dataset(
+    group, "transport_lifetime", std::vector<double> {result.transport_lifetime});
+  write_dataset(group, "emission_adjusted_lifetime",
+    std::vector<double> {result.emission_adjusted_lifetime});
+  write_dataset(group, "denominator", std::vector<double> {result.denominator});
+  write_dataset(group, "lifetime_numerator",
+    std::vector<double> {result.lifetime_numerator});
+  write_dataset(group, "emission_adjusted_lifetime_numerator",
+    std::vector<double> {result.emission_adjusted_lifetime_numerator});
+  write_dataset(group, "uncertainty",
+    std::vector<double> {result.transport_lifetime_uncertainty});
+  write_dataset(group, "emission_adjusted_uncertainty",
+    std::vector<double> {result.emission_adjusted_lifetime_uncertainty});
+
+  std::vector<int> batch_ids;
+  std::vector<double> batch_denominator;
+  std::vector<double> batch_lifetime_numerator;
+  std::vector<double> batch_emission_adjusted_lifetime_numerator;
+  batch_ids.reserve(batches_.size());
+  batch_denominator.reserve(batches_.size());
+  batch_lifetime_numerator.reserve(batches_.size());
+  batch_emission_adjusted_lifetime_numerator.reserve(batches_.size());
+
+  for (const auto& batch : batches_) {
+    batch_ids.push_back(batch.batch_id);
+    batch_denominator.push_back(
+      use_cclutch ? batch.cclutch_denominator : batch.denominator);
+    batch_lifetime_numerator.push_back(
+      use_cclutch ? batch.cclutch_lifetime_numerator
+                  : batch.lifetime_numerator);
+    batch_emission_adjusted_lifetime_numerator.push_back(
+      use_cclutch ? batch.cclutch_emission_adjusted_lifetime_numerator
+                  : batch.emission_adjusted_lifetime_numerator);
+  }
+
+  write_dataset(group, "batch_ids", batch_ids);
+  write_dataset(group, "batch_denominator", batch_denominator);
+  write_dataset(group, "batch_lifetime_numerator", batch_lifetime_numerator);
+  write_dataset(group, "batch_emission_adjusted_lifetime_numerator",
+    batch_emission_adjusted_lifetime_numerator);
 
   H5Gclose(group);
 }
@@ -600,6 +804,90 @@ void BetaEffectiveAccumulator::write_to_file(const std::string& filename) const
   std::cout << "  (*) Primary method: F-CLUTCH fission-site scoring with "
                "spatial I*(cell); C-CLUTCH folds active transfer functions "
                "with the same spatial source importance."
+            << std::endl;
+}
+
+void BetaEffectiveAccumulator::write_generation_time_to_file(
+  const std::string& filename) const
+{
+  if (batch_active_) {
+    fatal_error("BetaEffectiveAccumulator: cannot write generation time while "
+                "a batch is active.");
+  }
+
+  auto result = compute_generation_time_result();
+  auto cclutch_result = compute_cclutch_generation_time_result();
+  if (!result.available) {
+    fatal_error("F-CLUTCH generation-time denominator is zero. Verify the "
+                "spatial adjoint source and active fission-site scoring.");
+  }
+  if (!cclutch_result.available) {
+    fatal_error("C-CLUTCH generation-time denominator is zero. Verify active "
+                "source birth recording and C-CLUTCH fission event scoring.");
+  }
+
+  hid_t file_id = file_open(filename, 'w');
+  write_attribute(file_id, "filetype", "generation_time");
+  write_attribute(file_id, "version", "1.0");
+  write_attribute(file_id, "description",
+    "CLUTCH-weighted neutron generation time estimates");
+  write_attribute(file_id, "primary_method", "fclutch_spatial");
+  write_attribute(file_id, "units", "s");
+  write_attribute(file_id, "uses_ifp", 0);
+  write_attribute(file_id, "delay_treatment", "group_mean_1_over_lambda");
+  write_attribute(file_id, "source_state_definition", "cell");
+  write_attribute(file_id, "batchwise_ratio_uncertainty", 1);
+
+  write_dataset(
+    file_id, "generation_time", std::vector<double> {result.transport_lifetime});
+  write_dataset(file_id, "generation_time_uncertainty",
+    std::vector<double> {result.transport_lifetime_uncertainty});
+  write_dataset(file_id, "emission_adjusted_generation_time",
+    std::vector<double> {result.emission_adjusted_lifetime});
+  write_dataset(file_id, "emission_adjusted_generation_time_uncertainty",
+    std::vector<double> {result.emission_adjusted_lifetime_uncertainty});
+
+  hid_t metadata = create_group(file_id, "metadata");
+  write_attribute(metadata, "adjoint_source",
+    "fission_matrix.h5/adjoint_source generated by I*=(1/k)F^T I* on the "
+    "energy-integrated cell-to-cell fission matrix");
+  write_dataset(metadata, "grid_shape", grid_->shape());
+  write_dataset(metadata, "grid_lower_left", grid_->origin());
+  write_dataset(metadata, "grid_upper_right", grid_->upper_bound());
+  std::array<double, 3> pitch {grid_->pitch(), grid_->pitch(), grid_->pitch()};
+  write_dataset(metadata, "grid_pitch", pitch);
+  H5Gclose(metadata);
+
+  hid_t method_group = create_group(file_id, "method");
+  write_generation_time_method_group(
+    method_group, "fclutch_spatial", result, false);
+  write_generation_time_method_group(
+    method_group, "cclutch", cclutch_result, true);
+  H5Gclose(method_group);
+  file_close(file_id);
+
+  std::cout << "\n  neutron generation time results (CLUTCH-weighted):"
+            << std::endl;
+  std::cout << "  " << std::string(96, '-') << std::endl;
+  std::cout << "    method          transport_lifetime    unc_transport    "
+               "emission_adjusted    unc_adjusted"
+            << std::endl;
+  std::cout << "  " << std::string(96, '-') << std::endl;
+  std::cout << "    F-CLUTCH        " << std::scientific
+            << std::setprecision(5) << result.transport_lifetime << "        "
+            << result.transport_lifetime_uncertainty << "        "
+            << result.emission_adjusted_lifetime << "        "
+            << result.emission_adjusted_lifetime_uncertainty << std::endl;
+  std::cout << "    C-CLUTCH        " << cclutch_result.transport_lifetime
+            << "        " << cclutch_result.transport_lifetime_uncertainty
+            << "        " << cclutch_result.emission_adjusted_lifetime
+            << "        "
+            << cclutch_result.emission_adjusted_lifetime_uncertainty
+            << std::endl;
+  std::cout << "  " << std::string(96, '-') << std::endl;
+  std::cout << "  (*) transport_lifetime uses Particle::lifetime(); "
+               "emission_adjusted adds group-mean delayed precursor delay "
+               "1/lambda_g without sampling extra random numbers."
             << std::endl;
 }
 

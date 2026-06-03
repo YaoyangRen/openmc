@@ -1,6 +1,7 @@
 #include "openmc/physics_mg.h"
 
 #include <array>
+#include <cmath>
 #include <stdexcept>
 
 #include "xtensor/xarray.hpp"
@@ -112,6 +113,8 @@ void create_fission_sites(Particle& p)
       simulation::current_batch > settings::n_inactive) {
     std::array<double, BetaEffectiveAccumulator::N_DELAYED_GROUPS>
       delayed_contributions {};
+    std::array<double, BetaEffectiveAccumulator::N_DELAYED_GROUPS>
+      delayed_group_delays {};
     if (p.macro_xs().nu_fission > 0.0) {
       const int n_delayed = std::min(data::mg.num_delayed_groups_,
         BetaEffectiveAccumulator::N_DELAYED_GROUPS);
@@ -121,13 +124,24 @@ void create_fission_sites(Particle& p)
             p.g(), nullptr, nullptr, &d, p.mg_xs_cache().t,
             p.mg_xs_cache().a);
         if (delayed_nu_fission > 0.0) {
+          const double decay_rate =
+            data::mg.macro_xs_[p.material()].get_xs(MgxsType::DECAY_RATE,
+              p.g(), nullptr, nullptr, &d, p.mg_xs_cache().t,
+              p.mg_xs_cache().a);
+          if (!std::isfinite(decay_rate) || decay_rate <= 0.0) {
+            fatal_error(fmt::format("Invalid MG delayed neutron decay rate "
+                                    "for delayed group {}.",
+              d + 1));
+          }
           delayed_contributions[d] =
             nu_t * delayed_nu_fission / p.macro_xs().nu_fission;
+          delayed_group_delays[d] = 1.0 / decay_rate;
         }
       }
     }
     simulation::beta_effective_accumulator->score_cclutch_fission_event(p.r(),
-      p.source_particle_id(), nu_t, delayed_contributions);
+      p.source_particle_id(), nu_t, delayed_contributions, p.lifetime(),
+      delayed_group_delays);
   }
 
   // Sample the number of neutrons produced
@@ -196,6 +210,19 @@ void create_fission_sites(Particle& p)
     // of the code, 0 is prompt.
     site.delayed_group = dg + 1;
 
+    double delayed_group_delay = 0.0;
+    if (dg >= 0) {
+      const double decay_rate =
+        data::mg.macro_xs_[p.material()].get_xs(MgxsType::DECAY_RATE, p.g(),
+          nullptr, nullptr, &dg, p.mg_xs_cache().t, p.mg_xs_cache().a);
+      if (!std::isfinite(decay_rate) || decay_rate <= 0.0) {
+        fatal_error(fmt::format("Invalid MG delayed neutron decay rate for "
+                                "sampled delayed group {}.",
+          site.delayed_group));
+      }
+      delayed_group_delay = 1.0 / decay_rate;
+    }
+
     // Store fission site in bank
     if (use_fission_bank) {
       int64_t idx = simulation::fission_bank.thread_safe_append(site);
@@ -221,7 +248,7 @@ void create_fission_sites(Particle& p)
       if (simulation::beta_effective_accumulator &&
           simulation::current_batch > settings::n_inactive) {
         simulation::beta_effective_accumulator->score_fission_site(site.r,
-          site.wgt, site.delayed_group);
+          site.wgt, site.delayed_group, p.lifetime(), delayed_group_delay);
       }
       if (simulation::clutch_sensitivity_accumulator &&
           simulation::current_batch > settings::n_inactive) {
@@ -238,7 +265,7 @@ void create_fission_sites(Particle& p)
       if (simulation::beta_effective_accumulator &&
           simulation::current_batch > settings::n_inactive) {
         simulation::beta_effective_accumulator->score_fission_site(site.r,
-          site.wgt, site.delayed_group);
+          site.wgt, site.delayed_group, p.lifetime(), delayed_group_delay);
       }
       if (simulation::clutch_sensitivity_accumulator &&
           simulation::current_batch > settings::n_inactive) {

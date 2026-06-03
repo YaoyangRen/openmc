@@ -687,6 +687,8 @@ void finalize_batch()
     // Write beta_eff from active-batch F-CLUTCH fission-site scores.
     if (settings::beta_effective_on && simulation::beta_effective_accumulator) {
       simulation::beta_effective_accumulator->write_to_file("beta_eff.h5");
+      simulation::beta_effective_accumulator->write_generation_time_to_file(
+        "generation_time.h5");
     }
     if (settings::clutch_sensitivity_on &&
         simulation::clutch_sensitivity_accumulator) {

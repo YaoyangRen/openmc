@@ -81,6 +81,7 @@ final:
 ```text
 fission_matrix.h5
 beta_eff.h5
+generation_time.h5
 ```
 
 `flux_mesh.h5` 仅在用户显式启用 `flux_mesh_on` 时作为诊断输出生成。
@@ -341,6 +342,76 @@ method/cclutch/batch_ids
 method/cclutch/batch_denominator
 method/cclutch/batch_numerator
 ```
+
+## generation_time.h5
+
+`generation_time.h5` 是 `beta_eff` 功能的独立伴随输出文件。它使用与 `beta_eff.h5`
+相同的 inactive 裂变矩阵伴随源 `I*(cell)` 和相同的 active F/C-CLUTCH 分母，
+但分子从 delayed group 指示函数改为中子寿命。
+
+主结果为 F-CLUTCH 的输运寿命：
+
+```text
+generation_time = mean_b(L_b) / mean_b(D_b)
+L_b = sum_sites w_site * I*(cell) * Particle::lifetime()
+```
+
+其中 `Particle::lifetime()` 表示源中子出生到当前裂变事件的飞行/输运时间，单位为秒。
+该量不依赖 OpenMC 原有 IFP tally，也不需要 `ifp_n_generation`。
+
+文件同时写出诊断量 `emission_adjusted_generation_time`：
+
+```text
+L_adj,b = sum_sites w_site * I*(cell) * (Particle::lifetime() + delta_g)
+delta_g = 0                 prompt
+delta_g = 1 / lambda_g      delayed group g
+```
+
+`lambda_g` 来自 delayed neutron precursor decay rate。这里使用组平均延迟
+`1/lambda_g`，不做随机指数抽样，因此不会改变原有 `beta_eff` 随机数流。
+
+HDF5 根数据集：
+
+```text
+generation_time
+generation_time_uncertainty
+emission_adjusted_generation_time
+emission_adjusted_generation_time_uncertainty
+```
+
+方法组：
+
+```text
+method/fclutch_spatial/transport_lifetime
+method/fclutch_spatial/emission_adjusted_lifetime
+method/fclutch_spatial/denominator
+method/fclutch_spatial/lifetime_numerator
+method/fclutch_spatial/emission_adjusted_lifetime_numerator
+method/fclutch_spatial/uncertainty
+method/fclutch_spatial/emission_adjusted_uncertainty
+method/fclutch_spatial/batch_denominator
+method/fclutch_spatial/batch_lifetime_numerator
+method/fclutch_spatial/batch_emission_adjusted_lifetime_numerator
+method/cclutch/transport_lifetime
+method/cclutch/emission_adjusted_lifetime
+method/cclutch/denominator
+method/cclutch/lifetime_numerator
+method/cclutch/emission_adjusted_lifetime_numerator
+method/cclutch/uncertainty
+method/cclutch/emission_adjusted_uncertainty
+method/cclutch/batch_denominator
+method/cclutch/batch_lifetime_numerator
+method/cclutch/batch_emission_adjusted_lifetime_numerator
+```
+
+C-CLUTCH 中，输运寿命分子按 source cell 的 transfer function 折叠：
+
+```text
+L_c,b = sum_source I*(source_cell) * T_lifetime,b(source_cell)
+```
+
+其中 `T_lifetime,b(source_cell)` 已按该 source cell 的 active 源粒子数归一化。
+不确定度与 `beta_eff` 相同，使用 ratio-of-means 的 delta method，并包含分母协方差。
 
 诊断组：
 

@@ -185,6 +185,8 @@ void create_fission_sites(Particle& p, int i_nuclide, const Reaction& rx)
     if (simulation::beta_effective_accumulator) {
       std::array<double, BetaEffectiveAccumulator::N_DELAYED_GROUPS>
         delayed_contributions {};
+      std::array<double, BetaEffectiveAccumulator::N_DELAYED_GROUPS>
+        delayed_group_delays {};
       const auto& nuc = *data::nuclides[i_nuclide];
       const double nu_total_yield =
         nuc.nu(p.E(), Nuclide::EmissionMode::total);
@@ -195,12 +197,25 @@ void create_fission_sites(Particle& p, int i_nuclide, const Reaction& rx)
           const double nu_dk =
             nuc.nu(p.E(), Nuclide::EmissionMode::delayed, k);
           if (nu_dk > 0.0) {
+            if (k >= static_cast<int>(rx.products_.size())) {
+              fatal_error(fmt::format("Delayed group {} is missing from "
+                                      "fission reaction products for {}.",
+                k, nuc.name_));
+            }
+            const double decay_rate = rx.products_[k].decay_rate_;
+            if (!std::isfinite(decay_rate) || decay_rate <= 0.0) {
+              fatal_error(fmt::format("Invalid delayed neutron decay rate for "
+                                      "{} delayed group {}.",
+                nuc.name_, k));
+            }
             delayed_contributions[k - 1] = nu_t * nu_dk / nu_total_yield;
+            delayed_group_delays[k - 1] = 1.0 / decay_rate;
           }
         }
       }
       simulation::beta_effective_accumulator->score_cclutch_fission_event(p.r(),
-        p.source_particle_id(), nu_t, delayed_contributions);
+        p.source_particle_id(), nu_t, delayed_contributions, p.lifetime(),
+        delayed_group_delays);
     }
     if (simulation::clutch_sensitivity_accumulator) {
       simulation::clutch_sensitivity_accumulator->score_cclutch_fission_event(
@@ -254,6 +269,23 @@ void create_fission_sites(Particle& p, int i_nuclide, const Reaction& rx)
     // Sample delayed group and angle/energy for fission reaction
     sample_fission_neutron(i_nuclide, rx, &site, p);
 
+    double delayed_group_delay = 0.0;
+    if (site.delayed_group > 0) {
+      const auto& nuc = *data::nuclides[i_nuclide];
+      if (site.delayed_group >= static_cast<int>(rx.products_.size())) {
+        fatal_error(fmt::format("Delayed group {} is missing from fission "
+                                "reaction products for {}.",
+          site.delayed_group, nuc.name_));
+      }
+      const double decay_rate = rx.products_[site.delayed_group].decay_rate_;
+      if (!std::isfinite(decay_rate) || decay_rate <= 0.0) {
+        fatal_error(fmt::format("Invalid delayed neutron decay rate for {} "
+                                "delayed group {}.",
+          nuc.name_, site.delayed_group));
+      }
+      delayed_group_delay = 1.0 / decay_rate;
+    }
+
     // Store fission site in bank
     if (use_fission_bank) {
       int64_t idx = simulation::fission_bank.thread_safe_append(site);
@@ -283,7 +315,8 @@ void create_fission_sites(Particle& p, int i_nuclide, const Reaction& rx)
       if (simulation::beta_effective_accumulator &&
           simulation::current_batch > settings::n_inactive) {
         simulation::beta_effective_accumulator->score_fission_site(
-          site.r, site.wgt, site.delayed_group);
+          site.r, site.wgt, site.delayed_group, p.lifetime(),
+          delayed_group_delay);
       }
       if (simulation::clutch_sensitivity_accumulator &&
           simulation::current_batch > settings::n_inactive) {
@@ -304,7 +337,8 @@ void create_fission_sites(Particle& p, int i_nuclide, const Reaction& rx)
       if (simulation::beta_effective_accumulator &&
           simulation::current_batch > settings::n_inactive) {
         simulation::beta_effective_accumulator->score_fission_site(
-          site.r, site.wgt, site.delayed_group);
+          site.r, site.wgt, site.delayed_group, p.lifetime(),
+          delayed_group_delay);
       }
       if (simulation::clutch_sensitivity_accumulator &&
           simulation::current_batch > settings::n_inactive) {

@@ -30,6 +30,17 @@ public:
     double beta_total_uncertainty {0.0};
   };
 
+  struct GenerationTimeResult {
+    bool available {false};
+    double denominator {0.0};
+    double lifetime_numerator {0.0};
+    double emission_adjusted_lifetime_numerator {0.0};
+    double transport_lifetime {0.0};
+    double transport_lifetime_uncertainty {0.0};
+    double emission_adjusted_lifetime {0.0};
+    double emission_adjusted_lifetime_uncertainty {0.0};
+  };
+
   explicit BetaEffectiveAccumulator(std::shared_ptr<SharedMeshGrid> grid);
 
   void set_adjoint_source_spatial(
@@ -40,29 +51,39 @@ public:
 
   void record_source_birth(const Position& r, int64_t source_particle_id);
 
-  void score_fission_site(
-    const Position& r, double site_weight, int delayed_group);
+  void score_fission_site(const Position& r, double site_weight,
+    int delayed_group, double neutron_lifetime, double delayed_group_delay);
 
   void score_cclutch_fission_event(const Position& r,
     int64_t source_particle_id, double total_contribution,
-    const std::array<double, N_DELAYED_GROUPS>& delayed_contributions);
+    const std::array<double, N_DELAYED_GROUPS>& delayed_contributions,
+    double neutron_lifetime,
+    const std::array<double, N_DELAYED_GROUPS>& delayed_group_delays);
 
   MethodResult compute_result() const;
   MethodResult compute_cclutch_result() const;
+  GenerationTimeResult compute_generation_time_result() const;
+  GenerationTimeResult compute_cclutch_generation_time_result() const;
 
   size_t n_batches() const;
   size_t scored_sites() const;
   bool has_adjoint_source() const { return source_ready_; }
 
   void write_to_file(const std::string& filename = "beta_eff.h5") const;
+  void write_generation_time_to_file(
+    const std::string& filename = "generation_time.h5") const;
 
 private:
   struct BatchScore {
     int batch_id {-1};
     double denominator {0.0};
     std::array<double, N_DELAYED_GROUPS> numerator {};
+    double lifetime_numerator {0.0};
+    double emission_adjusted_lifetime_numerator {0.0};
     double cclutch_denominator {0.0};
     std::array<double, N_DELAYED_GROUPS> cclutch_numerator {};
+    double cclutch_lifetime_numerator {0.0};
+    double cclutch_emission_adjusted_lifetime_numerator {0.0};
     int64_t fission_sites {0};
     int64_t scored_sites {0};
     int64_t dropped_sites {0};
@@ -75,10 +96,13 @@ private:
 
   int position_to_index(const Position& r) const;
   MethodResult compute_result(bool use_cclutch) const;
+  GenerationTimeResult compute_generation_time_result(bool use_cclutch) const;
   void fold_current_cclutch_batch();
   void write_method_group(
     hid_t parent, const char* name, const MethodResult& result,
     bool use_cclutch) const;
+  void write_generation_time_method_group(hid_t parent, const char* name,
+    const GenerationTimeResult& result, bool use_cclutch) const;
   void write_batch_matrix(hid_t group, const char* name,
     const std::vector<double>& flat, hsize_t n_batches) const;
 
@@ -97,6 +121,8 @@ private:
   std::unordered_map<int64_t, int> current_source_cells_;
   std::vector<int> current_source_counts_;
   std::vector<double> current_cclutch_transfer_total_;
+  std::vector<double> current_cclutch_transfer_lifetime_;
+  std::vector<double> current_cclutch_transfer_emission_adjusted_lifetime_;
   std::vector<std::array<double, N_DELAYED_GROUPS>>
     current_cclutch_transfer_delayed_;
 
