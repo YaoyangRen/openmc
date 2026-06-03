@@ -185,7 +185,7 @@ class Model:
         adjoint_source : dict, optional
             Fission-matrix source importance iteration controls. If omitted,
             the current default is used: uniform initial guess, 100 iterations,
-            and tolerance of 1e-8.
+            tolerance of 1e-8, and fission-matrix scoring from inactive batch 3.
         include_ifp : bool
             Whether to include the IFP scores in the generated tally.
         tally_id : int or None
@@ -207,12 +207,89 @@ class Model:
             'initial_guess': 'uniform',
             'max_iterations': 100,
             'tolerance': 1.0e-8,
+            'score_start_batch': 3,
         }
         if adjoint_source is not None:
             controls.update(adjoint_source)
         self.settings.adjoint_source = controls
         return self.tallies.add_clutch_tally(
             tally_id=tally_id, name=tally_name, include_ifp=include_ifp)
+
+    def enable_clutch_sensitivity(
+        self,
+        derivatives: openmc.TallyDerivative | Iterable[openmc.TallyDerivative],
+        method: str = 'hybrid',
+        output: PathLike = 'clutch_sensitivity.h5',
+        kinetics_energy_edges: Iterable[float] | None = None,
+        kinetics_mesh: dict | None = None,
+        adjoint_source: dict | None = None,
+    ) -> list[openmc.TallyDerivative]:
+        """Configure generalized CLUTCH k-effective sensitivity inputs.
+
+        This helper exports standalone :class:`openmc.TallyDerivative` objects
+        and writes the ``<clutch_sensitivity>`` settings node. It does not add
+        ordinary tally scores.
+
+        Parameters
+        ----------
+        derivatives : openmc.TallyDerivative or iterable of openmc.TallyDerivative
+            Material perturbation derivatives to score.
+        method : {'hybrid', 'fclutch_fm', 'cclutch_history'}
+            CLUTCH sensitivity output method.
+        output : path-like
+            HDF5 output filename.
+        kinetics_energy_edges : iterable of float, optional
+            Energy boundaries for shared kinetics settings.
+        kinetics_mesh : dict, optional
+            Shared kinetics mesh settings.
+        adjoint_source : dict, optional
+            Fission-matrix source importance iteration controls.
+
+        Returns
+        -------
+        list of openmc.TallyDerivative
+            The derivatives configured for CLUTCH sensitivity.
+
+        """
+        if isinstance(derivatives, openmc.TallyDerivative):
+            derivatives = [derivatives]
+        else:
+            check_type('CLUTCH sensitivity derivatives', derivatives, Iterable,
+                       openmc.TallyDerivative)
+            derivatives = list(derivatives)
+        if not derivatives:
+            raise ValueError('CLUTCH sensitivity requires at least one derivative')
+
+        check_type('CLUTCH sensitivity method', method, str)
+        method = method.lower()
+        check_value('CLUTCH sensitivity method', method,
+                    ('hybrid', 'fclutch_fm', 'cclutch_history'))
+        check_type('CLUTCH sensitivity output', output, PathLike)
+
+        if kinetics_energy_edges is not None:
+            self.settings.kinetics_energy_edges = kinetics_energy_edges
+        if kinetics_mesh is not None:
+            self.settings.kinetics_mesh = kinetics_mesh
+        controls = {
+            'initial_guess': 'uniform',
+            'max_iterations': 100,
+            'tolerance': 1.0e-8,
+            'score_start_batch': 3,
+        }
+        if adjoint_source is not None:
+            controls.update(adjoint_source)
+        self.settings.adjoint_source = controls
+
+        for derivative in derivatives:
+            if derivative not in self.tallies.derivatives:
+                self.tallies.derivatives.append(derivative)
+
+        self.settings.clutch_sensitivity = {
+            'method': method,
+            'output': str(output),
+            'derivative_ids': [derivative.id for derivative in derivatives],
+        }
+        return derivatives
 
     @property
     @lru_cache(maxsize=None)

@@ -1260,7 +1260,8 @@ void nuclides_clear()
 
 bool multipole_in_range(const Nuclide& nuc, double E)
 {
-  return E >= nuc.multipole_->E_min_ && E <= nuc.multipole_->E_max_;
+  return nuc.multipole_ && E >= nuc.multipole_->E_min_ &&
+         E <= nuc.multipole_->E_max_;
 }
 
 } // namespace openmc

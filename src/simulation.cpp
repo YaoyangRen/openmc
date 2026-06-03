@@ -37,6 +37,7 @@
 #include <iomanip>
 
 #include "openmc/beta_effective_accumulator.h"
+#include "openmc/clutch_sensitivity_accumulator.h"
 
 #ifdef OPENMC_MPI
 #include <mpi.h>
@@ -303,6 +304,38 @@ bool openmc_is_statepoint_batch()
 
 namespace openmc {
 
+namespace {
+
+vector<int> resolve_clutch_sensitivity_derivatives()
+{
+  if (model::tally_derivs.empty()) {
+    fatal_error("CLUTCH sensitivity requires at least one <derivative> in "
+                "tallies.xml.");
+  }
+
+  vector<int> derivative_indices;
+  if (settings::clutch_sensitivity_derivative_ids.empty()) {
+    derivative_indices.reserve(model::tally_derivs.size());
+    for (int i = 0; i < static_cast<int>(model::tally_derivs.size()); ++i) {
+      derivative_indices.push_back(i);
+    }
+    return derivative_indices;
+  }
+
+  derivative_indices.reserve(settings::clutch_sensitivity_derivative_ids.size());
+  for (int id : settings::clutch_sensitivity_derivative_ids) {
+    auto it = model::tally_deriv_map.find(id);
+    if (it == model::tally_deriv_map.end()) {
+      fatal_error("CLUTCH sensitivity references derivative ID " +
+                  std::to_string(id) + ", which is not defined.");
+    }
+    derivative_indices.push_back(it->second);
+  }
+  return derivative_indices;
+}
+
+} // namespace
+
 //==============================================================================
 // Global variables
 //==============================================================================
@@ -336,6 +369,7 @@ vector<int64_t> work_index;
 std::unique_ptr<GreenFunctionMesh> transfer_function_mesh;
 std::unique_ptr<FissionMatrix> fission_matrix;
 std::unique_ptr<BetaEffectiveAccumulator> beta_effective_accumulator;
+std::unique_ptr<ClutchSensitivityAccumulator> clutch_sensitivity_accumulator;
 std::unique_ptr<FluxMesh> flux_mesh;
 std::shared_ptr<SharedMeshGrid> shared_mesh_grid;
 
@@ -417,13 +451,32 @@ void initialize_batch()
 
   // Initialize fission matrix (spatial CLUTCH source-state matrix).
   if (settings::clutch_on && !simulation::fission_matrix) {
+    int score_start_batch = settings::fission_matrix_score_start_batch;
+    if (settings::n_inactive > 0) {
+      score_start_batch = std::min(score_start_batch, settings::n_inactive);
+    }
+    if (score_start_batch != settings::fission_matrix_score_start_batch) {
+      warning(fmt::format(
+        "Requested <adjoint_source>/<score_start_batch>={} is greater than "
+        "the number of inactive batches; using {} instead.",
+        settings::fission_matrix_score_start_batch, score_start_batch));
+    }
     simulation::fission_matrix = std::make_unique<FissionMatrix>(
-      shared_grid, settings::n_batches, settings::kinetics_energy_edges);
+      shared_grid, settings::n_batches, settings::kinetics_energy_edges,
+      score_start_batch);
   }
 
-  if (settings::clutch_on && !simulation::beta_effective_accumulator) {
+  if (settings::beta_effective_on && !simulation::beta_effective_accumulator) {
     simulation::beta_effective_accumulator =
       std::make_unique<BetaEffectiveAccumulator>(shared_grid);
+  }
+
+  if (settings::clutch_sensitivity_on &&
+      !simulation::clutch_sensitivity_accumulator) {
+    auto derivative_indices = resolve_clutch_sensitivity_derivatives();
+    simulation::clutch_sensitivity_accumulator =
+      std::make_unique<ClutchSensitivityAccumulator>(shared_grid,
+        std::move(derivative_indices), settings::clutch_sensitivity_method);
   }
 
   // Initialize flux mesh (通量分布网格)
@@ -464,9 +517,15 @@ void initialize_batch()
     simulation::fission_matrix->start_new_batch(simulation::current_batch);
   }
 
-  if (settings::clutch_on && simulation::beta_effective_accumulator &&
+  if (settings::beta_effective_on && simulation::beta_effective_accumulator &&
       simulation::current_batch > settings::n_inactive) {
     simulation::beta_effective_accumulator->begin_batch(
+      simulation::current_batch);
+  }
+  if (settings::clutch_sensitivity_on &&
+      simulation::clutch_sensitivity_accumulator &&
+      simulation::current_batch > settings::n_inactive) {
+    simulation::clutch_sensitivity_accumulator->begin_batch(
       simulation::current_batch);
   }
 }
@@ -593,6 +652,10 @@ void finalize_batch()
       simulation::beta_effective_accumulator->set_adjoint_source_spatial(
         simulation::fission_matrix->get_spatial_adjoint_source());
     }
+    if (simulation::clutch_sensitivity_accumulator) {
+      simulation::clutch_sensitivity_accumulator->set_adjoint_source_spatial(
+        simulation::fission_matrix->get_spatial_adjoint_source());
+    }
 
     // 输出到文件
     simulation::fission_matrix->finalize("fission_matrix.h5");
@@ -608,6 +671,10 @@ void finalize_batch()
     simulation::beta_effective_accumulator->end_batch(
       simulation::current_batch);
   }
+  if (simulation::clutch_sensitivity_accumulator && active_batch) {
+    simulation::clutch_sensitivity_accumulator->end_batch(
+      simulation::current_batch);
+  }
 
   if (simulation::current_batch == settings::n_batches) {
     if (simulation::flux_mesh && settings::flux_mesh_on) {
@@ -616,10 +683,15 @@ void finalize_batch()
   }
 
   // Finalize beta_eff function at the end
-  if (settings::clutch_on && simulation::current_batch == settings::n_batches) {
+  if (simulation::current_batch == settings::n_batches) {
     // Write beta_eff from active-batch F-CLUTCH fission-site scores.
-    if (simulation::beta_effective_accumulator) {
+    if (settings::beta_effective_on && simulation::beta_effective_accumulator) {
       simulation::beta_effective_accumulator->write_to_file("beta_eff.h5");
+    }
+    if (settings::clutch_sensitivity_on &&
+        simulation::clutch_sensitivity_accumulator) {
+      simulation::clutch_sensitivity_accumulator->write_to_file(
+        settings::clutch_sensitivity_output);
     }
   }
 }

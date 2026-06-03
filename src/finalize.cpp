@@ -98,6 +98,7 @@ int openmc_finalize()
   settings::max_write_lost_particles = -1;
   settings::n_log_bins = 8000;
   settings::n_inactive = 0;
+  settings::fission_matrix_score_start_batch = 3;
   settings::n_particles = -1;
   settings::output_summary = true;
   settings::output_tallies = true;
@@ -132,6 +133,14 @@ int openmc_finalize()
   settings::temperature_multipole = false;
   settings::temperature_range = {0.0, 0.0};
   settings::temperature_tolerance = 10.0;
+  settings::adjoint_initial_guess = "uniform";
+  settings::adjoint_max_iterations = 1;
+  settings::adjoint_tolerance = 1.0e-6;
+  settings::beta_effective_on = false;
+  settings::clutch_sensitivity_on = false;
+  settings::clutch_sensitivity_method = "hybrid";
+  settings::clutch_sensitivity_output = "clutch_sensitivity.h5";
+  settings::clutch_sensitivity_derivative_ids.clear();
   settings::trigger_on = false;
   settings::trigger_predict = false;
   settings::trigger_batch_interval = 1;

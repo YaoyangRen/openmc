@@ -41,7 +41,13 @@ def test_export_to_xml(run_in_tmpdir):
     s.adjoint_source = {
         'initial_guess': 'uniform',
         'max_iterations': 100,
-        'tolerance': 1.0e-8
+        'tolerance': 1.0e-8,
+        'score_start_batch': 3
+    }
+    s.clutch_sensitivity = {
+        'method': 'hybrid',
+        'output': 'clutch_sensitivity.h5',
+        'derivative_ids': [1, 2]
     }
     mesh = openmc.RegularMesh()
     mesh.lower_left = (-10., -10., -10.)
@@ -127,7 +133,13 @@ def test_export_to_xml(run_in_tmpdir):
     assert s.adjoint_source == {
         'initial_guess': 'uniform',
         'max_iterations': 100,
-        'tolerance': 1.0e-8
+        'tolerance': 1.0e-8,
+        'score_start_batch': 3
+    }
+    assert s.clutch_sensitivity == {
+        'method': 'hybrid',
+        'output': 'clutch_sensitivity.h5',
+        'derivative_ids': [1, 2]
     }
     assert isinstance(s.entropy_mesh, openmc.RegularMesh)
     assert s.entropy_mesh.lower_left == [-10., -10., -10.]
@@ -185,7 +197,8 @@ def test_enable_clutch(run_in_tmpdir):
         adjoint_source={
             'initial_guess': 'forward',
             'max_iterations': 25,
-            'tolerance': 1.0e-6
+            'tolerance': 1.0e-6,
+            'score_start_batch': 4
         }
     )
 
@@ -193,7 +206,8 @@ def test_enable_clutch(run_in_tmpdir):
     assert model.settings.adjoint_source == {
         'initial_guess': 'forward',
         'max_iterations': 25,
-        'tolerance': 1.0e-6
+        'tolerance': 1.0e-6,
+        'score_start_batch': 4
     }
     assert len(model.tallies) == 1
     assert model.tallies[0].scores == [
@@ -215,7 +229,8 @@ def test_enable_clutch(run_in_tmpdir):
     assert settings.adjoint_source == {
         'initial_guess': 'forward',
         'max_iterations': 25,
-        'tolerance': 1.0e-6
+        'tolerance': 1.0e-6,
+        'score_start_batch': 4
     }
 
     tallies = openmc.Tallies.from_xml()
@@ -224,3 +239,56 @@ def test_enable_clutch(run_in_tmpdir):
         'ifp-time-numerator', 'ifp-beta-numerator', 'ifp-denominator',
         'clutch-test', 'greenfunction'
     ]
+
+
+def test_enable_clutch_sensitivity(run_in_tmpdir):
+    openmc.reset_auto_ids()
+    model = openmc.Model()
+    deriv_density = openmc.TallyDerivative(
+        variable='density', material=1)
+    deriv_nuclide = openmc.TallyDerivative(
+        variable='nuclide_density', material=1, nuclide='U235')
+
+    derivatives = model.enable_clutch_sensitivity(
+        [deriv_density, deriv_nuclide],
+        method='hybrid',
+        output='custom_clutch_sensitivity.h5',
+        kinetics_mesh={
+            'pitch': 1.0,
+            'auto_bounds': False,
+            'lower_left': (-1., -1., -1.),
+            'upper_right': (1., 1., 1.)
+        },
+        adjoint_source={
+            'initial_guess': 'forward',
+            'max_iterations': 25,
+            'tolerance': 1.0e-6,
+            'score_start_batch': 4
+        }
+    )
+
+    assert derivatives == [deriv_density, deriv_nuclide]
+    assert len(model.tallies) == 0
+    assert list(model.tallies.derivatives) == [deriv_density, deriv_nuclide]
+    assert model.settings.clutch_sensitivity == {
+        'method': 'hybrid',
+        'output': 'custom_clutch_sensitivity.h5',
+        'derivative_ids': [deriv_density.id, deriv_nuclide.id]
+    }
+
+    model.settings.export_to_xml()
+    model.tallies.export_to_xml()
+
+    settings = openmc.Settings.from_xml()
+    tallies = openmc.Tallies.from_xml()
+    assert settings.clutch_sensitivity == {
+        'method': 'hybrid',
+        'output': 'custom_clutch_sensitivity.h5',
+        'derivative_ids': [deriv_density.id, deriv_nuclide.id]
+    }
+    assert len(tallies) == 0
+    assert [d.id for d in tallies.derivatives] == [
+        deriv_density.id, deriv_nuclide.id
+    ]
+    assert tallies.derivatives[0].variable == 'density'
+    assert tallies.derivatives[1].variable == 'nuclide_density'

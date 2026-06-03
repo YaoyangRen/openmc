@@ -53,6 +53,8 @@ extern "C" bool
   event_based;            //!< use event-based mode (instead of history-based)
 extern bool ifp_on;       //!< Use IFP for kinetics parameters?
 extern bool clutch_on;    //!< Use clutch for kinetics parameters?  ryy_add
+extern bool beta_effective_on; //!< Write F-CLUTCH beta-effective results
+extern bool clutch_sensitivity_on; //!< Write generalized CLUTCH sensitivities
 extern bool flux_mesh_on; //!< Enable flux mesh tallying? ryy_add
 extern bool legendre_to_tabular; //!< convert Legendre distributions to tabular?
 extern bool material_cell_offsets;   //!< create material cells offsets?
@@ -189,6 +191,11 @@ extern std::string
   adjoint_initial_guess; //!< Initial guess for adjoint source iterations
 extern int adjoint_max_iterations; //!< Max iterations for adjoint solver
 extern double adjoint_tolerance;   //!< Convergence tolerance for adjoint solver
+extern int fission_matrix_score_start_batch; //!< First inactive batch tallied
+                                             //!< into the fission matrix
+extern std::string clutch_sensitivity_method; //!< fclutch_fm/cclutch/hybrid
+extern std::string clutch_sensitivity_output; //!< Output HDF5 file
+extern vector<int> clutch_sensitivity_derivative_ids; //!< Selected derivative IDs
 
 } // namespace settings
 

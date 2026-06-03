@@ -1,6 +1,8 @@
 set(TEST_NAMES
   test_distribution
   test_beta_effective_accumulator
+  test_clutch_sensitivity_accumulator
+  test_fission_matrix
   test_file_utils
   test_tally
   test_interpolate

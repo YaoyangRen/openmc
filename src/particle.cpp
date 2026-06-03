@@ -144,6 +144,7 @@ void Particle::from_source(const SourceSite* src)
   n_collision() = 0;
   fission() = false;
   zero_flux_derivs();
+  zero_clutch_sensitivity_derivs();
   lifetime() = 0.0;
 
   // Copy attributes from source bank site
@@ -320,7 +321,7 @@ void Particle::event_advance()
   }
 
   // Score flux derivative accumulators for differential tallies.
-  if (!model::active_tallies.empty()) {
+  if (!model::active_tallies.empty() || settings::clutch_sensitivity_on) {
     score_track_derivative(*this, distance);
   }
 
@@ -446,7 +447,7 @@ void Particle::event_collide()
   }
 
   // Score flux derivative accumulators for differential tallies.
-  if (!model::active_tallies.empty())
+  if (!model::active_tallies.empty() || settings::clutch_sensitivity_on)
     score_collision_derivative(*this);
 
 #ifdef OPENMC_DAGMC_ENABLED

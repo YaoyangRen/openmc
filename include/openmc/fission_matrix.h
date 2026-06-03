@@ -16,7 +16,7 @@ namespace openmc {
 class FissionMatrix {
 public:
   explicit FissionMatrix(std::shared_ptr<SharedMeshGrid> grid, int max_batches,
-    std::vector<double> energy_edges = {});
+    std::vector<double> energy_edges = {}, int score_start_batch = 1);
 
   void record_source_birth(const Position& r, int64_t source_particle_id,
     double energy = -1.0, int mg_group = -1, double source_weight = 1.0);
@@ -31,7 +31,18 @@ public:
     int max_iterations = 1, double tolerance = 1.0e-6);
 
   bool is_adjoint_computed() const { return adjoint_computed_; }
+  bool is_adjoint_converged() const { return adjoint_converged_; }
   int get_adjoint_nonzero_cells() const;
+  int get_source_nonzero_cells() const;
+  int get_child_nonzero_cells() const;
+  int score_start_batch() const { return score_start_batch_; }
+  int n_realizations() const { return n_realizations_; }
+  int skipped_batches() const { return skipped_batches_; }
+  size_t nnz() const { return fission_matrix_sparse_.size(); }
+  double get_adjoint_final_residual() const
+  {
+    return adjoint_final_residual_;
+  }
 
   const vector<double>& get_adjoint_source() const { return adjoint_source_; }
   const vector<double>& get_spatial_adjoint_source() const
@@ -48,6 +59,8 @@ public:
 
 private:
   int position_to_index(const Position& r) const;
+  bool should_score_batch(int batch_id) const;
+  bool is_scoring_current_batch() const;
 
   std::shared_ptr<SharedMeshGrid> grid_;
   std::array<double, 3> upper_bound_ {};
@@ -56,6 +69,8 @@ private:
   int current_batch_id_ {-1};
   int max_batches_ {0};
   int n_realizations_ {0};
+  int skipped_batches_ {0};
+  int score_start_batch_ {1};
 
   // key = parent_cell * n_cells + child_cell
   std::unordered_map<size_t, double> current_batch_sparse_;
@@ -70,7 +85,9 @@ private:
   std::atomic<uint64_t> total_sources_ {0};
 
   bool adjoint_computed_ {false};
+  bool adjoint_converged_ {false};
   int adjoint_iterations_ {0};
+  double adjoint_final_residual_ {0.0};
   double keff_reference_ {1.0};
 
   mutable std::mutex data_mutex_;

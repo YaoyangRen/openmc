@@ -97,9 +97,15 @@ ParticleData::ParticleData()
   // Every particle starts with no accumulated flux derivative.  Note that in
   // event mode, we construct the particle once up front, so have to run this
   // even if the current batch is inactive.
-  if (!model::active_tallies.empty() || settings::event_based) {
+  if (!model::active_tallies.empty() || settings::event_based ||
+      settings::clutch_sensitivity_on) {
     flux_derivs_.resize(model::tally_derivs.size());
     zero_flux_derivs();
+  }
+  if (settings::clutch_sensitivity_on) {
+    clutch_track_derivs_.resize(model::tally_derivs.size());
+    clutch_collision_derivs_.resize(model::tally_derivs.size());
+    zero_clutch_sensitivity_derivs();
   }
 
   // Allocate space for tally filter matches

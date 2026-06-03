@@ -27,8 +27,9 @@ double reference_keff()
 } // namespace
 
 FissionMatrix::FissionMatrix(std::shared_ptr<SharedMeshGrid> grid,
-  int max_batches, std::vector<double>)
-  : grid_ {std::move(grid)}, max_batches_ {max_batches}
+  int max_batches, std::vector<double>, int score_start_batch)
+  : grid_ {std::move(grid)}, max_batches_ {max_batches},
+    score_start_batch_ {std::max(1, score_start_batch)}
 {
   if (!grid_) {
     throw std::runtime_error("FissionMatrix requires a valid SharedMeshGrid.");
@@ -51,6 +52,9 @@ FissionMatrix::FissionMatrix(std::shared_ptr<SharedMeshGrid> grid,
 void FissionMatrix::record_source_birth(const Position& r,
   int64_t source_particle_id, double, int, double source_weight)
 {
+  if (!is_scoring_current_batch())
+    return;
+
   if (!std::isfinite(source_weight) || source_weight <= 0.0)
     return;
 
@@ -67,6 +71,9 @@ void FissionMatrix::record_source_birth(const Position& r,
 void FissionMatrix::record_fission_site(const Position& r, double source_weight,
   int64_t source_particle_id, double, int)
 {
+  if (!is_scoring_current_batch())
+    return;
+
   if (!std::isfinite(source_weight) || source_weight <= 0.0)
     return;
 
@@ -91,13 +98,17 @@ void FissionMatrix::start_new_batch(int batch_id)
   if (current_batch_id_ >= 0) {
     std::lock_guard<std::mutex> lock(data_mutex_);
 
-    for (const auto& [key, value] : current_batch_sparse_) {
-      fission_matrix_sparse_[key] += value;
+    if (should_score_batch(current_batch_id_)) {
+      for (const auto& [key, value] : current_batch_sparse_) {
+        fission_matrix_sparse_[key] += value;
+      }
+      for (size_t cell = 0; cell < source_counts_.size(); ++cell) {
+        source_counts_[cell] += current_batch_source_counts_[cell];
+      }
+      n_realizations_++;
+    } else {
+      skipped_batches_++;
     }
-    for (size_t cell = 0; cell < source_counts_.size(); ++cell) {
-      source_counts_[cell] += current_batch_source_counts_[cell];
-    }
-    n_realizations_++;
   }
 
   current_batch_id_ = batch_id;
@@ -113,6 +124,8 @@ void FissionMatrix::compute_adjoint_source(
   std::cout << "\n" << std::string(70, '=') << std::endl;
   std::cout << "SPATIAL CLUTCH ADJOINT SOURCE COMPUTATION" << std::endl;
   std::cout << "  Mode: spatial source state I*(cell)" << std::endl;
+  std::cout << "  Matrix score start batch: " << score_start_batch_
+            << std::endl;
   std::cout << std::string(70, '=') << std::endl;
 
   if (fission_matrix_sparse_.empty()) {
@@ -172,10 +185,15 @@ void FissionMatrix::compute_adjoint_source(
             << std::endl;
   std::cout << "  Source cells with counts: " << normalized_source_rows
             << " / " << n_cells << std::endl;
+  std::cout << "  Scored inactive batches: " << n_realizations_ << std::endl;
+  std::cout << "  Skipped inactive batches: " << skipped_batches_
+            << std::endl;
 
   vector<double> I_new(n_cells, 0.0);
   adjoint_iterations_ = 0;
   adjoint_computed_ = false;
+  adjoint_converged_ = false;
+  adjoint_final_residual_ = 0.0;
   keff_reference_ = reference_keff();
   const double inv_keff = 1.0 / keff_reference_;
 
@@ -201,6 +219,7 @@ void FissionMatrix::compute_adjoint_source(
       adjoint_source_[cell] = new_val;
     }
     adjoint_iterations_ = iter + 1;
+    adjoint_final_residual_ = max_delta;
 
     if ((iter + 1) % 50 == 0 || iter == 0) {
       std::cout << "  Iteration " << std::setw(4) << (iter + 1)
@@ -210,6 +229,7 @@ void FissionMatrix::compute_adjoint_source(
 
     if (max_delta < tolerance) {
       std::cout << "\nConverged at iteration " << (iter + 1) << std::endl;
+      adjoint_converged_ = true;
       adjoint_computed_ = true;
       break;
     }
@@ -229,6 +249,8 @@ void FissionMatrix::compute_adjoint_source(
   std::cout << "\nAdjoint Source Statistics:" << std::endl;
   std::cout << "  Nonzero cells: " << nonzero_count << " / " << n_cells
             << std::endl;
+  std::cout << "  Final max |dI*|: " << std::scientific
+            << std::setprecision(6) << adjoint_final_residual_ << std::endl;
   std::cout << "  Max value: " << std::scientific << std::setprecision(6)
             << max_adjoint << std::endl;
   std::cout << "  Sum: " << source_sum << std::endl;
@@ -246,9 +268,25 @@ void FissionMatrix::finalize(const std::string& filename)
 
   const size_t n_cells = grid_->n_cells();
   const size_t sparse_elements = fission_matrix_sparse_.size();
+  const int source_nonzero = get_source_nonzero_cells();
+  const int child_nonzero = get_child_nonzero_cells();
+  const double n_cells_d = static_cast<double>(n_cells);
+  const double source_coverage =
+    n_cells > 0 ? static_cast<double>(source_nonzero) / n_cells_d : 0.0;
+  const double child_coverage =
+    n_cells > 0 ? static_cast<double>(child_nonzero) / n_cells_d : 0.0;
+  const double nnz_fraction =
+    n_cells > 0 ? static_cast<double>(sparse_elements) / (n_cells_d * n_cells_d)
+                : 0.0;
   std::cout << "\nFission Matrix: " << sparse_elements
             << " non-zero elements (" << n_cells << "x" << n_cells
             << " parent_cell x child_cell grid) -> " << filename << std::endl;
+  std::cout << "  Score start batch: " << score_start_batch_ << std::endl;
+  std::cout << "  Scored inactive batches: " << n_realizations_ << std::endl;
+  std::cout << "  Source cell coverage: " << source_nonzero << " / " << n_cells
+            << std::endl;
+  std::cout << "  Child cell coverage: " << child_nonzero << " / " << n_cells
+            << std::endl;
 
   std::unordered_map<size_t, double> normalized_sparse;
   normalized_sparse.reserve(fission_matrix_sparse_.size());
@@ -266,6 +304,9 @@ void FissionMatrix::finalize(const std::string& filename)
   write_attribute(file_id, "storage_format", "COO");
   write_attribute(file_id, "pitch", grid_->pitch());
   write_attribute(file_id, "n_realizations", n_realizations_);
+  write_attribute(file_id, "score_start_batch", score_start_batch_);
+  write_attribute(file_id, "scored_inactive_batches", n_realizations_);
+  write_attribute(file_id, "skipped_inactive_batches", skipped_batches_);
   write_attribute(
     file_id, "total_fissions", static_cast<int64_t>(total_fissions_.load()));
   write_attribute(
@@ -277,6 +318,11 @@ void FissionMatrix::finalize(const std::string& filename)
   write_attribute(file_id, "col_dim", static_cast<int>(n_cells));
   write_attribute(file_id, "matrix_semantics",
     "row=parent_cell, col=child_cell");
+  write_attribute(file_id, "source_cells_with_counts", source_nonzero);
+  write_attribute(file_id, "child_cells_with_fission", child_nonzero);
+  write_attribute(file_id, "source_cell_coverage", source_coverage);
+  write_attribute(file_id, "child_cell_coverage", child_coverage);
+  write_attribute(file_id, "nnz_fraction", nnz_fraction);
 
   write_dataset(file_id, "origin", grid_->origin());
   write_dataset(file_id, "shape", grid_->shape());
@@ -326,11 +372,33 @@ void FissionMatrix::finalize(const std::string& filename)
     write_attribute(file_id, "reference_keff", keff_reference_);
     write_attribute(
       file_id, "adjoint_iterations", static_cast<int>(adjoint_iterations_));
-    write_attribute(file_id, "adjoint_converged", 1);
+    write_attribute(file_id, "adjoint_converged",
+      adjoint_converged_ ? 1 : 0);
+    write_attribute(file_id, "adjoint_final_residual",
+      adjoint_final_residual_);
+    write_attribute(file_id, "adjoint_nonzero_cells",
+      get_adjoint_nonzero_cells());
     write_attribute(file_id, "adjoint_source_description",
       "Spatial CLUTCH adjoint fission source I*(cell)");
     write_attribute(file_id, "adjoint_source_units", "normalized importance");
   }
+
+  hid_t diagnostics = create_group(file_id, "diagnostics");
+  write_dataset(diagnostics, "score_start_batch", score_start_batch_);
+  write_dataset(diagnostics, "scored_inactive_batches", n_realizations_);
+  write_dataset(diagnostics, "skipped_inactive_batches", skipped_batches_);
+  write_dataset(diagnostics, "source_cells_with_counts", source_nonzero);
+  write_dataset(diagnostics, "child_cells_with_fission", child_nonzero);
+  write_dataset(diagnostics, "source_cell_coverage", source_coverage);
+  write_dataset(diagnostics, "child_cell_coverage", child_coverage);
+  write_dataset(diagnostics, "nnz_fraction", nnz_fraction);
+  write_dataset(diagnostics, "adjoint_iterations", adjoint_iterations_);
+  write_dataset(diagnostics, "adjoint_converged", adjoint_converged_ ? 1 : 0);
+  write_dataset(diagnostics, "adjoint_final_residual",
+    adjoint_final_residual_);
+  write_dataset(diagnostics, "adjoint_nonzero_cells",
+    get_adjoint_nonzero_cells());
+  file_close(diagnostics);
 
   file_close(file_id);
 }
@@ -339,6 +407,26 @@ int FissionMatrix::get_adjoint_nonzero_cells() const
 {
   return std::count_if(adjoint_source_.begin(), adjoint_source_.end(),
     [](double x) { return x > 1e-10; });
+}
+
+int FissionMatrix::get_source_nonzero_cells() const
+{
+  return std::count_if(source_counts_.begin(), source_counts_.end(),
+    [](double x) { return x > 0.0; });
+}
+
+int FissionMatrix::get_child_nonzero_cells() const
+{
+  const size_t n_cells = grid_->n_cells();
+  vector<char> child_has_fission(n_cells, 0);
+  for (const auto& [key, value] : fission_matrix_sparse_) {
+    if (value <= 0.0)
+      continue;
+    const size_t child_cell = key % n_cells;
+    child_has_fission[child_cell] = 1;
+  }
+
+  return std::count(child_has_fission.begin(), child_has_fission.end(), 1);
 }
 
 int FissionMatrix::position_to_index(const Position& r) const
@@ -362,6 +450,16 @@ int FissionMatrix::position_to_index(const Position& r) const
   }
 
   return (indices[0] * shape[1] + indices[1]) * shape[2] + indices[2];
+}
+
+bool FissionMatrix::should_score_batch(int batch_id) const
+{
+  return batch_id >= score_start_batch_;
+}
+
+bool FissionMatrix::is_scoring_current_batch() const
+{
+  return should_score_batch(current_batch_id_);
 }
 
 } // namespace openmc

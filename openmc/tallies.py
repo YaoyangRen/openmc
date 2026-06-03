@@ -3189,13 +3189,32 @@ class Tallies(cv.CheckedList):
     ----------
     tallies : Iterable of openmc.Tally
         Tallies to add to the collection
+    derivatives : Iterable of openmc.TallyDerivative
+        Standalone tally derivatives to export for workflows that use
+        derivatives outside ordinary tallies.
 
     """
 
-    def __init__(self, tallies=None):
+    def __init__(self, tallies=None, derivatives=None):
         super().__init__(Tally, 'tallies collection')
+        self.derivatives = [] if derivatives is None else derivatives
         if tallies is not None:
             self += tallies
+
+    @property
+    def derivatives(self):
+        return self._derivatives
+
+    @derivatives.setter
+    def derivatives(self, derivatives):
+        if derivatives is None:
+            derivatives = []
+        elif isinstance(derivatives, openmc.TallyDerivative):
+            derivatives = [derivatives]
+        elif not isinstance(derivatives, Iterable):
+            derivatives = [derivatives]
+        self._derivatives = cv.CheckedList(
+            openmc.TallyDerivative, 'tally derivatives', derivatives)
 
     def append(self, tally, merge=False):
         """Append tally to collection
@@ -3364,8 +3383,9 @@ class Tallies(cv.CheckedList):
                     f.id = already_written[f]
 
     def _create_derivative_subelements(self, root_element):
-        # Get a list of all derivatives referenced in a tally.
-        derivs = []
+        # Get a list of all standalone derivatives and derivatives referenced
+        # in a tally.
+        derivs = list(self.derivatives)
         for tally in self:
             deriv = tally.derivative
             if deriv is not None and deriv not in derivs:
@@ -3455,7 +3475,7 @@ class Tallies(cv.CheckedList):
             )
             tallies.append(tally)
 
-        return cls(tallies)
+        return cls(tallies, derivatives=derivatives.values())
 
     @classmethod
     def from_xml(cls, path='tallies.xml'):

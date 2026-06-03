@@ -180,23 +180,19 @@ Tally::Tally(pugi::xml_node node)
     fatal_error(fmt::format("No scores specified on tally {}.", id_));
   }
 
-  // Set CLUTCH
-  if (!settings::clutch_on) {
-    bool has_clutch_score = false;
-    for (int score : scores_) {
-      if (score == SCORE_CLUTCH_TEST || score == SCORE_GREENFUNCTION) {
-        has_clutch_score = true;
-        break;
-      }
+  // Set CLUTCH / beta-effective if this tally requests CLUTCH scores.
+  bool has_clutch_score = false;
+  for (int score : scores_) {
+    if (score == SCORE_CLUTCH_TEST || score == SCORE_GREENFUNCTION) {
+      has_clutch_score = true;
+      break;
     }
+  }
 
-    // Check for errors
-    if (has_clutch_score) {
-      // TODO: errors check.
-      if (true) {
-        settings::clutch_on = true;
-      }
-    }
+  if (has_clutch_score) {
+    // TODO: errors check.
+    settings::clutch_on = true;
+    settings::beta_effective_on = true;
   }
 
   // Set IFP if needed

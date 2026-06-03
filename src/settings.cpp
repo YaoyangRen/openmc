@@ -55,6 +55,8 @@ bool entropy_on {false};
 bool event_based {false};
 bool ifp_on {false};
 bool clutch_on {false};
+bool beta_effective_on {false};
+bool clutch_sensitivity_on {false};
 bool flux_mesh_on {false};
 bool legendre_to_tabular {true};
 bool material_cell_offsets {true};
@@ -155,6 +157,10 @@ array<double, 3> kinetics_mesh_upper_right {10.0, 10.0, 10.0};
 std::string adjoint_initial_guess {"uniform"};
 int adjoint_max_iterations {1};
 double adjoint_tolerance {1.0e-6};
+int fission_matrix_score_start_batch {3};
+std::string clutch_sensitivity_method {"hybrid"};
+std::string clutch_sensitivity_output {"clutch_sensitivity.h5"};
+vector<int> clutch_sensitivity_derivative_ids;
 
 } // namespace settings
 
@@ -1200,6 +1206,41 @@ void read_settings_xml(pugi::xml_node root)
     event_based = get_node_value_bool(root, "event_based");
   }
 
+  if (check_for_node(root, "clutch_sensitivity")) {
+    auto clutch_sens_node = root.child("clutch_sensitivity");
+    clutch_sensitivity_on = true;
+    clutch_on = true;
+
+    if (check_for_node(clutch_sens_node, "method")) {
+      auto method = get_node_value(clutch_sens_node, "method", true, true);
+      if (method != "hybrid" && method != "fclutch_fm" &&
+          method != "cclutch_history") {
+        fatal_error("<clutch_sensitivity>/<method> must be 'hybrid', "
+                    "'fclutch_fm', or 'cclutch_history'.");
+      }
+      clutch_sensitivity_method = method;
+    }
+
+    if (check_for_node(clutch_sens_node, "output")) {
+      clutch_sensitivity_output = get_node_value(clutch_sens_node, "output");
+      if (clutch_sensitivity_output.empty()) {
+        fatal_error("<clutch_sensitivity>/<output> must not be empty.");
+      }
+    }
+
+    clutch_sensitivity_derivative_ids.clear();
+    if (check_for_node(clutch_sens_node, "derivative_ids")) {
+      auto ids = get_node_array<int>(clutch_sens_node, "derivative_ids");
+      for (int id : ids) {
+        if (id <= 0) {
+          fatal_error("<clutch_sensitivity>/<derivative_ids> entries must be "
+                      "positive derivative IDs.");
+        }
+        clutch_sensitivity_derivative_ids.push_back(id);
+      }
+    }
+  }
+
   // Check whether material cell offsets should be generated
   if (check_for_node(root, "material_cell_offsets")) {
     material_cell_offsets = get_node_value_bool(root, "material_cell_offsets");
@@ -1295,11 +1336,37 @@ void read_settings_xml(pugi::xml_node root)
       }
       adjoint_tolerance = value;
     }
+
+    if (check_for_node(adj_node, "score_start_batch")) {
+      int value = std::stoi(get_node_value(adj_node, "score_start_batch"));
+      if (value <= 0) {
+        fatal_error("<adjoint_source>/<score_start_batch> must be positive.");
+      }
+      fission_matrix_score_start_batch = value;
+    }
   }
 
   if (check_for_node(root, "use_decay_photons")) {
     settings::use_decay_photons =
       get_node_value_bool(root, "use_decay_photons");
+  }
+
+  if (clutch_sensitivity_on) {
+    if (run_mode != RunMode::EIGENVALUE) {
+      fatal_error("CLUTCH sensitivity is only supported for eigenvalue runs.");
+    }
+    if (!run_CE) {
+      fatal_error("CLUTCH sensitivity is only supported for continuous-energy "
+                  "runs in this implementation.");
+    }
+    if (event_based) {
+      fatal_error("CLUTCH sensitivity is only supported for history-based "
+                  "transport in this implementation.");
+    }
+    if (n_inactive <= 0) {
+      fatal_error("CLUTCH sensitivity requires at least one inactive batch to "
+                  "build the fission-matrix adjoint source.");
+    }
   }
 }
 
@@ -1315,6 +1382,15 @@ void free_memory_settings()
   settings::kinetics_mesh_has_bounds = false;
   settings::kinetics_mesh_lower_left = {0.0, 0.0, 0.0};
   settings::kinetics_mesh_upper_right = {10.0, 10.0, 10.0};
+  settings::adjoint_initial_guess = "uniform";
+  settings::adjoint_max_iterations = 1;
+  settings::adjoint_tolerance = 1.0e-6;
+  settings::fission_matrix_score_start_batch = 3;
+  settings::beta_effective_on = false;
+  settings::clutch_sensitivity_on = false;
+  settings::clutch_sensitivity_method = "hybrid";
+  settings::clutch_sensitivity_output = "clutch_sensitivity.h5";
+  settings::clutch_sensitivity_derivative_ids.clear();
 }
 
 //==============================================================================

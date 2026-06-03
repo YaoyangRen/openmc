@@ -96,7 +96,11 @@ class Settings:
         Energy group boundaries used for kinetics/beta-effective outputs.
     adjoint_source : dict
         Iteration controls for the fission-matrix source-state importance.
-        Accepted keys are 'initial_guess', 'max_iterations', and 'tolerance'.
+        Accepted keys are 'initial_guess', 'max_iterations', 'tolerance',
+        and 'score_start_batch'.
+    clutch_sensitivity : dict
+        Generalized CLUTCH k-effective sensitivity controls. Accepted keys are
+        'method', 'output', and 'derivative_ids'.
     max_lost_particles : int
         Maximum number of lost particles
 
@@ -369,6 +373,7 @@ class Settings:
         self._kinetics_energy_edges = None
         self._kinetics_mesh = None
         self._adjoint_source = None
+        self._clutch_sensitivity = None
 
         # Source subelement
         self._source = cv.CheckedList(SourceBase, 'source distributions')
@@ -678,7 +683,10 @@ class Settings:
             return
 
         cv.check_type('adjoint source', adjoint_source, Mapping)
-        allowed_keys = {'initial_guess', 'max_iterations', 'tolerance'}
+        allowed_keys = {
+            'initial_guess', 'max_iterations', 'tolerance',
+            'score_start_batch'
+        }
         source = {}
 
         for key, value in adjoint_source.items():
@@ -701,8 +709,58 @@ class Settings:
                 cv.check_type('adjoint source tolerance', value, Real)
                 cv.check_greater_than('adjoint source tolerance', value, 0.0)
                 source[key] = float(value)
+            elif key == 'score_start_batch':
+                cv.check_type(
+                    'adjoint source score_start_batch', value, Integral)
+                cv.check_greater_than(
+                    'adjoint source score_start_batch', value, 0)
+                source[key] = int(value)
 
         self._adjoint_source = source
+
+    @property
+    def clutch_sensitivity(self) -> dict:
+        return self._clutch_sensitivity
+
+    @clutch_sensitivity.setter
+    def clutch_sensitivity(self, clutch_sensitivity: Mapping | None):
+        if clutch_sensitivity is None:
+            self._clutch_sensitivity = None
+            return
+
+        cv.check_type('clutch sensitivity', clutch_sensitivity, Mapping)
+        allowed_keys = {'method', 'output', 'derivative_ids'}
+        settings = {}
+
+        for key, value in clutch_sensitivity.items():
+            cv.check_value('clutch sensitivity key', key, allowed_keys)
+            if key == 'method':
+                cv.check_type('clutch sensitivity method', value, str)
+                value = value.lower()
+                cv.check_value('clutch sensitivity method', value,
+                               {'hybrid', 'fclutch_fm', 'cclutch_history'})
+                settings[key] = value
+            elif key == 'output':
+                cv.check_type('clutch sensitivity output', value, str)
+                if value == '':
+                    raise ValueError('clutch sensitivity output must not be empty')
+                settings[key] = value
+            elif key == 'derivative_ids':
+                if isinstance(value, str):
+                    raise TypeError(
+                        'Unable to set clutch sensitivity derivative_ids to a string')
+                ids = list(value)
+                cv.check_iterable_type(
+                    'clutch sensitivity derivative_ids', ids, Integral)
+                for derivative_id in ids:
+                    if isinstance(derivative_id, bool):
+                        raise TypeError(
+                            'Unable to set clutch sensitivity derivative ID to a bool')
+                    cv.check_greater_than(
+                        'clutch sensitivity derivative ID', derivative_id, 0)
+                settings[key] = [int(x) for x in ids]
+
+        self._clutch_sensitivity = settings
 
     @property
     def source(self) -> list[SourceBase]:
@@ -1597,11 +1655,29 @@ class Settings:
             return
 
         element = ET.SubElement(root, 'adjoint_source')
-        for key in ('initial_guess', 'max_iterations', 'tolerance'):
+        for key in (
+            'initial_guess', 'max_iterations', 'tolerance',
+            'score_start_batch'
+        ):
             if key not in self._adjoint_source:
                 continue
             subelement = ET.SubElement(element, key)
             subelement.text = str(self._adjoint_source[key])
+
+    def _create_clutch_sensitivity_subelement(self, root):
+        if self._clutch_sensitivity is None:
+            return
+
+        element = ET.SubElement(root, 'clutch_sensitivity')
+        for key in ('method', 'output', 'derivative_ids'):
+            if key not in self._clutch_sensitivity:
+                continue
+            subelement = ET.SubElement(element, key)
+            value = self._clutch_sensitivity[key]
+            if key == 'derivative_ids':
+                subelement.text = ' '.join(str(x) for x in value)
+            else:
+                subelement.text = str(value)
 
     def _create_entropy_mesh_subelement(self, root, mesh_memo=None):
         if self.entropy_mesh is None:
@@ -2116,8 +2192,29 @@ class Settings:
         text = get_text(elem, 'tolerance')
         if text is not None:
             adjoint_source['tolerance'] = float(text)
+        text = get_text(elem, 'score_start_batch')
+        if text is not None:
+            adjoint_source['score_start_batch'] = int(text)
 
         self.adjoint_source = adjoint_source
+
+    def _clutch_sensitivity_from_xml_element(self, root):
+        elem = root.find('clutch_sensitivity')
+        if elem is None:
+            return
+
+        clutch_sensitivity = {}
+        text = get_text(elem, 'method')
+        if text is not None:
+            clutch_sensitivity['method'] = text
+        text = get_text(elem, 'output')
+        if text is not None:
+            clutch_sensitivity['output'] = text
+        ids = get_elem_list(elem, 'derivative_ids', int)
+        if ids is not None:
+            clutch_sensitivity['derivative_ids'] = ids
+
+        self.clutch_sensitivity = clutch_sensitivity
 
     def _entropy_mesh_from_xml_element(self, root, meshes):
         text = get_text(root, 'entropy_mesh')
@@ -2386,6 +2483,7 @@ class Settings:
         self._create_kinetics_energy_edges_subelement(element)
         self._create_kinetics_mesh_subelement(element)
         self._create_adjoint_source_subelement(element)
+        self._create_clutch_sensitivity_subelement(element)
         self._create_entropy_mesh_subelement(element, mesh_memo)
         self._create_trigger_subelement(element)
         self._create_no_reduce_subelement(element)
@@ -2499,6 +2597,7 @@ class Settings:
         settings._kinetics_energy_edges_from_xml_element(elem)
         settings._kinetics_mesh_from_xml_element(elem)
         settings._adjoint_source_from_xml_element(elem)
+        settings._clutch_sensitivity_from_xml_element(elem)
         settings._entropy_mesh_from_xml_element(elem, meshes)
         settings._trigger_from_xml_element(elem)
         settings._no_reduce_from_xml_element(elem)

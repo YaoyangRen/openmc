@@ -518,6 +518,8 @@ private:
   int64_t current_work_;
 
   vector<double> flux_derivs_;
+  vector<double> clutch_track_derivs_;
+  vector<double> clutch_collision_derivs_;
 
   vector<FilterMatch> filter_matches_;
 
@@ -697,6 +699,16 @@ public:
   // Used in tally derivatives
   double& flux_derivs(int i) { return flux_derivs_[i]; }
   const double& flux_derivs(int i) const { return flux_derivs_[i]; }
+  double& clutch_track_derivs(int i) { return clutch_track_derivs_[i]; }
+  const double& clutch_track_derivs(int i) const
+  {
+    return clutch_track_derivs_[i];
+  }
+  double& clutch_collision_derivs(int i) { return clutch_collision_derivs_[i]; }
+  const double& clutch_collision_derivs(int i) const
+  {
+    return clutch_collision_derivs_[i];
+  }
 
   // Matches of tallies
   decltype(filter_matches_)& filter_matches() { return filter_matches_; }
@@ -762,6 +774,16 @@ public:
   void zero_flux_derivs()
   {
     for (double& d : flux_derivs_) {
+      d = 0;
+    }
+  }
+
+  void zero_clutch_sensitivity_derivs()
+  {
+    for (double& d : clutch_track_derivs_) {
+      d = 0;
+    }
+    for (double& d : clutch_collision_derivs_) {
       d = 0;
     }
   }

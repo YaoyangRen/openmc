@@ -7,6 +7,7 @@
 
 #include "openmc/bank.h"
 #include "openmc/beta_effective_accumulator.h"
+#include "openmc/clutch_sensitivity_accumulator.h"
 #include "openmc/constants.h"
 #include "openmc/eigenvalue.h"
 #include "openmc/error.h"
@@ -199,6 +200,11 @@ void create_fission_sites(Particle& p)
         simulation::beta_effective_accumulator->score_fission_site(site.r,
           site.wgt, site.delayed_group);
       }
+      if (simulation::clutch_sensitivity_accumulator &&
+          simulation::current_batch > settings::n_inactive) {
+        simulation::clutch_sensitivity_accumulator->score_fission_site(
+          p, site.r, site.wgt);
+      }
     } else {
       p.secondary_bank().push_back(site);
       if (simulation::fission_matrix && p.source_particle_id() != -1 &&
@@ -210,6 +216,11 @@ void create_fission_sites(Particle& p)
           simulation::current_batch > settings::n_inactive) {
         simulation::beta_effective_accumulator->score_fission_site(site.r,
           site.wgt, site.delayed_group);
+      }
+      if (simulation::clutch_sensitivity_accumulator &&
+          simulation::current_batch > settings::n_inactive) {
+        simulation::clutch_sensitivity_accumulator->score_fission_site(
+          p, site.r, site.wgt);
       }
     }
 

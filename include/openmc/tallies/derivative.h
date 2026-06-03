@@ -56,6 +56,11 @@ void score_collision_derivative(Particle& p);
 //! \param distance The distance in [cm] traveled by the particle
 void score_track_derivative(Particle& p, double distance);
 
+//! Direct logarithmic derivative of a nu-fission event contribution.
+//!
+//! This excludes the path/flux derivative accumulated on the particle.
+double nu_fission_direct_derivative(const Particle& p, int deriv_index);
+
 } // namespace openmc
 
 //==============================================================================

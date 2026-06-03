@@ -543,6 +543,65 @@ void apply_derivative_to_score(const Particle& p, int i_tally, int i_nuclide,
   }
 }
 
+double nu_fission_direct_derivative(const Particle& p, int deriv_index)
+{
+  if (deriv_index < 0 ||
+      deriv_index >= static_cast<int>(model::tally_derivs.size())) {
+    fatal_error("Invalid TallyDerivative index for CLUTCH sensitivity.");
+  }
+  if (p.material() == MATERIAL_VOID || p.material() == C_NONE ||
+      p.event_nuclide() == NUCLIDE_NONE) {
+    return 0.0;
+  }
+
+  const Material& material {*model::materials[p.material()]};
+  const auto& deriv {model::tally_derivs[deriv_index]};
+  if (material.id_ != deriv.diff_material) {
+    return 0.0;
+  }
+
+  switch (deriv.variable) {
+  case DerivativeVariable::DENSITY:
+    return material.density_gpcc_ > 0.0 ? 1.0 / material.density_gpcc_ : 0.0;
+
+  case DerivativeVariable::NUCLIDE_DENSITY:
+    if (p.event_nuclide() != deriv.diff_nuclide) {
+      return 0.0;
+    }
+    for (int i = 0; i < material.nuclide_.size(); ++i) {
+      if (material.nuclide_[i] == deriv.diff_nuclide &&
+          material.atom_density_(i) > 0.0) {
+        return 1.0 / material.atom_density_(i);
+      }
+    }
+    return 0.0;
+
+  case DerivativeVariable::TEMPERATURE: {
+    const auto& nuc {*data::nuclides[p.event_nuclide()]};
+    const auto& micro = p.neutron_xs(p.event_nuclide());
+    if (!multipole_in_range(nuc, p.E_last()) || micro.fission <= 0.0 ||
+        p.macro_xs().nu_fission <= 0.0) {
+      return 0.0;
+    }
+
+    double dsig_s, dsig_a, dsig_f;
+    std::tie(dsig_s, dsig_a, dsig_f) =
+      nuc.multipole_->evaluate_deriv(p.E_last(), p.sqrtkT());
+    const double nu = micro.nu_fission / micro.fission;
+
+    for (int i = 0; i < material.nuclide_.size(); ++i) {
+      if (material.nuclide_[i] == p.event_nuclide()) {
+        return nu * dsig_f * material.atom_density_(i) /
+               p.macro_xs().nu_fission;
+      }
+    }
+    return 0.0;
+  }
+  }
+
+  return 0.0;
+}
+
 void score_track_derivative(Particle& p, double distance)
 {
   // A void material cannot be perturbed so it will not affect flux derivatives.
@@ -556,6 +615,7 @@ void score_track_derivative(Particle& p, double distance)
     auto& flux_deriv = p.flux_derivs(idx);
     if (deriv.diff_material != material.id_)
       continue;
+    const double before = flux_deriv;
 
     switch (deriv.variable) {
 
@@ -589,6 +649,10 @@ void score_track_derivative(Particle& p, double distance)
       }
       break;
     }
+
+    if (settings::clutch_sensitivity_on) {
+      p.clutch_track_derivs(idx) += flux_deriv - before;
+    }
   }
 }
 
@@ -606,6 +670,7 @@ void score_collision_derivative(Particle& p)
 
     if (deriv.diff_material != material.id_)
       continue;
+    const double before = flux_deriv;
 
     switch (deriv.variable) {
 
@@ -660,6 +725,10 @@ void score_collision_derivative(Particle& p)
         }
       }
       break;
+    }
+
+    if (settings::clutch_sensitivity_on) {
+      p.clutch_collision_derivs(idx) += flux_deriv - before;
     }
   }
 }

@@ -8,6 +8,49 @@ importance   = I*(cell)
 primary      = fclutch_spatial
 ```
 
+## 2026-06-03 优化补充
+
+为降低初始源未收敛对裂变矩阵伴随源的影响，当前实现新增了
+`<adjoint_source>/<score_start_batch>` 控制项。
+
+```xml
+<adjoint_source>
+  <initial_guess>uniform</initial_guess>
+  <max_iterations>100</max_iterations>
+  <tolerance>1.0e-8</tolerance>
+  <score_start_batch>3</score_start_batch>
+</adjoint_source>
+```
+
+其含义为使用 1-based batch 编号，从指定 inactive batch 开始累计
+`cell -> cell` 裂变矩阵。例如 `score_start_batch = 3` 时，第 1、2 个
+inactive batch 只用于源收敛，不进入 `fission_matrix.h5`。如果用户给出的
+起始 batch 大于 inactive batch 总数，运行时会夹到最后一个 inactive batch，
+避免伴随源矩阵为空。
+
+`fission_matrix.h5` 现在额外写出以下诊断信息：
+
+```text
+score_start_batch
+scored_inactive_batches
+skipped_inactive_batches
+source_cells_with_counts
+child_cells_with_fission
+source_cell_coverage
+child_cell_coverage
+nnz_fraction
+adjoint_converged
+adjoint_final_residual
+adjoint_nonzero_cells
+diagnostics/*
+```
+
+其中 `adjoint_converged = 1` 表示幂迭代达到 `adjoint_tolerance`；
+若达到最大迭代次数但未达到容差，则 `adjoint_converged = 0`，同时
+`adjoint_final_residual` 给出最后一次迭代的 `max |dI*|`。若 coverage
+很低或 residual 偏大，优先增加 inactive 统计、粗化 kinetics mesh，或提高
+`max_iterations`。
+
 该方法不再使用出生能量维度的伴随源 `I*(cell, g_birth)`，也不再默认生成 `transfer_function_data.h5`、`adjoint_flux.h5` 或 `flux_mesh.h5`。
 
 ## 总体流程

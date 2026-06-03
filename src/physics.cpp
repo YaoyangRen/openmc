@@ -4,6 +4,7 @@
 #include "openmc/beta_effective_accumulator.h"
 #include "openmc/bremsstrahlung.h"
 #include "openmc/chain.h"
+#include "openmc/clutch_sensitivity_accumulator.h"
 #include "openmc/clutch.h"
 #include "openmc/constants.h"
 #include "openmc/distribution_multi.h"
@@ -256,8 +257,13 @@ void create_fission_sites(Particle& p, int i_nuclide, const Reaction& rx)
         simulation::beta_effective_accumulator->score_fission_site(
           site.r, site.wgt, site.delayed_group);
       }
+      if (simulation::clutch_sensitivity_accumulator &&
+          simulation::current_batch > settings::n_inactive) {
+        simulation::clutch_sensitivity_accumulator->score_fission_site(
+          p, site.r, site.wgt);
+      }
       // CLUTCH TEST
-      if (settings::clutch_on) {
+      if (settings::beta_effective_on) {
         CLUTCH_TEST();
       }
     } else {
@@ -271,6 +277,11 @@ void create_fission_sites(Particle& p, int i_nuclide, const Reaction& rx)
           simulation::current_batch > settings::n_inactive) {
         simulation::beta_effective_accumulator->score_fission_site(
           site.r, site.wgt, site.delayed_group);
+      }
+      if (simulation::clutch_sensitivity_accumulator &&
+          simulation::current_batch > settings::n_inactive) {
+        simulation::clutch_sensitivity_accumulator->score_fission_site(
+          p, site.r, site.wgt);
       }
     }
 
