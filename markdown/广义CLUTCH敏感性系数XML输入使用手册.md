@@ -316,6 +316,160 @@ model.export_to_xml()
 - `uncertainty`：对 `sensitivity` 的 batch 统计不确定度。
 - `component_numerator`：诊断项，三行依次对应 `track`、`collision`、`direct_fission`。
 
+## 分析脚本输出解读
+
+可以使用仓库根目录下的脚本分析输出文件：
+
+```bash
+python analyze_clutch_sensitivity.py clutch_sensitivity.h5
+```
+
+脚本输出中的 `Method: fclutch_fm` 是主方法结果，`Method: cclutch_history` 是诊断对照结果。当前首版实现中，`cclutch_history` 不是完整 transfer-function C-CLUTCH，而是对同一 F-CLUTCH 响应项额外拆分 `track`、`collision`、`direct_fission` 三类贡献。因此通常会看到两者总 sensitivity 完全一致，差别主要体现在 `cclutch_history` 多了分量解释。
+
+### 主结果表
+
+示例：
+
+```text
+   id         variable    mat      nuclide      parameter       dlogk/dp    sensitivity          unc      rel_unc
+    1          density      1            -   1.875000e+01   4.409819e-02   8.268411e-01   1.7376e-03    2.102e-03
+    2  nuclide_density      1         U235   4.501828e-02   1.779730e+01   8.012037e-01   1.7302e-03    2.160e-03
+    3      temperature      1            -   2.936000e+02   0.000000e+00   0.000000e+00   0.0000e+00          nan
+```
+
+字段解释：
+
+- `id`：`tallies.xml` 中 `<derivative>` 的 ID。
+- `variable`：扰动类型，包括 `density`、`nuclide_density`、`temperature`。
+- `mat`：被扰动材料 ID。
+- `nuclide`：被扰动核素。`density` 和 `temperature` 对整个材料扰动，因此显示为 `-`。
+- `parameter`：扰动参数当前值。例如材料密度、核素原子密度、材料温度。
+- `dlogk/dp`：`d ln(k) / d parameter`，带有参数单位的导数。
+- `sensitivity`：无量纲敏感性，等于 `parameter * dlogk/dp`。
+- `unc`：`sensitivity` 的统计不确定度。
+- `rel_unc`：相对不确定度，等于 `abs(unc / sensitivity)`。
+
+若输出为：
+
+```text
+density sensitivity = 8.268411e-01
+U235 nuclide_density sensitivity = 8.012037e-01
+```
+
+可近似理解为：
+
+- 材料 1 总密度增加 1%，`k_eff` 增加约 `0.8268%`。
+- 材料 1 中 `U235` 核素密度增加 1%，`k_eff` 增加约 `0.8012%`。
+
+### denominator
+
+示例：
+
+```text
+denominator mean: 3.78916978e+00
+```
+
+这是 CLUTCH ratio estimator 的归一化分母：
+
+```text
+D = sum_fission_site w_site * I*(cell_site)
+```
+
+它不是敏感性本身，而是用空间伴随源 `I*(cell)` 加权后的 active fission source response 归一化量。分母越稳定，说明 active fission source 与 inactive 生成的空间重要性匹配越稳定。
+
+### Batch diagnostics
+
+示例：
+
+```text
+batches: 200
+zero denominator batches: 0
+denominator min/mean/max: 3.656722e+00 / 3.789170e+00 / 3.932452e+00
+denominator coeff. variation: 1.515877e-02
+```
+
+含义：
+
+- `batches`：参与统计的 active batch 数。
+- `zero denominator batches`：分母为零的 batch 数。正常应为 `0`。
+- `denominator min/mean/max`：每个 batch 的分母范围。
+- `denominator coeff. variation`：分母批间变异系数，越小表示归一化响应越稳定。
+
+如果 denominator 变异系数很大，通常说明 inactive 裂变矩阵伴随源采样不足、网格过细，或 active fission source 与伴随源非零区域匹配不好。
+
+### Batch ratio
+
+示例：
+
+```text
+batch ratio dlogk/dp mean/std by parameter:
+  param[01]: mean=4.409295e-02, std=1.314935e-03
+  param[02]: mean=1.779491e+01, std=5.452429e-01
+```
+
+这里显示每个 batch 的 `N_b / D_b` 的均值和标准差，用于观察批间波动。最终主表中的 `dlogk/dp` 使用 ratio-of-means：
+
+```text
+mean(N_b) / mean(D_b)
+```
+
+因此它通常与 batch ratio mean 很接近，但不要求完全相等。
+
+### Component breakdown
+
+示例：
+
+```text
+component          dlogk_part
+track            -1.231670e-01
+collision         1.139319e-01
+direct_fission    5.333333e-02
+```
+
+三项相加对应主表中的 `dlogk/dp`：
+
+```text
+-0.123167 + 0.113932 + 0.053333 = 0.044098
+```
+
+物理含义：
+
+- `track`：路径项。密度增加会增大总截面，降低粒子沿路径存活概率，因此常为负。
+- `collision`：碰撞项。密度或核素密度增加会提高碰撞/反应概率项，因此常为正。
+- `direct_fission`：直接裂变生产项。密度或裂变核素密度增加会直接增强 `nu-fission` 源生产项，因此通常为正。
+
+`share_of_total` 是每个分量相对于净 numerator 的比例。由于 `track`、`collision`、`direct_fission` 之间可能强烈抵消，`share_of_total` 可以为负，也可以大于 1。它不是普通百分比占比，而是相对于抵消后的净结果的比例。
+
+### temperature sensitivity 为零
+
+若看到：
+
+```text
+temperature dlogk/dp = 0
+temperature sensitivity = 0
+```
+
+通常表示当前 temperature derivative 没有可用贡献。常见原因：
+
+- 材料相关核素没有 Windowed Multipole 数据。
+- 粒子能量不在 multipole 支持能区内。
+- 未启用或未加载 temperature derivative 所需的 multipole 数据。
+
+当前实现中，`temperature` sensitivity 依赖 multipole 数据计算 `d sigma / dT`。如果核素没有 multipole 数据，程序会将对应 temperature 贡献按 0 处理。
+
+### Method comparison
+
+示例：
+
+```text
+Method comparison: cclutch_history - fclutch_fm
+id  variable          delta_sens      rel_delta
+1   density           0.000000e+00    0.000000e+00
+2   nuclide_density   0.000000e+00    0.000000e+00
+```
+
+当前首版实现中，`cclutch_history` 使用与 `fclutch_fm` 相同的总响应项，只是额外输出分量拆分。因此 `delta_sens = 0` 是预期行为。若后续实现完整 transfer-function C-CLUTCH，该对比才会成为两种不同 CLUTCH 路线的物理差异检查。
+
 ## 常见错误
 
 ### 缺少 derivative
@@ -376,4 +530,3 @@ CLUTCH sensitivity requires at least one <derivative> in tallies.xml.
 3. 若 dropped sites 较多，检查网格边界。
 4. 若不确定度大，增加 active batches 或 histories。
 5. 用有限差分扰动材料密度或核素密度，对比 `sensitivity` 是否在统计不确定度内一致。
-
