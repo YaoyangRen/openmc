@@ -41,18 +41,21 @@ public:
     double emission_adjusted_lifetime_uncertainty {0.0};
   };
 
-  explicit BetaEffectiveAccumulator(std::shared_ptr<SharedMeshGrid> grid);
+  explicit BetaEffectiveAccumulator(
+    std::shared_ptr<SharedMeshGrid> grid, int n_materials = -1);
 
   void set_adjoint_source_spatial(
-    const std::vector<double>& adjoint_source_spatial);
+    const std::unordered_map<int64_t, double>& adjoint_source_spatial);
 
   void begin_batch(int batch_id);
   void end_batch(int batch_id);
 
-  void record_source_birth(const Position& r, int64_t source_particle_id);
+  void record_source_birth(
+    const Position& r, int64_t source_particle_id, int material_index);
 
   void score_fission_site(const Position& r, double site_weight,
-    int delayed_group, double neutron_lifetime, double delayed_group_delay);
+    int material_index, int delayed_group, double neutron_lifetime,
+    double delayed_group_delay);
 
   void score_cclutch_fission_event(const Position& r,
     int64_t source_particle_id, double total_contribution,
@@ -95,6 +98,7 @@ private:
   };
 
   int position_to_index(const Position& r) const;
+  int64_t source_state_index(const Position& r, int material_index) const;
   MethodResult compute_result(bool use_cclutch) const;
   GenerationTimeResult compute_generation_time_result(bool use_cclutch) const;
   void fold_current_cclutch_batch();
@@ -109,8 +113,10 @@ private:
   std::shared_ptr<SharedMeshGrid> grid_;
   std::array<double, 3> upper_bound_ {};
   double inv_pitch_ {1.0};
+  int n_materials_ {1};
+  size_t n_source_states_ {0};
 
-  std::vector<double> adjoint_source_spatial_;
+  std::unordered_map<int64_t, double> adjoint_source_spatial_;
   bool source_ready_ {false};
 
   mutable std::mutex mutex_;
@@ -118,18 +124,21 @@ private:
   BatchScore current_batch_;
   std::vector<BatchScore> batches_;
 
-  std::unordered_map<int64_t, int> current_source_cells_;
-  std::vector<int> current_source_counts_;
-  std::vector<double> current_cclutch_transfer_total_;
-  std::vector<double> current_cclutch_transfer_lifetime_;
-  std::vector<double> current_cclutch_transfer_emission_adjusted_lifetime_;
-  std::vector<std::array<double, N_DELAYED_GROUPS>>
+  std::unordered_map<int64_t, int64_t> current_source_states_;
+  std::unordered_map<int64_t, int> current_source_counts_;
+  std::unordered_map<int64_t, double> current_cclutch_transfer_total_;
+  std::unordered_map<int64_t, double> current_cclutch_transfer_lifetime_;
+  std::unordered_map<int64_t, double>
+    current_cclutch_transfer_emission_adjusted_lifetime_;
+  std::unordered_map<int64_t, std::array<double, N_DELAYED_GROUPS>>
     current_cclutch_transfer_delayed_;
 
   int64_t total_fission_sites_ {0};
   int64_t total_scored_sites_ {0};
   int64_t total_dropped_sites_ {0};
   int64_t total_invalid_delayed_group_sites_ {0};
+  int64_t total_invalid_source_states_ {0};
+  int64_t total_invalid_fission_states_ {0};
   int64_t total_cclutch_events_ {0};
   int64_t total_cclutch_scored_events_ {0};
   int64_t total_cclutch_dropped_events_ {0};

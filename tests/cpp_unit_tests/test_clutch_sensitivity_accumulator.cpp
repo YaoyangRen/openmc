@@ -1,6 +1,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <unordered_map>
+
 #include "openmc/clutch_sensitivity_accumulator.h"
 #include "openmc/mesh_init.h"
 
@@ -14,7 +16,7 @@ TEST_CASE("CLUTCH sensitivity accumulator scores fixed response terms")
   ClutchSensitivityAccumulator acc(
     grid, {101, 102}, {2.0, 4.0}, "hybrid");
 
-  std::vector<double> spatial(grid->n_cells(), 0.0);
+  std::unordered_map<int64_t, double> spatial;
   spatial[0] = 10.0;
   spatial[4] = 20.0;
   acc.set_adjoint_source_spatial(spatial);
@@ -61,7 +63,7 @@ TEST_CASE("C-CLUTCH sensitivity accumulator folds transfer response terms")
   ClutchSensitivityAccumulator acc(
     grid, {101, 102}, {2.0, 4.0}, "hybrid");
 
-  std::vector<double> spatial(grid->n_cells(), 0.0);
+  std::unordered_map<int64_t, double> spatial;
   spatial[0] = 10.0;
   spatial[4] = 20.0;
   acc.set_adjoint_source_spatial(spatial);

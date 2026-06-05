@@ -6,6 +6,7 @@
 #include "openmc/eigenvalue.h"
 #include "openmc/error.h"
 #include "openmc/event.h"
+#include "openmc/geometry.h"
 #include "openmc/geometry_aux.h"
 #include "openmc/ifp.h"
 #include "openmc/material.h"
@@ -654,7 +655,7 @@ void finalize_batch()
     }
     if (simulation::clutch_sensitivity_accumulator) {
       simulation::clutch_sensitivity_accumulator->set_adjoint_source_spatial(
-        simulation::fission_matrix->get_spatial_adjoint_source());
+        simulation::fission_matrix->get_cell_adjoint_source());
     }
 
     // 输出到文件
@@ -791,20 +792,27 @@ void initialize_history(Particle& p, int64_t index_source)
   // current source site that starts this history.
   p.source_particle_id() = p.id();
 
+  // Source-state tallies need the material containing the source point. The
+  // normal first XS event also does this search, but recording here keeps the
+  // source birth available before any descendant fission sites are scored.
+  if (p.lowest_coord().cell() == C_NONE && exhaustive_find_cell(p)) {
+    if (p.cell_born() == C_NONE)
+      p.cell_born() = p.lowest_coord().cell();
+    for (int j = 0; j < p.n_coord(); ++j) {
+      p.cell_last(j) = p.coord(j).cell();
+    }
+    p.n_coord_last() = p.n_coord();
+  }
+
   if (simulation::fission_matrix &&
       simulation::current_batch <= settings::n_inactive) {
-    if (settings::run_CE) {
-      simulation::fission_matrix->record_source_birth(
-        p.r(), p.source_particle_id(), p.E(), -1, p.wgt());
-    } else {
-      simulation::fission_matrix->record_source_birth(
-        p.r(), p.source_particle_id(), -1.0, p.g(), p.wgt());
-    }
+    simulation::fission_matrix->record_source_birth(
+      p.r(), p.source_particle_id(), p.material(), p.wgt());
   }
   if (simulation::current_batch > settings::n_inactive) {
     if (simulation::beta_effective_accumulator) {
       simulation::beta_effective_accumulator->record_source_birth(
-        p.r(), p.source_particle_id());
+        p.r(), p.source_particle_id(), p.material());
     }
     if (simulation::clutch_sensitivity_accumulator) {
       simulation::clutch_sensitivity_accumulator->record_source_birth(

@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numeric>
+#include <unordered_set>
 #include <utility>
 
 #ifdef OPENMC_MPI
@@ -62,11 +63,6 @@ ClutchSensitivityAccumulator::ClutchSensitivityAccumulator(
 
   upper_bound_ = grid_->upper_bound();
   inv_pitch_ = grid_->inv_pitch();
-  adjoint_source_spatial_.assign(grid_->n_cells(), 0.0);
-  current_source_counts_.assign(grid_->n_cells(), 0);
-  current_cclutch_transfer_total_.assign(grid_->n_cells(), 0.0);
-  current_cclutch_transfer_numerator_.assign(
-    grid_->n_cells() * derivative_indices_.size(), 0.0);
   initialize_parameter_metadata();
 }
 
@@ -87,11 +83,6 @@ ClutchSensitivityAccumulator::ClutchSensitivityAccumulator(
 
   upper_bound_ = grid_->upper_bound();
   inv_pitch_ = grid_->inv_pitch();
-  adjoint_source_spatial_.assign(grid_->n_cells(), 0.0);
-  current_source_counts_.assign(grid_->n_cells(), 0);
-  current_cclutch_transfer_total_.assign(grid_->n_cells(), 0.0);
-  current_cclutch_transfer_numerator_.assign(
-    grid_->n_cells() * derivative_indices_.size(), 0.0);
   derivative_variables_.assign(n_parameters(), "synthetic");
   derivative_material_ids_.assign(n_parameters(), 0);
   derivative_nuclides_.assign(n_parameters(), "");
@@ -164,20 +155,47 @@ void ClutchSensitivityAccumulator::set_adjoint_source_spatial(
                 "does not match the shared kinetics mesh.");
   }
 
-  double sum = 0.0;
-  for (double value : adjoint_source_spatial) {
+  std::unordered_map<int64_t, double> sparse_source;
+  for (size_t i = 0; i < adjoint_source_spatial.size(); ++i) {
+    const double value = adjoint_source_spatial[i];
     if (!std::isfinite(value) || value < 0.0) {
       fatal_error("ClutchSensitivityAccumulator: spatial adjoint source "
                   "contains invalid values.");
     }
-    sum += value;
+    if (value > 0.0) {
+      sparse_source[static_cast<int64_t>(i)] = value;
+    }
+  }
+
+  set_adjoint_source_spatial(sparse_source);
+}
+
+void ClutchSensitivityAccumulator::set_adjoint_source_spatial(
+  const std::unordered_map<int64_t, double>& adjoint_source_spatial)
+{
+  double sum = 0.0;
+  std::unordered_map<int64_t, double> sparse_source;
+  sparse_source.reserve(adjoint_source_spatial.size());
+  for (const auto& [cell, value] : adjoint_source_spatial) {
+    if (cell < 0 || cell >= static_cast<int64_t>(grid_->n_cells())) {
+      fatal_error("ClutchSensitivityAccumulator: spatial adjoint source "
+                  "contains an invalid cell index.");
+    }
+    if (!std::isfinite(value) || value < 0.0) {
+      fatal_error("ClutchSensitivityAccumulator: spatial adjoint source "
+                  "contains invalid values.");
+    }
+    if (value > 0.0) {
+      sparse_source[cell] = value;
+      sum += value;
+    }
   }
   if (sum <= 0.0) {
     fatal_error("ClutchSensitivityAccumulator: spatial adjoint source is zero.");
   }
 
   std::lock_guard<std::mutex> lock(mutex_);
-  adjoint_source_spatial_ = adjoint_source_spatial;
+  adjoint_source_spatial_ = std::move(sparse_source);
   source_ready_ = true;
 }
 
@@ -196,11 +214,9 @@ void ClutchSensitivityAccumulator::begin_batch(int batch_id)
   current_batch_.numerator.assign(n_parameters(), 0.0);
   current_batch_.cclutch_numerator.assign(n_parameters(), 0.0);
   current_source_cells_.clear();
-  std::fill(current_source_counts_.begin(), current_source_counts_.end(), 0);
-  std::fill(current_cclutch_transfer_total_.begin(),
-    current_cclutch_transfer_total_.end(), 0.0);
-  std::fill(current_cclutch_transfer_numerator_.begin(),
-    current_cclutch_transfer_numerator_.end(), 0.0);
+  current_source_counts_.clear();
+  current_cclutch_transfer_total_.clear();
+  current_cclutch_transfer_numerator_.clear();
   batch_active_ = true;
 }
 
@@ -228,7 +244,7 @@ void ClutchSensitivityAccumulator::record_source_birth(
     return;
   }
 
-  const int cell = position_to_index(r);
+  const int64_t cell = position_to_index(r);
   if (cell < 0) {
     return;
   }
@@ -237,7 +253,13 @@ void ClutchSensitivityAccumulator::record_source_birth(
   if (inserted) {
     ++current_source_counts_[cell];
   } else if (it->second != cell) {
-    --current_source_counts_[it->second];
+    auto count_it = current_source_counts_.find(it->second);
+    if (count_it != current_source_counts_.end()) {
+      --count_it->second;
+      if (count_it->second <= 0) {
+        current_source_counts_.erase(count_it);
+      }
+    }
     it->second = cell;
     ++current_source_counts_[cell];
   }
@@ -318,20 +340,21 @@ void ClutchSensitivityAccumulator::score_cclutch_contribution(const Position& r,
     return;
   }
 
-  const int source_cell = it->second;
+  const int64_t source_cell = it->second;
   if (source_cell < 0 ||
-      source_cell >= static_cast<int>(current_cclutch_transfer_total_.size())) {
+      source_cell >= static_cast<int64_t>(grid_->n_cells())) {
     ++current_batch_.cclutch_dropped_events;
     ++total_cclutch_dropped_events_;
     return;
   }
 
   current_cclutch_transfer_total_[source_cell] += total_contribution;
-  const size_t offset =
-    static_cast<size_t>(source_cell) * static_cast<size_t>(n_parameters());
-  for (int i = 0; i < n_parameters(); ++i) {
-    current_cclutch_transfer_numerator_[offset + i] +=
-      total_contribution * response_terms[i];
+  auto& numerator = current_cclutch_transfer_numerator_[source_cell];
+  if (numerator.empty()) {
+    numerator.assign(n_parameters(), 0.0);
+  }
+  for (size_t i = 0; i < n_parameters(); ++i) {
+    numerator[i] += total_contribution * response_terms[i];
   }
 
   ++current_batch_.cclutch_scored_events;
@@ -374,14 +397,15 @@ void ClutchSensitivityAccumulator::score_contribution(const Position& r,
     return;
   }
 
-  const double importance = adjoint_source_spatial_[cell];
-  if (importance <= 0.0) {
+  auto importance_it = adjoint_source_spatial_.find(cell);
+  if (importance_it == adjoint_source_spatial_.end() ||
+      importance_it->second <= 0.0) {
     ++current_batch_.dropped_sites;
     ++total_dropped_sites_;
     return;
   }
 
-  const double response = site_weight * importance;
+  const double response = site_weight * importance_it->second;
   current_batch_.denominator += response;
   for (int i = 0; i < n_parameters(); ++i) {
     current_batch_.numerator[i] += response * (path_terms[i] + direct_terms[i]);
@@ -394,37 +418,59 @@ void ClutchSensitivityAccumulator::score_contribution(const Position& r,
 void ClutchSensitivityAccumulator::fold_current_cclutch_batch()
 {
   const size_t n_params = n_parameters();
-  for (int source_cell = 0;
-       source_cell < static_cast<int>(current_cclutch_transfer_total_.size());
-       ++source_cell) {
-    const double total = current_cclutch_transfer_total_[source_cell];
+  std::unordered_set<int64_t> source_cells;
+  source_cells.reserve(current_cclutch_transfer_total_.size() +
+                       current_cclutch_transfer_numerator_.size());
+  for (const auto& [source_cell, total] : current_cclutch_transfer_total_) {
+    source_cells.insert(source_cell);
+  }
+  for (const auto& [source_cell, numerator] :
+       current_cclutch_transfer_numerator_) {
+    source_cells.insert(source_cell);
+  }
+
+  for (int64_t source_cell : source_cells) {
+    auto total_it = current_cclutch_transfer_total_.find(source_cell);
+    const double total =
+      total_it != current_cclutch_transfer_total_.end() ? total_it->second :
+                                                          0.0;
     bool has_numerator = false;
-    const size_t offset = static_cast<size_t>(source_cell) * n_params;
-    for (int i = 0; i < n_params; ++i) {
-      has_numerator =
-        has_numerator || current_cclutch_transfer_numerator_[offset + i] != 0.0;
+    auto numerator_it = current_cclutch_transfer_numerator_.find(source_cell);
+    if (numerator_it != current_cclutch_transfer_numerator_.end()) {
+      for (double value : numerator_it->second) {
+        has_numerator = has_numerator || value != 0.0;
+      }
     }
     if (total <= 0.0 && !has_numerator) {
       continue;
     }
 
-    const int source_count = current_source_counts_[source_cell];
+    auto count_it = current_source_counts_.find(source_cell);
+    const int source_count =
+      count_it != current_source_counts_.end() ? count_it->second : 0;
     if (source_count <= 0) {
       fatal_error("ClutchSensitivityAccumulator: C-CLUTCH transfer response "
                   "exists for a source cell with zero source count.");
     }
 
-    const double importance = adjoint_source_spatial_[source_cell];
-    if (importance <= 0.0) {
+    auto importance_it = adjoint_source_spatial_.find(source_cell);
+    if (importance_it == adjoint_source_spatial_.end() ||
+        importance_it->second <= 0.0) {
       continue;
     }
 
     const double source_weight =
-      importance / static_cast<double>(source_count);
+      importance_it->second / static_cast<double>(source_count);
     current_batch_.cclutch_denominator += source_weight * total;
-    for (int i = 0; i < n_params; ++i) {
-      current_batch_.cclutch_numerator[i] +=
-        source_weight * current_cclutch_transfer_numerator_[offset + i];
+    if (numerator_it != current_cclutch_transfer_numerator_.end()) {
+      if (numerator_it->second.size() != n_params) {
+        fatal_error("ClutchSensitivityAccumulator: C-CLUTCH transfer numerator "
+                    "has an invalid derivative vector size.");
+      }
+      for (size_t i = 0; i < n_params; ++i) {
+        current_batch_.cclutch_numerator[i] +=
+          source_weight * numerator_it->second[i];
+      }
     }
   }
 }

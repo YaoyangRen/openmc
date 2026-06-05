@@ -2,6 +2,7 @@
 
 #include "openmc/error.h"
 #include "openmc/hdf5_interface.h"
+#include "openmc/material.h"
 #include "openmc/mesh_init.h"
 
 #include <algorithm>
@@ -10,11 +11,12 @@
 #include <iostream>
 #include <numeric>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace openmc {
 
 BetaEffectiveAccumulator::BetaEffectiveAccumulator(
-  std::shared_ptr<SharedMeshGrid> grid)
+  std::shared_ptr<SharedMeshGrid> grid, int n_materials)
   : grid_ {std::move(grid)}
 {
   if (!grid_) {
@@ -25,25 +27,24 @@ BetaEffectiveAccumulator::BetaEffectiveAccumulator(
   upper_bound_ = grid_->upper_bound();
   inv_pitch_ = grid_->inv_pitch();
   const size_t n_cells = grid_->n_cells();
-  current_source_counts_.assign(n_cells, 0);
-  current_cclutch_transfer_total_.assign(n_cells, 0.0);
-  current_cclutch_transfer_lifetime_.assign(n_cells, 0.0);
-  current_cclutch_transfer_emission_adjusted_lifetime_.assign(n_cells, 0.0);
-  std::array<double, N_DELAYED_GROUPS> zero_delayed {};
-  current_cclutch_transfer_delayed_.assign(n_cells, zero_delayed);
+  if (n_materials > 0) {
+    n_materials_ = n_materials;
+  } else {
+    n_materials_ =
+      std::max(1, static_cast<int>(model::materials.size()));
+  }
+  n_source_states_ = n_cells * static_cast<size_t>(n_materials_);
 }
 
 void BetaEffectiveAccumulator::set_adjoint_source_spatial(
-  const std::vector<double>& adjoint_source_spatial)
+  const std::unordered_map<int64_t, double>& adjoint_source_spatial)
 {
-  const size_t n_cells = grid_->n_cells();
-  if (adjoint_source_spatial.size() != n_cells) {
-    fatal_error("BetaEffectiveAccumulator: spatial adjoint source size "
-                "does not match n_cells.");
-  }
-
   bool has_positive = false;
-  for (double v : adjoint_source_spatial) {
+  for (const auto& [state, v] : adjoint_source_spatial) {
+    if (state < 0 || state >= static_cast<int64_t>(n_source_states_)) {
+      fatal_error("BetaEffectiveAccumulator: spatial adjoint source contains "
+                  "an invalid cell-material state index.");
+    }
     if (!std::isfinite(v)) {
       fatal_error("BetaEffectiveAccumulator: spatial adjoint source contains "
                   "non-finite values.");
@@ -72,17 +73,12 @@ void BetaEffectiveAccumulator::begin_batch(int batch_id)
   }
   current_batch_ = BatchScore {};
   current_batch_.batch_id = batch_id;
-  current_source_cells_.clear();
-  std::fill(current_source_counts_.begin(), current_source_counts_.end(), 0);
-  std::fill(current_cclutch_transfer_total_.begin(),
-    current_cclutch_transfer_total_.end(), 0.0);
-  std::fill(current_cclutch_transfer_lifetime_.begin(),
-    current_cclutch_transfer_lifetime_.end(), 0.0);
-  std::fill(current_cclutch_transfer_emission_adjusted_lifetime_.begin(),
-    current_cclutch_transfer_emission_adjusted_lifetime_.end(), 0.0);
-  for (auto& delayed : current_cclutch_transfer_delayed_) {
-    delayed.fill(0.0);
-  }
+  current_source_states_.clear();
+  current_source_counts_.clear();
+  current_cclutch_transfer_total_.clear();
+  current_cclutch_transfer_lifetime_.clear();
+  current_cclutch_transfer_emission_adjusted_lifetime_.clear();
+  current_cclutch_transfer_delayed_.clear();
   batch_active_ = true;
 }
 
@@ -100,11 +96,11 @@ void BetaEffectiveAccumulator::end_batch(int batch_id)
   batches_.push_back(current_batch_);
   batch_active_ = false;
   current_batch_ = BatchScore {};
-  current_source_cells_.clear();
+  current_source_states_.clear();
 }
 
 void BetaEffectiveAccumulator::record_source_birth(
-  const Position& r, int64_t source_particle_id)
+  const Position& r, int64_t source_particle_id, int material_index)
 {
   if (source_particle_id < 0) {
     return;
@@ -115,24 +111,26 @@ void BetaEffectiveAccumulator::record_source_birth(
     return;
   }
 
-  const int cell = position_to_index(r);
-  if (cell < 0) {
+  const int64_t state = source_state_index(r, material_index);
+  if (state < 0) {
+    ++total_invalid_source_states_;
     return;
   }
 
-  auto [it, inserted] = current_source_cells_.emplace(source_particle_id, cell);
+  auto [it, inserted] =
+    current_source_states_.emplace(source_particle_id, state);
   if (inserted) {
-    ++current_source_counts_[cell];
-  } else if (it->second != cell) {
+    ++current_source_counts_[state];
+  } else if (it->second != state) {
     --current_source_counts_[it->second];
-    it->second = cell;
-    ++current_source_counts_[cell];
+    it->second = state;
+    ++current_source_counts_[state];
   }
 }
 
 void BetaEffectiveAccumulator::score_fission_site(const Position& r,
-  double site_weight, int delayed_group, double neutron_lifetime,
-  double delayed_group_delay)
+  double site_weight, int material_index, int delayed_group,
+  double neutron_lifetime, double delayed_group_delay)
 {
   if (!std::isfinite(site_weight) || site_weight <= 0.0) {
     return;
@@ -158,21 +156,23 @@ void BetaEffectiveAccumulator::score_fission_site(const Position& r,
   ++current_batch_.fission_sites;
   ++total_fission_sites_;
 
-  const int cell = position_to_index(r);
-  if (cell < 0) {
+  const int64_t state = source_state_index(r, material_index);
+  if (state < 0) {
+    ++current_batch_.dropped_sites;
+    ++total_dropped_sites_;
+    ++total_invalid_fission_states_;
+    return;
+  }
+
+  auto importance_it = adjoint_source_spatial_.find(state);
+  if (importance_it == adjoint_source_spatial_.end() ||
+      importance_it->second <= 0.0) {
     ++current_batch_.dropped_sites;
     ++total_dropped_sites_;
     return;
   }
 
-  const double importance = adjoint_source_spatial_[cell];
-  if (importance <= 0.0) {
-    ++current_batch_.dropped_sites;
-    ++total_dropped_sites_;
-    return;
-  }
-
-  const double score_weight = site_weight * importance;
+  const double score_weight = site_weight * importance_it->second;
   current_batch_.denominator += score_weight;
   current_batch_.lifetime_numerator += score_weight * neutron_lifetime;
   current_batch_.emission_adjusted_lifetime_numerator +=
@@ -223,25 +223,25 @@ void BetaEffectiveAccumulator::score_cclutch_fission_event(const Position& r,
     return;
   }
 
-  auto it = current_source_cells_.find(source_particle_id);
-  if (it == current_source_cells_.end()) {
+  auto it = current_source_states_.find(source_particle_id);
+  if (it == current_source_states_.end()) {
     ++current_batch_.cclutch_missing_source_events;
     ++total_cclutch_missing_source_events_;
     return;
   }
 
-  const int source_cell = it->second;
-  if (source_cell < 0 ||
-      source_cell >= static_cast<int>(current_cclutch_transfer_total_.size())) {
+  const int64_t source_state = it->second;
+  if (source_state < 0 ||
+      source_state >= static_cast<int64_t>(n_source_states_)) {
     ++current_batch_.cclutch_dropped_events;
     ++total_cclutch_dropped_events_;
     return;
   }
 
-  current_cclutch_transfer_total_[source_cell] += total_contribution;
-  current_cclutch_transfer_lifetime_[source_cell] +=
+  current_cclutch_transfer_total_[source_state] += total_contribution;
+  current_cclutch_transfer_lifetime_[source_state] +=
     total_contribution * neutron_lifetime;
-  current_cclutch_transfer_emission_adjusted_lifetime_[source_cell] +=
+  current_cclutch_transfer_emission_adjusted_lifetime_[source_state] +=
     total_contribution * neutron_lifetime;
   for (int k = 0; k < N_DELAYED_GROUPS; ++k) {
     const double delayed = delayed_contributions[k];
@@ -251,8 +251,8 @@ void BetaEffectiveAccumulator::score_cclutch_fission_event(const Position& r,
         fatal_error("BetaEffectiveAccumulator: C-CLUTCH delayed response has "
                     "no positive delayed-group mean delay.");
       }
-      current_cclutch_transfer_delayed_[source_cell][k] += delayed;
-      current_cclutch_transfer_emission_adjusted_lifetime_[source_cell] +=
+      current_cclutch_transfer_delayed_[source_state][k] += delayed;
+      current_cclutch_transfer_emission_adjusted_lifetime_[source_state] +=
         delayed * delay;
     }
   }
@@ -263,40 +263,68 @@ void BetaEffectiveAccumulator::score_cclutch_fission_event(const Position& r,
 
 void BetaEffectiveAccumulator::fold_current_cclutch_batch()
 {
-  for (int source_cell = 0;
-       source_cell < static_cast<int>(current_cclutch_transfer_total_.size());
-       ++source_cell) {
-    const double total = current_cclutch_transfer_total_[source_cell];
+  std::unordered_set<int64_t> source_states;
+  source_states.reserve(current_cclutch_transfer_total_.size() +
+                        current_cclutch_transfer_delayed_.size());
+  for (const auto& [source_state, total] : current_cclutch_transfer_total_) {
+    source_states.insert(source_state);
+  }
+  for (const auto& [source_state, delayed] : current_cclutch_transfer_delayed_) {
+    source_states.insert(source_state);
+  }
+
+  for (int64_t source_state : source_states) {
+    auto total_it = current_cclutch_transfer_total_.find(source_state);
+    const double total =
+      total_it != current_cclutch_transfer_total_.end() ? total_it->second :
+                                                          0.0;
+    auto delayed_it = current_cclutch_transfer_delayed_.find(source_state);
     bool has_delayed = false;
-    for (double delayed : current_cclutch_transfer_delayed_[source_cell]) {
-      has_delayed = has_delayed || delayed > 0.0;
+    if (delayed_it != current_cclutch_transfer_delayed_.end()) {
+      for (double delayed : delayed_it->second) {
+        has_delayed = has_delayed || delayed > 0.0;
+      }
     }
     if (total <= 0.0 && !has_delayed) {
       continue;
     }
 
-    const int source_count = current_source_counts_[source_cell];
+    auto count_it = current_source_counts_.find(source_state);
+    const int source_count =
+      count_it != current_source_counts_.end() ? count_it->second : 0;
     if (source_count <= 0) {
       fatal_error("BetaEffectiveAccumulator: C-CLUTCH transfer response exists "
-                  "for a source cell with zero source count.");
+                  "for a source state with zero source count.");
     }
 
-    const double importance = adjoint_source_spatial_[source_cell];
-    if (importance <= 0.0) {
+    auto importance_it = adjoint_source_spatial_.find(source_state);
+    if (importance_it == adjoint_source_spatial_.end() ||
+        importance_it->second <= 0.0) {
       continue;
     }
 
     const double source_weight =
-      importance / static_cast<double>(source_count);
+      importance_it->second / static_cast<double>(source_count);
     current_batch_.cclutch_denominator += source_weight * total;
+    auto lifetime_it = current_cclutch_transfer_lifetime_.find(source_state);
     current_batch_.cclutch_lifetime_numerator +=
-      source_weight * current_cclutch_transfer_lifetime_[source_cell];
+      source_weight *
+      (lifetime_it != current_cclutch_transfer_lifetime_.end() ?
+          lifetime_it->second :
+          0.0);
+    auto adjusted_it =
+      current_cclutch_transfer_emission_adjusted_lifetime_.find(source_state);
     current_batch_.cclutch_emission_adjusted_lifetime_numerator +=
       source_weight *
-      current_cclutch_transfer_emission_adjusted_lifetime_[source_cell];
-    for (int k = 0; k < N_DELAYED_GROUPS; ++k) {
-      current_batch_.cclutch_numerator[k] +=
-        source_weight * current_cclutch_transfer_delayed_[source_cell][k];
+      (adjusted_it !=
+          current_cclutch_transfer_emission_adjusted_lifetime_.end() ?
+          adjusted_it->second :
+          0.0);
+    if (delayed_it != current_cclutch_transfer_delayed_.end()) {
+      for (int k = 0; k < N_DELAYED_GROUPS; ++k) {
+        current_batch_.cclutch_numerator[k] +=
+          source_weight * delayed_it->second[k];
+      }
     }
   }
 }
@@ -540,6 +568,19 @@ int BetaEffectiveAccumulator::position_to_index(const Position& r) const
   return (indices[0] * shape[1] + indices[1]) * shape[2] + indices[2];
 }
 
+int64_t BetaEffectiveAccumulator::source_state_index(
+  const Position& r, int material_index) const
+{
+  if (material_index < 0 || material_index >= n_materials_)
+    return -1;
+
+  const int cell = position_to_index(r);
+  if (cell < 0)
+    return -1;
+
+  return static_cast<int64_t>(cell) * n_materials_ + material_index;
+}
+
 void BetaEffectiveAccumulator::write_batch_matrix(hid_t group,
   const char* name, const std::vector<double>& flat, hsize_t n_batches) const
 {
@@ -559,15 +600,17 @@ void BetaEffectiveAccumulator::write_method_group(hid_t parent,
   write_attribute(group, "uses_fission_event_sites", use_cclutch ? 0 : 1);
   write_attribute(group, "uses_transfer_function", use_cclutch ? 1 : 0);
   write_attribute(group, "uses_birth_energy_importance", 0);
-  write_attribute(group, "source_state_definition", "cell");
+  write_attribute(group, "source_state_definition", "cell_material");
   if (use_cclutch) {
     write_attribute(group, "formula",
-      "D=mean_b sum_source I*(source_cell) T_total(source_cell); "
-      "N_k=mean_b sum_source I*(source_cell) T_delayed_k(source_cell)");
+      "D=mean_b sum_source I*(source_cell,source_material) "
+      "T_total(source_cell,source_material); "
+      "N_k=mean_b sum_source I*(source_cell,source_material) "
+      "T_delayed_k(source_cell,source_material)");
   } else {
     write_attribute(group, "formula",
-      "D=mean_b sum_sites w_site I*(cell); "
-      "N_k=mean_b sum_delayed_k w_site I*(cell)");
+      "D=mean_b sum_sites w_site I*(cell,material); "
+      "N_k=mean_b sum_delayed_k w_site I*(cell,material)");
   }
 
   write_dataset(
@@ -614,7 +657,7 @@ void BetaEffectiveAccumulator::write_generation_time_method_group(hid_t parent,
   write_attribute(group, "available", static_cast<int>(result.available));
   write_attribute(group, "uses_ifp", 0);
   write_attribute(group, "units", "s");
-  write_attribute(group, "source_state_definition", "cell");
+  write_attribute(group, "source_state_definition", "cell_material");
   write_attribute(group, "uses_transfer_function", use_cclutch ? 1 : 0);
   write_attribute(group, "delay_treatment", "group_mean_1_over_lambda");
   write_attribute(group, "transport_lifetime_definition",
@@ -624,12 +667,14 @@ void BetaEffectiveAccumulator::write_generation_time_method_group(hid_t parent,
     "response only");
   if (use_cclutch) {
     write_attribute(group, "formula",
-      "D=mean_b sum_source I*(source_cell) T_total(source_cell); "
-      "L=mean_b sum_source I*(source_cell) T_lifetime(source_cell)");
+      "D=mean_b sum_source I*(source_cell,source_material) "
+      "T_total(source_cell,source_material); "
+      "L=mean_b sum_source I*(source_cell,source_material) "
+      "T_lifetime(source_cell,source_material)");
   } else {
     write_attribute(group, "formula",
-      "D=mean_b sum_sites w_site I*(cell); "
-      "L=mean_b sum_sites w_site I*(cell) lifetime");
+      "D=mean_b sum_sites w_site I*(cell,material); "
+      "L=mean_b sum_sites w_site I*(cell,material) lifetime");
   }
 
   write_dataset(
@@ -706,7 +751,7 @@ void BetaEffectiveAccumulator::write_to_file(const std::string& filename) const
 
   hid_t file_id = file_open(filename, 'w');
   write_attribute(file_id, "filetype", "beta_effective");
-  write_attribute(file_id, "version", "3.0");
+  write_attribute(file_id, "version", "4.0");
   write_attribute(
     file_id, "description", "Effective delayed neutron fraction beta_eff");
 
@@ -717,22 +762,37 @@ void BetaEffectiveAccumulator::write_to_file(const std::string& filename) const
     std::vector<double>(result.uncertainty.begin(), result.uncertainty.end()));
 
   hid_t metadata = create_group(file_id, "metadata");
-  write_attribute(metadata, "primary_method", "fclutch_spatial");
+  write_attribute(metadata, "primary_method", "fclutch_cell_material");
   write_attribute(metadata, "theory_reference", "Qiu2016_F_CLUTCH_Eq31_Eq43");
   write_attribute(metadata, "uses_fission_event_sites", 1);
   write_attribute(metadata, "has_cclutch_method", 1);
   write_attribute(metadata, "uses_birth_energy_importance", 0);
-  write_attribute(metadata, "source_state_definition", "cell");
+  write_attribute(metadata, "source_state_definition", "cell_material");
+  write_attribute(metadata, "state_indexing",
+    "state=cell*n_materials+material_index");
   write_attribute(metadata, "n_delayed_groups", N_DELAYED_GROUPS);
+  write_attribute(metadata, "n_materials", n_materials_);
+  write_attribute(
+    metadata, "n_source_states", static_cast<int64_t>(n_source_states_));
   write_attribute(metadata, "batchwise_ratio_uncertainty", 1);
   write_attribute(metadata, "adjoint_source",
     "fission_matrix.h5/adjoint_source generated by I*=(1/k)F^T I* on the "
-    "energy-integrated cell-to-cell fission matrix");
+    "energy-integrated cell-material fission matrix");
   write_dataset(metadata, "grid_shape", grid_->shape());
   write_dataset(metadata, "grid_lower_left", grid_->origin());
   write_dataset(metadata, "grid_upper_right", grid_->upper_bound());
   std::array<double, 3> pitch {grid_->pitch(), grid_->pitch(), grid_->pitch()};
   write_dataset(metadata, "grid_pitch", pitch);
+  std::vector<int> material_ids;
+  material_ids.reserve(n_materials_);
+  for (int m = 0; m < n_materials_; ++m) {
+    if (m < static_cast<int>(model::materials.size()) && model::materials[m]) {
+      material_ids.push_back(model::materials[m]->id());
+    } else {
+      material_ids.push_back(m);
+    }
+  }
+  write_dataset(metadata, "material_ids", material_ids);
   H5Gclose(metadata);
 
   hid_t diagnostics = create_group(file_id, "diagnostics");
@@ -741,6 +801,10 @@ void BetaEffectiveAccumulator::write_to_file(const std::string& filename) const
   write_attribute(diagnostics, "total_dropped_sites", total_dropped_sites_);
   write_attribute(diagnostics, "total_invalid_delayed_group_sites",
     total_invalid_delayed_group_sites_);
+  write_attribute(diagnostics, "total_invalid_source_states",
+    total_invalid_source_states_);
+  write_attribute(diagnostics, "total_invalid_fission_states",
+    total_invalid_fission_states_);
   write_attribute(diagnostics, "total_cclutch_events", total_cclutch_events_);
   write_attribute(diagnostics, "total_cclutch_scored_events",
     total_cclutch_scored_events_);
@@ -757,7 +821,7 @@ void BetaEffectiveAccumulator::write_to_file(const std::string& filename) const
   H5Gclose(diagnostics);
 
   hid_t method_group = create_group(file_id, "method");
-  write_method_group(method_group, "fclutch_spatial", result, false);
+  write_method_group(method_group, "fclutch_cell_material", result, false);
   write_method_group(method_group, "cclutch", cclutch_result, true);
   H5Gclose(method_group);
   file_close(file_id);
@@ -766,7 +830,7 @@ void BetaEffectiveAccumulator::write_to_file(const std::string& filename) const
     0.00016, 0.00104, 0.00097, 0.00253, 0.00107, 0.00042};
   const double mcnp_total = 0.00621;
 
-  std::cout << "\n  beta_eff results (spatial I*):" << std::endl;
+  std::cout << "\n  beta_eff results (cell-material I*):" << std::endl;
   std::cout << "  " << std::string(112, '-') << std::endl;
   std::cout << "    group      F-CLUTCH      unc_F        C-CLUTCH      unc_C        MCNP ref     F bias(%)   C bias(%)"
             << std::endl;
@@ -802,8 +866,8 @@ void BetaEffectiveAccumulator::write_to_file(const std::string& filename) const
             << std::endl;
   std::cout << "  " << std::string(112, '-') << std::endl;
   std::cout << "  (*) Primary method: F-CLUTCH fission-site scoring with "
-               "spatial I*(cell); C-CLUTCH folds active transfer functions "
-               "with the same spatial source importance."
+               "material-resolved I*(cell,material); C-CLUTCH folds active "
+               "transfer functions with the same source-state importance."
             << std::endl;
 }
 
@@ -828,14 +892,16 @@ void BetaEffectiveAccumulator::write_generation_time_to_file(
 
   hid_t file_id = file_open(filename, 'w');
   write_attribute(file_id, "filetype", "generation_time");
-  write_attribute(file_id, "version", "1.0");
+  write_attribute(file_id, "version", "2.0");
   write_attribute(file_id, "description",
     "CLUTCH-weighted neutron generation time estimates");
-  write_attribute(file_id, "primary_method", "fclutch_spatial");
+  write_attribute(file_id, "primary_method", "fclutch_cell_material");
   write_attribute(file_id, "units", "s");
   write_attribute(file_id, "uses_ifp", 0);
   write_attribute(file_id, "delay_treatment", "group_mean_1_over_lambda");
-  write_attribute(file_id, "source_state_definition", "cell");
+  write_attribute(file_id, "source_state_definition", "cell_material");
+  write_attribute(file_id, "state_indexing",
+    "state=cell*n_materials+material_index");
   write_attribute(file_id, "batchwise_ratio_uncertainty", 1);
 
   write_dataset(
@@ -850,17 +916,30 @@ void BetaEffectiveAccumulator::write_generation_time_to_file(
   hid_t metadata = create_group(file_id, "metadata");
   write_attribute(metadata, "adjoint_source",
     "fission_matrix.h5/adjoint_source generated by I*=(1/k)F^T I* on the "
-    "energy-integrated cell-to-cell fission matrix");
+    "energy-integrated cell-material fission matrix");
+  write_attribute(metadata, "n_materials", n_materials_);
+  write_attribute(
+    metadata, "n_source_states", static_cast<int64_t>(n_source_states_));
   write_dataset(metadata, "grid_shape", grid_->shape());
   write_dataset(metadata, "grid_lower_left", grid_->origin());
   write_dataset(metadata, "grid_upper_right", grid_->upper_bound());
   std::array<double, 3> pitch {grid_->pitch(), grid_->pitch(), grid_->pitch()};
   write_dataset(metadata, "grid_pitch", pitch);
+  std::vector<int> material_ids;
+  material_ids.reserve(n_materials_);
+  for (int m = 0; m < n_materials_; ++m) {
+    if (m < static_cast<int>(model::materials.size()) && model::materials[m]) {
+      material_ids.push_back(model::materials[m]->id());
+    } else {
+      material_ids.push_back(m);
+    }
+  }
+  write_dataset(metadata, "material_ids", material_ids);
   H5Gclose(metadata);
 
   hid_t method_group = create_group(file_id, "method");
   write_generation_time_method_group(
-    method_group, "fclutch_spatial", result, false);
+    method_group, "fclutch_cell_material", result, false);
   write_generation_time_method_group(
     method_group, "cclutch", cclutch_result, true);
   H5Gclose(method_group);

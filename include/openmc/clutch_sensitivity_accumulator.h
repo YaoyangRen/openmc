@@ -51,6 +51,8 @@ public:
 
   void set_adjoint_source_spatial(
     const vector<double>& adjoint_source_spatial);
+  void set_adjoint_source_spatial(
+    const std::unordered_map<int64_t, double>& adjoint_source_spatial);
 
   void begin_batch(int batch_id);
   void end_batch(int batch_id);
@@ -100,7 +102,7 @@ private:
   std::array<double, 3> upper_bound_ {};
   double inv_pitch_ {1.0};
 
-  vector<double> adjoint_source_spatial_;
+  std::unordered_map<int64_t, double> adjoint_source_spatial_;
   bool source_ready_ {false};
 
   vector<int> derivative_indices_;
@@ -116,10 +118,11 @@ private:
   BatchScore current_batch_;
   vector<BatchScore> batches_;
 
-  std::unordered_map<int64_t, int> current_source_cells_;
-  vector<int> current_source_counts_;
-  vector<double> current_cclutch_transfer_total_;
-  vector<double> current_cclutch_transfer_numerator_;
+  std::unordered_map<int64_t, int64_t> current_source_cells_;
+  std::unordered_map<int64_t, int> current_source_counts_;
+  std::unordered_map<int64_t, double> current_cclutch_transfer_total_;
+  std::unordered_map<int64_t, vector<double>>
+    current_cclutch_transfer_numerator_;
 
   int64_t total_fission_sites_ {0};
   int64_t total_scored_sites_ {0};

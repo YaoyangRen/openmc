@@ -243,12 +243,13 @@ void create_fission_sites(Particle& p)
       if (simulation::fission_matrix && p.source_particle_id() != -1 &&
           simulation::current_batch <= settings::n_inactive) {
         simulation::fission_matrix->record_fission_site(site.r, site.wgt,
-          p.source_particle_id(), -1.0, static_cast<int>(site.E));
+          p.source_particle_id(), p.material());
       }
       if (simulation::beta_effective_accumulator &&
           simulation::current_batch > settings::n_inactive) {
         simulation::beta_effective_accumulator->score_fission_site(site.r,
-          site.wgt, site.delayed_group, p.lifetime(), delayed_group_delay);
+          site.wgt, p.material(), site.delayed_group, p.lifetime(),
+          delayed_group_delay);
       }
       if (simulation::clutch_sensitivity_accumulator &&
           simulation::current_batch > settings::n_inactive) {
@@ -260,12 +261,13 @@ void create_fission_sites(Particle& p)
       if (simulation::fission_matrix && p.source_particle_id() != -1 &&
           simulation::current_batch <= settings::n_inactive) {
         simulation::fission_matrix->record_fission_site(site.r, site.wgt,
-          p.source_particle_id(), -1.0, static_cast<int>(site.E));
+          p.source_particle_id(), p.material());
       }
       if (simulation::beta_effective_accumulator &&
           simulation::current_batch > settings::n_inactive) {
         simulation::beta_effective_accumulator->score_fission_site(site.r,
-          site.wgt, site.delayed_group, p.lifetime(), delayed_group_delay);
+          site.wgt, p.material(), site.delayed_group, p.lifetime(),
+          delayed_group_delay);
       }
       if (simulation::clutch_sensitivity_accumulator &&
           simulation::current_batch > settings::n_inactive) {
