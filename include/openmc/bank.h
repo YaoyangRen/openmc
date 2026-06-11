@@ -30,6 +30,14 @@ extern vector<vector<int>> ifp_fission_delayed_group_bank;
 
 extern vector<vector<double>> ifp_fission_lifetime_bank;
 
+extern vector<vector<int64_t>> clutch_ifp_source_state_bank;
+
+extern vector<vector<int>> clutch_ifp_source_delayed_group_bank;
+
+extern vector<vector<int64_t>> clutch_ifp_fission_state_bank;
+
+extern vector<vector<int>> clutch_ifp_fission_delayed_group_bank;
+
 extern vector<int64_t> progeny_per_particle;
 
 } // namespace simulation

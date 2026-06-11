@@ -9,6 +9,7 @@
 
 #include "openmc/bank.h"
 #include "openmc/beta_effective_accumulator.h"
+#include "openmc/clutch_ifp.h"
 #include "openmc/clutch_sensitivity_accumulator.h"
 #include "openmc/constants.h"
 #include "openmc/eigenvalue.h"
@@ -240,6 +241,13 @@ void create_fission_sites(Particle& p)
         // Break out of loop as no more sites can be added to fission bank
         break;
       }
+      if (simulation::beta_effective_accumulator) {
+        const int64_t child_state =
+          simulation::beta_effective_accumulator->source_state_index(
+            site.r, p.material());
+        record_clutch_ifp_fission_site(
+          p, child_state, site.delayed_group, idx);
+      }
       if (simulation::fission_matrix && p.source_particle_id() != -1 &&
           simulation::current_batch <= settings::n_inactive) {
         simulation::fission_matrix->record_fission_site(site.r, site.wgt,
@@ -296,6 +304,11 @@ void create_fission_sites(Particle& p)
   if (n_sites_stored == 0) {
     p.fission() = false;
     return;
+  }
+  if (simulation::beta_effective_accumulator &&
+      simulation::current_batch > settings::n_inactive) {
+    simulation::beta_effective_accumulator->score_ifp_ancestry_event(
+      p.wgt_last(), p.current_work() - 1);
   }
 
   // Set nu to the number of fission sites successfully stored. If the fission

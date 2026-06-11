@@ -2,6 +2,7 @@
 
 #include "openmc/bank.h"
 #include "openmc/capi.h"
+#include "openmc/clutch_ifp.h"
 #include "openmc/container_util.h"
 #include "openmc/eigenvalue.h"
 #include "openmc/error.h"
@@ -393,6 +394,9 @@ void allocate_banks()
     // Allocate IFP bank
     if (settings::ifp_on) {
       resize_simulation_ifp_banks();
+    }
+    if (clutch_ifp_on()) {
+      resize_simulation_clutch_ifp_banks();
     }
   }
 
@@ -812,7 +816,7 @@ void initialize_history(Particle& p, int64_t index_source)
   if (simulation::current_batch > settings::n_inactive) {
     if (simulation::beta_effective_accumulator) {
       simulation::beta_effective_accumulator->record_source_birth(
-        p.r(), p.source_particle_id(), p.material());
+        p.r(), p.source_particle_id(), p.material(), p.current_work() - 1);
     }
     if (simulation::clutch_sensitivity_accumulator) {
       simulation::clutch_sensitivity_accumulator->record_source_birth(

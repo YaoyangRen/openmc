@@ -1,5 +1,7 @@
 #include "openmc/beta_effective_accumulator.h"
 
+#include "openmc/bank.h"
+#include "openmc/clutch_ifp.h"
 #include "openmc/error.h"
 #include "openmc/hdf5_interface.h"
 #include "openmc/material.h"
@@ -40,6 +42,8 @@ void BetaEffectiveAccumulator::set_adjoint_source_spatial(
   const std::unordered_map<int64_t, double>& adjoint_source_spatial)
 {
   bool has_positive = false;
+  std::unordered_map<int64_t, double> cell_sum;
+  std::unordered_map<int64_t, int> cell_count;
   for (const auto& [state, v] : adjoint_source_spatial) {
     if (state < 0 || state >= static_cast<int64_t>(n_source_states_)) {
       fatal_error("BetaEffectiveAccumulator: spatial adjoint source contains "
@@ -50,14 +54,29 @@ void BetaEffectiveAccumulator::set_adjoint_source_spatial(
                   "non-finite values.");
     }
     has_positive = has_positive || v > 0.0;
+    if (v > 0.0) {
+      const int64_t cell = state / n_materials_;
+      cell_sum[cell] += v;
+      ++cell_count[cell];
+    }
   }
   if (!has_positive) {
     fatal_error(
       "BetaEffectiveAccumulator: spatial adjoint source is all zero.");
   }
 
+  std::unordered_map<int64_t, double> cell_fallback;
+  cell_fallback.reserve(cell_sum.size());
+  for (const auto& [cell, sum] : cell_sum) {
+    const int count = cell_count[cell];
+    if (count > 0) {
+      cell_fallback[cell] = sum / static_cast<double>(count);
+    }
+  }
+
   std::lock_guard<std::mutex> lock(mutex_);
   adjoint_source_spatial_ = adjoint_source_spatial;
+  adjoint_source_cell_fallback_ = std::move(cell_fallback);
   source_ready_ = true;
 }
 
@@ -75,6 +94,10 @@ void BetaEffectiveAccumulator::begin_batch(int batch_id)
   current_batch_.batch_id = batch_id;
   current_source_states_.clear();
   current_source_counts_.clear();
+  current_clutch_ifp_source_counts_.clear();
+  current_fission_site_total_by_state_.clear();
+  current_fission_site_delayed_by_state_.clear();
+  current_clutch_ifp_response_by_state_.clear();
   current_cclutch_transfer_total_.clear();
   current_cclutch_transfer_lifetime_.clear();
   current_cclutch_transfer_emission_adjusted_lifetime_.clear();
@@ -93,14 +116,20 @@ void BetaEffectiveAccumulator::end_batch(int batch_id)
                 "batch than begin_batch.");
   }
   fold_current_cclutch_batch();
+  fold_current_clutch_ifp_batch();
   batches_.push_back(current_batch_);
   batch_active_ = false;
   current_batch_ = BatchScore {};
   current_source_states_.clear();
+  current_clutch_ifp_source_counts_.clear();
+  current_fission_site_total_by_state_.clear();
+  current_fission_site_delayed_by_state_.clear();
+  current_clutch_ifp_response_by_state_.clear();
 }
 
 void BetaEffectiveAccumulator::record_source_birth(
-  const Position& r, int64_t source_particle_id, int material_index)
+  const Position& r, int64_t source_particle_id, int material_index,
+  int64_t source_bank_index)
 {
   if (source_particle_id < 0) {
     return;
@@ -125,6 +154,23 @@ void BetaEffectiveAccumulator::record_source_birth(
     --current_source_counts_[it->second];
     it->second = state;
     ++current_source_counts_[state];
+  }
+
+  if (source_bank_index < 0 ||
+      source_bank_index >= static_cast<int64_t>(
+                             simulation::clutch_ifp_source_state_bank.size())) {
+    return;
+  }
+
+  const auto& states =
+    simulation::clutch_ifp_source_state_bank[source_bank_index];
+  if (states.size() != static_cast<size_t>(clutch_ifp_n_generation())) {
+    return;
+  }
+  const int64_t ancestor_state = states.front();
+  if (ancestor_state >= 0 &&
+      ancestor_state < static_cast<int64_t>(n_source_states_)) {
+    ++current_clutch_ifp_source_counts_[ancestor_state];
   }
 }
 
@@ -164,15 +210,32 @@ void BetaEffectiveAccumulator::score_fission_site(const Position& r,
     return;
   }
 
-  auto importance_it = adjoint_source_spatial_.find(state);
-  if (importance_it == adjoint_source_spatial_.end() ||
-      importance_it->second <= 0.0) {
-    ++current_batch_.dropped_sites;
-    ++total_dropped_sites_;
-    return;
+  current_fission_site_total_by_state_[state] += site_weight;
+  if (delayed_group > 0 && delayed_group <= N_DELAYED_GROUPS) {
+    current_fission_site_delayed_by_state_[state][delayed_group - 1] +=
+      site_weight;
   }
 
-  const double score_weight = site_weight * importance_it->second;
+  auto importance_it = adjoint_source_spatial_.find(state);
+  double importance = 0.0;
+  bool used_fallback = false;
+  if (importance_it == adjoint_source_spatial_.end() ||
+      importance_it->second <= 0.0) {
+    const int64_t cell = state / n_materials_;
+    auto fallback_it = adjoint_source_cell_fallback_.find(cell);
+    if (fallback_it == adjoint_source_cell_fallback_.end() ||
+        fallback_it->second <= 0.0) {
+      ++current_batch_.dropped_sites;
+      ++total_dropped_sites_;
+      return;
+    }
+    importance = fallback_it->second;
+    used_fallback = true;
+  } else {
+    importance = importance_it->second;
+  }
+
+  const double score_weight = site_weight * importance;
   current_batch_.denominator += score_weight;
   current_batch_.lifetime_numerator += score_weight * neutron_lifetime;
   current_batch_.emission_adjusted_lifetime_numerator +=
@@ -189,6 +252,10 @@ void BetaEffectiveAccumulator::score_fission_site(const Position& r,
 
   ++current_batch_.scored_sites;
   ++total_scored_sites_;
+  if (used_fallback) {
+    ++current_batch_.fallback_sites;
+    ++total_fallback_sites_;
+  }
 }
 
 void BetaEffectiveAccumulator::score_cclutch_fission_event(const Position& r,
@@ -261,6 +328,68 @@ void BetaEffectiveAccumulator::score_cclutch_fission_event(const Position& r,
   ++total_cclutch_scored_events_;
 }
 
+void BetaEffectiveAccumulator::score_ifp_ancestry_event(
+  double fission_weight, int64_t source_bank_index)
+{
+  if (!std::isfinite(fission_weight) || fission_weight <= 0.0) {
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!batch_active_) {
+    return;
+  }
+
+  ++current_batch_.ifp_ancestry_events;
+  ++total_ifp_ancestry_events_;
+
+  if (source_bank_index < 0 ||
+      source_bank_index >= static_cast<int64_t>(
+                             simulation::clutch_ifp_source_state_bank.size()) ||
+      source_bank_index >= static_cast<int64_t>(
+                             simulation::clutch_ifp_source_delayed_group_bank
+                               .size())) {
+    ++current_batch_.ifp_ancestry_incomplete_events;
+    ++total_ifp_ancestry_incomplete_events_;
+    return;
+  }
+
+  const auto& states =
+    simulation::clutch_ifp_source_state_bank[source_bank_index];
+  const auto& delayed_groups =
+    simulation::clutch_ifp_source_delayed_group_bank[source_bank_index];
+  const int n_generation = clutch_ifp_n_generation();
+  if (states.size() != static_cast<size_t>(n_generation) ||
+      delayed_groups.size() != static_cast<size_t>(n_generation)) {
+    ++current_batch_.ifp_ancestry_incomplete_events;
+    ++total_ifp_ancestry_incomplete_events_;
+    return;
+  }
+
+  const int64_t ancestor_state = states.front();
+  if (ancestor_state < 0 ||
+      ancestor_state >= static_cast<int64_t>(n_source_states_)) {
+    ++current_batch_.ifp_ancestry_incomplete_events;
+    ++total_ifp_ancestry_incomplete_events_;
+    return;
+  }
+
+  current_clutch_ifp_response_by_state_[ancestor_state] += fission_weight;
+
+  const int delayed_group = delayed_groups.front();
+  current_batch_.ifp_ancestry_denominator += fission_weight;
+  if (delayed_group < 0 || delayed_group > N_DELAYED_GROUPS) {
+    ++current_batch_.ifp_ancestry_invalid_delayed_group_events;
+    ++total_ifp_ancestry_invalid_delayed_group_events_;
+  } else if (delayed_group > 0) {
+    current_batch_.ifp_ancestry_numerator[delayed_group - 1] +=
+      fission_weight;
+  }
+
+  ++current_batch_.ifp_ancestry_scored_events;
+  ++total_ifp_ancestry_scored_events_;
+}
+
 void BetaEffectiveAccumulator::fold_current_cclutch_batch()
 {
   std::unordered_set<int64_t> source_states;
@@ -329,16 +458,77 @@ void BetaEffectiveAccumulator::fold_current_cclutch_batch()
   }
 }
 
+void BetaEffectiveAccumulator::fold_current_clutch_ifp_batch()
+{
+  if (current_fission_site_total_by_state_.empty() ||
+      current_clutch_ifp_response_by_state_.empty()) {
+    return;
+  }
+
+  std::unordered_map<int64_t, double> ifp_importance;
+  ifp_importance.reserve(current_clutch_ifp_response_by_state_.size());
+  for (const auto& [state, response] : current_clutch_ifp_response_by_state_) {
+    if (!std::isfinite(response) || response <= 0.0) {
+      continue;
+    }
+    auto count_it = current_clutch_ifp_source_counts_.find(state);
+    const int source_count =
+      count_it != current_clutch_ifp_source_counts_.end() ? count_it->second :
+                                                            0;
+    if (source_count > 0) {
+      ifp_importance[state] = response / static_cast<double>(source_count);
+    }
+  }
+
+  if (ifp_importance.empty()) {
+    return;
+  }
+
+  for (const auto& [state, total] : current_fission_site_total_by_state_) {
+    if (!std::isfinite(total) || total <= 0.0) {
+      continue;
+    }
+    auto importance_it = ifp_importance.find(state);
+    if (importance_it == ifp_importance.end() ||
+        importance_it->second <= 0.0) {
+      continue;
+    }
+
+    const double weight = total * importance_it->second;
+    current_batch_.clutch_ifp_denominator += weight;
+
+    auto delayed_it = current_fission_site_delayed_by_state_.find(state);
+    if (delayed_it != current_fission_site_delayed_by_state_.end()) {
+      for (int k = 0; k < N_DELAYED_GROUPS; ++k) {
+        current_batch_.clutch_ifp_numerator[k] +=
+          delayed_it->second[k] * importance_it->second;
+      }
+    }
+  }
+}
+
 BetaEffectiveAccumulator::MethodResult
 BetaEffectiveAccumulator::compute_result() const
 {
-  return compute_result(false);
+  return compute_result(MethodKind::FClutch);
 }
 
 BetaEffectiveAccumulator::MethodResult
 BetaEffectiveAccumulator::compute_cclutch_result() const
 {
-  return compute_result(true);
+  return compute_result(MethodKind::CClutch);
+}
+
+BetaEffectiveAccumulator::MethodResult
+BetaEffectiveAccumulator::compute_ifp_ancestry_result() const
+{
+  return compute_result(MethodKind::IfpAncestry);
+}
+
+BetaEffectiveAccumulator::MethodResult
+BetaEffectiveAccumulator::compute_clutch_ifp_result() const
+{
+  return compute_result(MethodKind::ClutchIfp);
 }
 
 BetaEffectiveAccumulator::GenerationTimeResult
@@ -354,7 +544,7 @@ BetaEffectiveAccumulator::compute_cclutch_generation_time_result() const
 }
 
 BetaEffectiveAccumulator::MethodResult
-BetaEffectiveAccumulator::compute_result(bool use_cclutch) const
+BetaEffectiveAccumulator::compute_result(MethodKind method) const
 {
   std::lock_guard<std::mutex> lock(mutex_);
 
@@ -367,11 +557,35 @@ BetaEffectiveAccumulator::compute_result(bool use_cclutch) const
   double sum_denominator = 0.0;
   std::array<double, N_DELAYED_GROUPS> sum_numerator {};
   for (const auto& batch : batches_) {
-    sum_denominator +=
-      use_cclutch ? batch.cclutch_denominator : batch.denominator;
+    switch (method) {
+    case MethodKind::FClutch:
+      sum_denominator += batch.denominator;
+      break;
+    case MethodKind::CClutch:
+      sum_denominator += batch.cclutch_denominator;
+      break;
+    case MethodKind::IfpAncestry:
+      sum_denominator += batch.ifp_ancestry_denominator;
+      break;
+    case MethodKind::ClutchIfp:
+      sum_denominator += batch.clutch_ifp_denominator;
+      break;
+    }
     for (int k = 0; k < N_DELAYED_GROUPS; ++k) {
-      sum_numerator[k] +=
-        use_cclutch ? batch.cclutch_numerator[k] : batch.numerator[k];
+      switch (method) {
+      case MethodKind::FClutch:
+        sum_numerator[k] += batch.numerator[k];
+        break;
+      case MethodKind::CClutch:
+        sum_numerator[k] += batch.cclutch_numerator[k];
+        break;
+      case MethodKind::IfpAncestry:
+        sum_numerator[k] += batch.ifp_ancestry_numerator[k];
+        break;
+      case MethodKind::ClutchIfp:
+        sum_numerator[k] += batch.clutch_ifp_numerator[k];
+        break;
+      }
     }
   }
 
@@ -400,10 +614,26 @@ BetaEffectiveAccumulator::compute_result(bool use_cclutch) const
       std::vector<double> z_values;
       z_values.reserve(n);
       for (const auto& batch : batches_) {
-        const double numerator =
-          use_cclutch ? batch.cclutch_numerator[k] : batch.numerator[k];
-        const double denominator =
-          use_cclutch ? batch.cclutch_denominator : batch.denominator;
+        double numerator = 0.0;
+        double denominator = 0.0;
+        switch (method) {
+        case MethodKind::FClutch:
+          numerator = batch.numerator[k];
+          denominator = batch.denominator;
+          break;
+        case MethodKind::CClutch:
+          numerator = batch.cclutch_numerator[k];
+          denominator = batch.cclutch_denominator;
+          break;
+        case MethodKind::IfpAncestry:
+          numerator = batch.ifp_ancestry_numerator[k];
+          denominator = batch.ifp_ancestry_denominator;
+          break;
+        case MethodKind::ClutchIfp:
+          numerator = batch.clutch_ifp_numerator[k];
+          denominator = batch.clutch_ifp_denominator;
+          break;
+        }
         const double z = numerator - beta * denominator;
         z_values.push_back(z);
         mean_z += z;
@@ -428,11 +658,17 @@ BetaEffectiveAccumulator::compute_result(bool use_cclutch) const
     z_values.reserve(n);
     for (const auto& batch : batches_) {
       const auto& numerator =
-        use_cclutch ? batch.cclutch_numerator : batch.numerator;
+        method == MethodKind::CClutch ? batch.cclutch_numerator :
+        method == MethodKind::IfpAncestry ? batch.ifp_ancestry_numerator :
+        method == MethodKind::ClutchIfp ? batch.clutch_ifp_numerator :
+                                            batch.numerator;
       const double numerator_sum =
         std::accumulate(numerator.begin(), numerator.end(), 0.0);
       const double denominator =
-        use_cclutch ? batch.cclutch_denominator : batch.denominator;
+        method == MethodKind::CClutch ? batch.cclutch_denominator :
+        method == MethodKind::IfpAncestry ? batch.ifp_ancestry_denominator :
+        method == MethodKind::ClutchIfp ? batch.clutch_ifp_denominator :
+                                            batch.denominator;
       const double z = numerator_sum - beta_total * denominator;
       z_values.push_back(z);
       mean_z += z;
@@ -601,6 +837,10 @@ void BetaEffectiveAccumulator::write_method_group(hid_t parent,
   write_attribute(group, "uses_transfer_function", use_cclutch ? 1 : 0);
   write_attribute(group, "uses_birth_energy_importance", 0);
   write_attribute(group, "source_state_definition", "cell_material");
+  if (!use_cclutch) {
+    write_attribute(group, "missing_importance_fallback",
+      "cell_material_mean_importance_in_same_cell");
+  }
   if (use_cclutch) {
     write_attribute(group, "formula",
       "D=mean_b sum_source I*(source_cell,source_material) "
@@ -640,6 +880,112 @@ void BetaEffectiveAccumulator::write_method_group(hid_t parent,
       use_cclutch ? batch.cclutch_numerator : batch.numerator;
     batch_numerator.insert(
       batch_numerator.end(), numerator.begin(), numerator.end());
+  }
+
+  write_dataset(group, "batch_ids", batch_ids);
+  write_dataset(group, "batch_denominator", batch_denominator);
+  write_batch_matrix(
+    group, "batch_numerator", batch_numerator, batches_.size());
+
+  H5Gclose(group);
+}
+
+void BetaEffectiveAccumulator::write_ifp_ancestry_method_group(
+  hid_t parent, const MethodResult& result) const
+{
+  hid_t group = create_group(parent, "ifp_ancestry");
+  write_attribute(group, "available", static_cast<int>(result.available));
+  write_attribute(group, "theory_reference", "Hurwitz1964_IFP_ancestry");
+  write_attribute(group, "uses_ifp", 1);
+  write_attribute(group, "ifp_n_generation", clutch_ifp_n_generation());
+  write_attribute(group, "uses_fission_event_sites", 0);
+  write_attribute(group, "uses_transfer_function", 0);
+  write_attribute(group, "uses_birth_energy_importance", 0);
+  write_attribute(group, "source_state_definition", "cell_material");
+  write_attribute(group, "formula",
+    "D=mean_b sum_fission_events w_event; "
+    "N_k=mean_b sum_fission_events w_event "
+    "1[ancestor_delayed_group(k,N_gen)]");
+
+  write_dataset(
+    group, "beta_i", std::vector<double>(result.beta_i.begin(), result.beta_i.end()));
+  write_dataset(group, "beta_total", std::vector<double> {result.beta_total});
+  write_dataset(group, "numerator",
+    std::vector<double>(result.numerators.begin(), result.numerators.end()));
+  write_dataset(group, "denominator", std::vector<double> {result.denominator});
+  write_dataset(group, "uncertainty",
+    std::vector<double>(result.uncertainty.begin(), result.uncertainty.end()));
+  write_dataset(group, "beta_total_uncertainty",
+    std::vector<double> {result.beta_total_uncertainty});
+
+  std::vector<int> batch_ids;
+  std::vector<double> batch_denominator;
+  std::vector<double> batch_numerator;
+  batch_ids.reserve(batches_.size());
+  batch_denominator.reserve(batches_.size());
+  batch_numerator.reserve(
+    batches_.size() * static_cast<size_t>(N_DELAYED_GROUPS));
+
+  for (const auto& batch : batches_) {
+    batch_ids.push_back(batch.batch_id);
+    batch_denominator.push_back(batch.ifp_ancestry_denominator);
+    batch_numerator.insert(batch_numerator.end(),
+      batch.ifp_ancestry_numerator.begin(),
+      batch.ifp_ancestry_numerator.end());
+  }
+
+  write_dataset(group, "batch_ids", batch_ids);
+  write_dataset(group, "batch_denominator", batch_denominator);
+  write_batch_matrix(
+    group, "batch_numerator", batch_numerator, batches_.size());
+
+  H5Gclose(group);
+}
+
+void BetaEffectiveAccumulator::write_clutch_ifp_method_group(
+  hid_t parent, const MethodResult& result) const
+{
+  hid_t group = create_group(parent, "clutch_ifp");
+  write_attribute(group, "available", static_cast<int>(result.available));
+  write_attribute(group, "theory_reference",
+    "CLUTCH_with_IFP_derived_cell_material_importance");
+  write_attribute(group, "uses_ifp", 1);
+  write_attribute(group, "ifp_n_generation", clutch_ifp_n_generation());
+  write_attribute(group, "uses_fission_event_sites", 1);
+  write_attribute(group, "uses_transfer_function", 0);
+  write_attribute(group, "uses_birth_energy_importance", 0);
+  write_attribute(group, "source_state_definition", "cell_material");
+  write_attribute(group, "importance_definition",
+    "I_ifp(state)=sum_descendant_fission_event_weight(state)/"
+    "source_count_with_ancestor_state(state)");
+  write_attribute(group, "formula",
+    "D=mean_b sum_sites w_site I_ifp(cell,material); "
+    "N_k=mean_b sum_delayed_k w_site I_ifp(cell,material)");
+
+  write_dataset(
+    group, "beta_i", std::vector<double>(result.beta_i.begin(), result.beta_i.end()));
+  write_dataset(group, "beta_total", std::vector<double> {result.beta_total});
+  write_dataset(group, "numerator",
+    std::vector<double>(result.numerators.begin(), result.numerators.end()));
+  write_dataset(group, "denominator", std::vector<double> {result.denominator});
+  write_dataset(group, "uncertainty",
+    std::vector<double>(result.uncertainty.begin(), result.uncertainty.end()));
+  write_dataset(group, "beta_total_uncertainty",
+    std::vector<double> {result.beta_total_uncertainty});
+
+  std::vector<int> batch_ids;
+  std::vector<double> batch_denominator;
+  std::vector<double> batch_numerator;
+  batch_ids.reserve(batches_.size());
+  batch_denominator.reserve(batches_.size());
+  batch_numerator.reserve(
+    batches_.size() * static_cast<size_t>(N_DELAYED_GROUPS));
+
+  for (const auto& batch : batches_) {
+    batch_ids.push_back(batch.batch_id);
+    batch_denominator.push_back(batch.clutch_ifp_denominator);
+    batch_numerator.insert(batch_numerator.end(),
+      batch.clutch_ifp_numerator.begin(), batch.clutch_ifp_numerator.end());
   }
 
   write_dataset(group, "batch_ids", batch_ids);
@@ -730,6 +1076,8 @@ void BetaEffectiveAccumulator::write_to_file(const std::string& filename) const
 
   auto result = compute_result();
   auto cclutch_result = compute_cclutch_result();
+  auto ifp_ancestry_result = compute_ifp_ancestry_result();
+  auto clutch_ifp_result = compute_clutch_ifp_result();
   if (!result.available) {
     fatal_error("F-CLUTCH spatial beta_eff denominator is zero. Verify the "
                 "spatial adjoint source and active fission-site scoring.");
@@ -748,10 +1096,15 @@ void BetaEffectiveAccumulator::write_to_file(const std::string& filename) const
             std::to_string(total_cclutch_missing_source_events_) +
             " fission response events without a recorded source cell.");
   }
+  if (total_ifp_ancestry_incomplete_events_ > 0) {
+    warning("IFP-ancestry beta_eff ignored " +
+            std::to_string(total_ifp_ancestry_incomplete_events_) +
+            " active fission events without a complete ancestry chain.");
+  }
 
   hid_t file_id = file_open(filename, 'w');
   write_attribute(file_id, "filetype", "beta_effective");
-  write_attribute(file_id, "version", "4.0");
+  write_attribute(file_id, "version", "4.1");
   write_attribute(
     file_id, "description", "Effective delayed neutron fraction beta_eff");
 
@@ -766,6 +1119,12 @@ void BetaEffectiveAccumulator::write_to_file(const std::string& filename) const
   write_attribute(metadata, "theory_reference", "Qiu2016_F_CLUTCH_Eq31_Eq43");
   write_attribute(metadata, "uses_fission_event_sites", 1);
   write_attribute(metadata, "has_cclutch_method", 1);
+  write_attribute(metadata, "has_ifp_ancestry_method", 1);
+  write_attribute(metadata, "has_clutch_ifp_method", 1);
+  write_attribute(metadata, "ifp_ancestry_n_generation",
+    clutch_ifp_n_generation());
+  write_attribute(metadata, "fclutch_missing_importance_fallback",
+    "cell_material_mean_importance_in_same_cell");
   write_attribute(metadata, "uses_birth_energy_importance", 0);
   write_attribute(metadata, "source_state_definition", "cell_material");
   write_attribute(metadata, "state_indexing",
@@ -799,6 +1158,7 @@ void BetaEffectiveAccumulator::write_to_file(const std::string& filename) const
   write_attribute(diagnostics, "total_fission_sites", total_fission_sites_);
   write_attribute(diagnostics, "total_scored_sites", total_scored_sites_);
   write_attribute(diagnostics, "total_dropped_sites", total_dropped_sites_);
+  write_attribute(diagnostics, "total_fallback_sites", total_fallback_sites_);
   write_attribute(diagnostics, "total_invalid_delayed_group_sites",
     total_invalid_delayed_group_sites_);
   write_attribute(diagnostics, "total_invalid_source_states",
@@ -812,6 +1172,15 @@ void BetaEffectiveAccumulator::write_to_file(const std::string& filename) const
     total_cclutch_dropped_events_);
   write_attribute(diagnostics, "total_cclutch_missing_source_events",
     total_cclutch_missing_source_events_);
+  write_attribute(diagnostics, "total_ifp_ancestry_events",
+    total_ifp_ancestry_events_);
+  write_attribute(diagnostics, "total_ifp_ancestry_scored_events",
+    total_ifp_ancestry_scored_events_);
+  write_attribute(diagnostics, "total_ifp_ancestry_incomplete_events",
+    total_ifp_ancestry_incomplete_events_);
+  write_attribute(diagnostics,
+    "total_ifp_ancestry_invalid_delayed_group_events",
+    total_ifp_ancestry_invalid_delayed_group_events_);
   write_attribute(diagnostics, "active_batches_scored",
     static_cast<int>(batches_.size()));
   write_dataset(diagnostics, "numerator",
@@ -823,51 +1192,44 @@ void BetaEffectiveAccumulator::write_to_file(const std::string& filename) const
   hid_t method_group = create_group(file_id, "method");
   write_method_group(method_group, "fclutch_cell_material", result, false);
   write_method_group(method_group, "cclutch", cclutch_result, true);
+  write_clutch_ifp_method_group(method_group, clutch_ifp_result);
+  write_ifp_ancestry_method_group(method_group, ifp_ancestry_result);
   H5Gclose(method_group);
   file_close(file_id);
 
-  const double mcnp_beta[6] = {
-    0.00016, 0.00104, 0.00097, 0.00253, 0.00107, 0.00042};
-  const double mcnp_total = 0.00621;
-
   std::cout << "\n  beta_eff results (cell-material I*):" << std::endl;
-  std::cout << "  " << std::string(112, '-') << std::endl;
-  std::cout << "    group      F-CLUTCH      unc_F        C-CLUTCH      unc_C        MCNP ref     F bias(%)   C bias(%)"
+  std::cout << "  " << std::string(136, '-') << std::endl;
+  std::cout << "    group      F-CLUTCH      unc_F        C-CLUTCH      unc_C        CLUTCH-IFP    unc_CI       IFP-ancestry  unc_IFP"
             << std::endl;
-  std::cout << "  " << std::string(112, '-') << std::endl;
+  std::cout << "  " << std::string(136, '-') << std::endl;
   for (int k = 0; k < N_DELAYED_GROUPS; ++k) {
     std::cout << "      " << std::setw(2) << (k + 1) << "      "
               << std::scientific << std::setprecision(5) << result.beta_i[k]
               << "    " << result.uncertainty[k] << "    "
               << cclutch_result.beta_i[k] << "    "
-              << cclutch_result.uncertainty[k];
-    if (k < 6) {
-      const double f_bias =
-        (result.beta_i[k] - mcnp_beta[k]) / mcnp_beta[k] * 100.0;
-      const double c_bias =
-        (cclutch_result.beta_i[k] - mcnp_beta[k]) / mcnp_beta[k] * 100.0;
-      std::cout << "    " << mcnp_beta[k] << "    " << std::fixed
-                << std::setprecision(2) << std::setw(8) << f_bias << "    "
-                << std::setw(8) << c_bias;
-    }
-    std::cout << std::endl;
+              << cclutch_result.uncertainty[k] << "    "
+              << clutch_ifp_result.beta_i[k] << "    "
+              << clutch_ifp_result.uncertainty[k] << "    "
+              << ifp_ancestry_result.beta_i[k] << "    "
+              << ifp_ancestry_result.uncertainty[k] << std::endl;
   }
-  const double f_total_bias =
-    (result.beta_total - mcnp_total) / mcnp_total * 100.0;
-  const double c_total_bias =
-    (cclutch_result.beta_total - mcnp_total) / mcnp_total * 100.0;
-  std::cout << "  " << std::string(112, '-') << std::endl;
+  std::cout << "  " << std::string(136, '-') << std::endl;
   std::cout << "    total   " << std::scientific << std::setprecision(5)
             << result.beta_total << "    " << result.beta_total_uncertainty
             << "    " << cclutch_result.beta_total << "    "
-            << cclutch_result.beta_total_uncertainty << "    " << mcnp_total
-            << "    " << std::fixed << std::setprecision(2) << std::setw(8)
-            << f_total_bias << "    " << std::setw(8) << c_total_bias
+            << cclutch_result.beta_total_uncertainty << "    "
+            << clutch_ifp_result.beta_total << "    "
+            << clutch_ifp_result.beta_total_uncertainty << "    "
+            << ifp_ancestry_result.beta_total << "    "
+            << ifp_ancestry_result.beta_total_uncertainty
             << std::endl;
-  std::cout << "  " << std::string(112, '-') << std::endl;
+  std::cout << "  " << std::string(136, '-') << std::endl;
   std::cout << "  (*) Primary method: F-CLUTCH fission-site scoring with "
-               "material-resolved I*(cell,material); C-CLUTCH folds active "
-               "transfer functions with the same source-state importance."
+               "material-resolved I*(cell,material) and same-cell missing-I "
+               "fallback; C-CLUTCH folds active transfer functions with the "
+               "same source-state importance; CLUTCH-IFP replaces I* by an "
+               "IFP-derived source-state importance; IFP-ancestry is a direct "
+               "N-generation diagnostic estimator."
             << std::endl;
 }
 

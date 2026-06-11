@@ -453,6 +453,7 @@ list(APPEND libopenmc_SOURCES
   src/flux_mesh.cpp
   src/adjoint_flux.cpp
   src/beta_effective_accumulator.cpp
+  src/clutch_ifp.cpp
   src/clutch_sensitivity_accumulator.cpp
   src/material_nuclear_data.cpp
 )

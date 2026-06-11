@@ -8,6 +8,7 @@
 #include "openmc/array.h"
 #include "openmc/bank.h"
 #include "openmc/capi.h"
+#include "openmc/clutch_ifp.h"
 #include "openmc/constants.h"
 #include "openmc/error.h"
 #include "openmc/hdf5_interface.h"
@@ -160,9 +161,15 @@ void synchronize_bank()
   // Temporary banks for IFP
   vector<vector<int>> temp_delayed_groups;
   vector<vector<double>> temp_lifetimes;
+  vector<vector<int64_t>> temp_clutch_ifp_states;
+  vector<vector<int>> temp_clutch_ifp_delayed_groups;
   if (settings::ifp_on) {
     resize_ifp_data(
       temp_delayed_groups, temp_lifetimes, 3 * simulation::work_per_rank);
+  }
+  if (clutch_ifp_on()) {
+    temp_clutch_ifp_states.resize(3 * simulation::work_per_rank);
+    temp_clutch_ifp_delayed_groups.resize(3 * simulation::work_per_rank);
   }
 
   for (int64_t i = 0; i < simulation::fission_bank.size(); i++) {
@@ -179,6 +186,11 @@ void synchronize_bank()
           copy_ifp_data_from_fission_banks(
             i, temp_delayed_groups[index_temp], temp_lifetimes[index_temp]);
         }
+        if (clutch_ifp_on()) {
+          copy_clutch_ifp_data_from_fission_banks(i,
+            temp_clutch_ifp_states[index_temp],
+            temp_clutch_ifp_delayed_groups[index_temp]);
+        }
         ++index_temp;
       }
     }
@@ -189,6 +201,11 @@ void synchronize_bank()
       if (settings::ifp_on) {
         copy_ifp_data_from_fission_banks(
           i, temp_delayed_groups[index_temp], temp_lifetimes[index_temp]);
+      }
+      if (clutch_ifp_on()) {
+        copy_clutch_ifp_data_from_fission_banks(i,
+          temp_clutch_ifp_states[index_temp],
+          temp_clutch_ifp_delayed_groups[index_temp]);
       }
       ++index_temp;
     }
@@ -240,6 +257,11 @@ void synchronize_bank()
           copy_ifp_data_from_fission_banks(i_bank,
             temp_delayed_groups[index_temp], temp_lifetimes[index_temp]);
         }
+        if (clutch_ifp_on()) {
+          copy_clutch_ifp_data_from_fission_banks(i_bank,
+            temp_clutch_ifp_states[index_temp],
+            temp_clutch_ifp_delayed_groups[index_temp]);
+        }
         ++index_temp;
       }
     }
@@ -261,6 +283,11 @@ void synchronize_bank()
     broadcast_ifp_n_generation(
       ifp_n_generation, temp_delayed_groups, temp_lifetimes);
   }
+  int clutch_ifp_n_generation_value;
+  if (clutch_ifp_on()) {
+    broadcast_clutch_ifp_n_generation(clutch_ifp_n_generation_value,
+      temp_clutch_ifp_states, temp_clutch_ifp_delayed_groups);
+  }
 
   int64_t index_local = 0;
   vector<MPI_Request> requests;
@@ -268,6 +295,8 @@ void synchronize_bank()
   // IFP send buffers
   vector<int> send_delayed_groups;
   vector<double> send_lifetimes;
+  vector<int64_t> send_clutch_ifp_states;
+  vector<int> send_clutch_ifp_delayed_groups;
 
   if (start < settings::n_particles) {
     // Determine the index of the processor which has the first part of the
@@ -279,6 +308,12 @@ void synchronize_bank()
     if (settings::ifp_on && mpi::n_procs > 1) {
       resize_ifp_data(send_delayed_groups, send_lifetimes,
         ifp_n_generation * 3 * simulation::work_per_rank);
+    }
+    if (clutch_ifp_on() && mpi::n_procs > 1) {
+      send_clutch_ifp_states.resize(
+        clutch_ifp_n_generation_value * 3 * simulation::work_per_rank);
+      send_clutch_ifp_delayed_groups.resize(
+        clutch_ifp_n_generation_value * 3 * simulation::work_per_rank);
     }
 
     while (start < finish) {
@@ -299,6 +334,12 @@ void synchronize_bank()
           send_ifp_info(index_local, n, ifp_n_generation, neighbor, requests,
             temp_delayed_groups, send_delayed_groups, temp_lifetimes,
             send_lifetimes);
+        }
+        if (clutch_ifp_on()) {
+          send_clutch_ifp_info(index_local, n, clutch_ifp_n_generation_value,
+            neighbor, requests, temp_clutch_ifp_states,
+            send_clutch_ifp_states, temp_clutch_ifp_delayed_groups,
+            send_clutch_ifp_delayed_groups);
         }
       }
 
@@ -324,7 +365,10 @@ void synchronize_bank()
   // IFP receive buffers
   vector<int> recv_delayed_groups;
   vector<double> recv_lifetimes;
+  vector<int64_t> recv_clutch_ifp_states;
+  vector<int> recv_clutch_ifp_delayed_groups;
   vector<DeserializationInfo> deserialization_info;
+  vector<DeserializationInfo> clutch_ifp_deserialization_info;
 
   // Determine what process has the source sites that will need to be stored at
   // the beginning of this processor's source bank.
@@ -341,6 +385,12 @@ void synchronize_bank()
   if (settings::ifp_on && mpi::n_procs > 1) {
     resize_ifp_data(recv_delayed_groups, recv_lifetimes,
       ifp_n_generation * simulation::work_per_rank);
+  }
+  if (clutch_ifp_on() && mpi::n_procs > 1) {
+    recv_clutch_ifp_states.resize(
+      clutch_ifp_n_generation_value * simulation::work_per_rank);
+    recv_clutch_ifp_delayed_groups.resize(
+      clutch_ifp_n_generation_value * simulation::work_per_rank);
   }
 
   while (start < simulation::work_index[mpi::rank + 1]) {
@@ -367,6 +417,11 @@ void synchronize_bank()
         receive_ifp_data(index_local, n, ifp_n_generation, neighbor, requests,
           recv_delayed_groups, recv_lifetimes, deserialization_info);
       }
+      if (clutch_ifp_on()) {
+        receive_clutch_ifp_data(index_local, n, clutch_ifp_n_generation_value,
+          neighbor, requests, recv_clutch_ifp_states,
+          recv_clutch_ifp_delayed_groups, clutch_ifp_deserialization_info);
+      }
 
     } else {
       // If the source sites are on this processor, we can simply copy them
@@ -379,6 +434,11 @@ void synchronize_bank()
       if (settings::ifp_on) {
         copy_partial_ifp_data_to_source_banks(
           index_temp, n, index_local, temp_delayed_groups, temp_lifetimes);
+      }
+      if (clutch_ifp_on()) {
+        copy_partial_clutch_ifp_data_to_source_banks(index_temp, n,
+          index_local, temp_clutch_ifp_states,
+          temp_clutch_ifp_delayed_groups);
       }
     }
 
@@ -399,12 +459,21 @@ void synchronize_bank()
     deserialize_ifp_info(ifp_n_generation, deserialization_info,
       recv_delayed_groups, recv_lifetimes);
   }
+  if (clutch_ifp_on()) {
+    deserialize_clutch_ifp_info(clutch_ifp_n_generation_value,
+      clutch_ifp_deserialization_info, recv_clutch_ifp_states,
+      recv_clutch_ifp_delayed_groups);
+  }
 
 #else
   std::copy(temp_sites.data(), temp_sites.data() + settings::n_particles,
     simulation::source_bank.begin());
   if (settings::ifp_on) {
     copy_complete_ifp_data_to_source_banks(temp_delayed_groups, temp_lifetimes);
+  }
+  if (clutch_ifp_on()) {
+    copy_complete_clutch_ifp_data_to_source_banks(temp_clutch_ifp_states,
+      temp_clutch_ifp_delayed_groups);
   }
 #endif
 
