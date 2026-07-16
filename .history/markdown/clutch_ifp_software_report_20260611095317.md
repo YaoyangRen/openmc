@@ -1,4 +1,4 @@
-# CLUTCH beta_eff 软件报告
+# CLUTCH beta_eff 改造软件报告
 
 日期：2026-06-11
 
@@ -153,7 +153,7 @@ SharedMeshGrid
 - generation time denominator。
 - sensitivity 中 collapsed cell importance。
 
-1. FissionMatrix
+2. FissionMatrix
 
 当 `settings::clutch_on` 开启时创建：
 
@@ -163,7 +163,7 @@ FissionMatrix(grid, batches, kinetics_energy_edges, score_start_batch)
 
 虽然构造函数仍保留 `kinetics_energy_edges` 参数，但当前 `beta_eff` 主流程不使用出生能量维度。
 
-1. BetaEffectiveAccumulator
+3. BetaEffectiveAccumulator
 
 当 `settings::beta_effective_on` 开启时创建：
 
@@ -171,7 +171,7 @@ FissionMatrix(grid, batches, kinetics_energy_edges, score_start_batch)
 BetaEffectiveAccumulator(grid)
 ```
 
-1. CLUTCH-IFP ancestry banks
+4. CLUTCH-IFP ancestry banks
 
 当满足：
 
@@ -229,7 +229,7 @@ current_cclutch_transfer_*
 FissionMatrix::record_source_birth(r, source_particle_id, material, weight)
 ```
 
-1. active batch 中记录 beta_eff active source state：
+2. active batch 中记录 beta_eff active source state：
 
 ```text
 BetaEffectiveAccumulator::record_source_birth(
@@ -507,15 +507,15 @@ inactive 结束时：
 F_norm(parent, child) = fission_weight(parent, child) / source_count(parent)
 ```
 
-1. 求解伴随源重要性：
+3. 求解伴随源重要性：
 
 ```text
 I*(parent) = (1/k) * sum_child F_norm(parent, child) * I*(child)
 ```
 
-1. 得到 sparse `I*(cell,material)`。
-2. 将 `I*` 传给 `BetaEffectiveAccumulator`。
-3. 写出 `fission_matrix.h5`。
+4. 得到 sparse `I*(cell,material)`。
+5. 将 `I*` 传给 `BetaEffectiveAccumulator`。
+6. 写出 `fission_matrix.h5`。
 
 ## 7. active batches 中的 beta_eff 方法汇总
 
@@ -741,15 +741,15 @@ total_dropped_sites
 
 若 `total_fallback_sites` 很大，说明 fission-matrix `I*(cell,material)` 覆盖仍不足。
 
-1. F-CLUTCH 与 C-CLUTCH 差异
+2. F-CLUTCH 与 C-CLUTCH 差异
 
 若 C-CLUTCH 稳定接近参考值，而 F-CLUTCH 仍偏低，说明 fission-site analog 计分和 missing-I coverage 是主要误差来源。
 
-1. CLUTCH-IFP 与 F-CLUTCH 差异
+3. CLUTCH-IFP 与 F-CLUTCH 差异
 
 若 CLUTCH-IFP 接近 OpenMC IFP 或 C-CLUTCH，而 F-CLUTCH 偏离，说明 fission-matrix `I*` 可能是主要问题。
 
-1. IFP-ancestry uncertainty
+4. IFP-ancestry uncertainty
 
 若 `unc_IFP` 较大，说明 direct analog ancestry 的 delayed source 样本仍不足。它更适合作为趋势诊断，不适合作为低方差主结果。
 
